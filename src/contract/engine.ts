@@ -13,6 +13,8 @@ import type {
   StoreOptions,
   StreamDefinition,
   ValueOptions,
+  StoreIdentity,
+  ValueRevision,
 } from "./types.ts";
 import {
   hasMutationOptionFields,
@@ -25,7 +27,8 @@ import {
 } from "./types.ts";
 import { validateContract } from "./validation.ts";
 import { isObject } from "../utils.ts";
-import { storeKey } from "./identity.ts";
+import { nextValueRevision, storeKey } from "./identity.ts";
+import { retireObservation } from "./observation-state.ts";
 import { Fault, __registerFaultChannel, __unregisterFaultChannel } from "../fault.ts";
 import type { Unsubscribe } from "../fault.ts";
 import { __internal as reactiveInternal, computed, signal } from "../reactive.ts";
@@ -35,18 +38,39 @@ import {
   registerProjection,
   reportGraphContinuationError,
   runtimeForStore,
+  rawStreamMemberByFunction,
+  queryBindingByHandle,
+  streamBindingByHandle,
+  assertBindingContextOpen,
+  beginBindingAddress,
+  endBindingAddress,
+  bindingAddress,
 } from "./registry.ts";
-import type { GraphRuntime, GraphRuntimeState, RealmStoreState, StoreRuntime } from "./runtime.ts";
+import type {
+  BindingContextRuntime,
+  GraphRuntime,
+  GraphRuntimeState,
+  RealmStoreState,
+  StoreRuntime,
+  StoreBindingRuntime,
+} from "./runtime.ts";
 import { collectDeclaredStores, finiteBound, graphIdleMs } from "./runtime-validation.ts";
-import { assertGraphOpen, reportContinuationError } from "./faults.ts";
-import { collectExpired, touch } from "./collection.ts";
+import { AbortError, assertGraphOpen, reportContinuationError } from "./faults.ts";
+import {
+  armCollectionTimer,
+  collectExpired,
+  endStream,
+  touch,
+  updateCollectionCandidate,
+} from "./collection.ts";
 import { getOrCreateStore } from "./store.ts";
 import { makeQueryStore } from "./query.ts";
 import { runMutation } from "./mutation.ts";
 import { streamMember } from "./stream.ts";
-import { armStoreTimer } from "./query-request.ts";
+import { armStoreTimer, finishRequest } from "./query-request.ts";
 import { hasQueryOptionsBrand } from "./query-options.ts";
-import { issue } from "./store-state.ts";
+import { configureKeyedValue, issue, nextGeneration } from "./store-state.ts";
+import { boundAddressOccupied } from "./binding-address.ts";
 import { writeAllStatuses } from "./status.ts";
 import { resetGraph } from "./reset.ts";
 
@@ -59,20 +83,297 @@ export const DEFAULT_MAX_PREDICTIONS = 64;
 function realmStores(graph: Graph): readonly RealmStoreState[] {
   const state = (graph as GraphRuntime<any>).__runtime;
   assertGraphOpen(state);
-  return [...state.stores.values()].map((runtime) => ({
-    key: runtime.key,
-    snapshot: runtime.snapshot,
-    hasCommitted: runtime.hasCommitted,
-    generation: runtime.generation,
-    ...(runtime.lastLandingAt === undefined ? {} : { lastLandingAt: runtime.lastLandingAt }),
-    committedValue: () => reactiveInternal.signalValue(runtime.committed),
-  }));
+  return [...state.stores.values()]
+    .filter((runtime) => !runtime.disposed)
+    .map((runtime) => {
+      const incarnation = runtime.incarnation;
+      const revision = runtime.valueRevision;
+      const generation = runtime.generation;
+      const epoch = state.resetEpoch;
+      const binding = runtime.binding;
+      const session = runtime.stream;
+      const ended = session?.ended;
+      const streamToken = runtime.streamToken;
+      const retirement = runtime.boundRetirement;
+      const snapshot = runtime.snapshot;
+      const equals = runtime.equals;
+      const available = runtime.baseAvailable;
+      const accepted = runtime.hasAcceptedLanding;
+      const eligible = runtime.transferEligible;
+      return {
+        bound: runtime.binding !== undefined,
+        binding,
+        identity: runtime.identity,
+        valueRevision: revision,
+        key: runtime.key,
+        snapshot: runtime.snapshot,
+        baseAvailable: runtime.baseAvailable,
+        hasAcceptedLanding: runtime.hasAcceptedLanding,
+        transferEligible: runtime.transferEligible,
+        current: () =>
+          !state.disposed &&
+          !runtime.disposed &&
+          !runtime.transitioning &&
+          binding?.context.disposed !== true &&
+          runtime.stream === session &&
+          runtime.stream?.ended === ended &&
+          runtime.streamToken === streamToken &&
+          runtime.boundRetirement === retirement &&
+          retirement === undefined &&
+          runtime.snapshot === snapshot &&
+          runtime.equals === equals &&
+          runtime.baseAvailable === available &&
+          runtime.hasAcceptedLanding === accepted &&
+          runtime.transferEligible === eligible &&
+          runtime.incarnation === incarnation &&
+          runtime.valueRevision === revision &&
+          runtime.generation === generation &&
+          state.resetEpoch === epoch,
+        generation: runtime.generation,
+        ...(runtime.lastLandingAt === undefined ? {} : { lastLandingAt: runtime.lastLandingAt }),
+        committedValue: () => reactiveInternal.signalValue(runtime.committed),
+      };
+    });
 }
 
 function realmNamespace(graph: Graph): string {
   const state = (graph as GraphRuntime<any>).__runtime;
   assertGraphOpen(state);
   return state.namespace;
+}
+
+function realmBinding(graph: Graph, handle: object): StoreBindingRuntime {
+  const state = graphRuntimeByGraph.get(graph);
+  if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
+  assertGraphOpen(state);
+  const binding = queryBindingByHandle.get(handle) ?? streamBindingByHandle.get(handle);
+  if (binding === undefined || binding.context.state !== state)
+    throw new TypeError("Transfer requires a genuine binding on this exact graph");
+  assertBindingContextOpen(binding.context);
+  return binding;
+}
+
+/** Native graph/reset authority, including captures with no selected entries. */
+function realmCurrent(graph: Graph): () => boolean {
+  const state = graphRuntimeByGraph.get(graph);
+  if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
+  assertGraphOpen(state);
+  const epoch = state.resetEpoch;
+  return () => !state.disposed && state.resetEpoch === epoch;
+}
+
+function realmPreparationCurrent(graph: Graph): () => boolean {
+  const current = realmCurrent(graph);
+  const state = graphRuntimeByGraph.get(graph)!;
+  const stores = [...state.stores.values()].map((runtime) => {
+    const incarnation = runtime.incarnation;
+    const revision = runtime.valueRevision;
+    const generation = runtime.generation;
+    const stream = runtime.stream;
+    const ended = stream?.ended;
+    const transitioning = runtime.transitioning;
+    const disposed = runtime.disposed;
+    const retirement = runtime.boundRetirement;
+    const snapshot = runtime.snapshot;
+    const equals = runtime.equals;
+    const available = runtime.baseAvailable;
+    const eligible = runtime.transferEligible;
+    const accepted = runtime.hasAcceptedLanding;
+    const landing = runtime.lastLandingAt;
+    return () =>
+      runtime.incarnation === incarnation &&
+      runtime.valueRevision === revision &&
+      runtime.generation === generation &&
+      runtime.stream === stream &&
+      stream?.ended === ended &&
+      runtime.transitioning === transitioning &&
+      runtime.disposed === disposed &&
+      runtime.boundRetirement === retirement &&
+      runtime.snapshot === snapshot &&
+      runtime.equals === equals &&
+      runtime.baseAvailable === available &&
+      runtime.transferEligible === eligible &&
+      runtime.hasAcceptedLanding === accepted &&
+      runtime.lastLandingAt === landing;
+  });
+  const count = state.stores.size;
+  return () => current() && state.stores.size === count && stores.every((current) => current());
+}
+
+/** Captures a destination before decoding can invoke authored accessors. */
+function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingRuntime) {
+  const state = graphRuntimeByGraph.get(graph);
+  if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
+  assertGraphOpen(state);
+  if (binding !== undefined) assertBindingContextOpen(binding.context);
+  const lookup = (): StoreRuntime<unknown> | undefined =>
+    binding === undefined ? state.stores.get(key) : binding.stores.get(key);
+  const previous = lookup();
+  const incarnation = previous?.incarnation;
+  const revision = previous?.valueRevision;
+  const generation = previous?.generation;
+  const session = previous?.stream;
+  const ended = session?.ended;
+  const request = previous?.activeRequest;
+  const requests = previous?.requests.size;
+  const snapshot = previous?.snapshot;
+  const equals = previous?.equals;
+  const retirement = previous?.boundRetirement;
+  const transitioning = previous?.transitioning;
+  const epoch = state.resetEpoch;
+  const address = binding === undefined ? undefined : bindingAddress(binding, key);
+  const guard = address?.guard;
+  const current = (): boolean =>
+    !state.disposed &&
+    binding?.context.disposed !== true &&
+    state.resetEpoch === epoch &&
+    lookup() === previous &&
+    (address === undefined || address.guard === guard) &&
+    (previous === undefined ||
+      (!previous.disposed &&
+        previous.transitioning === transitioning &&
+        previous.incarnation === incarnation &&
+        previous.valueRevision === revision &&
+        previous.generation === generation &&
+        previous.stream === session &&
+        previous.stream?.ended === ended &&
+        previous.activeRequest === request &&
+        previous.requests.size === requests &&
+        previous.snapshot === snapshot &&
+        previous.equals === equals &&
+        previous.boundRetirement === retirement));
+  return {
+    current,
+    validate(foreignGeneration: number): void {
+      if (binding?.kind === "stream" && boundAddressOccupied(binding, key)) return;
+      if (!current()) throw new Fault("snapshot", [key]);
+      const baseRevision =
+        previous?.valueRevision ??
+        ((binding === undefined && state.declaredStores.has(key) ? 1 : 0) as ValueRevision);
+      nextValueRevision(baseRevision);
+      nextGeneration(previous?.generation ?? 0, foreignGeneration);
+    },
+    adopt(
+      value: unknown,
+      foreignGeneration: number,
+      landingAt: number | undefined,
+    ): { readonly identity: StoreIdentity; readonly valueRevision: ValueRevision } | undefined {
+      if (!current()) {
+        if (binding?.kind === "stream") return undefined;
+        throw new Fault("snapshot", [key]);
+      }
+      if (binding?.kind === "stream" && boundAddressOccupied(binding, key)) return undefined;
+      const operation = beginBindingAddress(binding, key);
+      try {
+        const definition = binding === undefined ? state.declaredStores.get(key) : undefined;
+        const runtime = getOrCreateStore(state, storeKey(key), definition, binding, false);
+        if (
+          state.disposed ||
+          state.resetEpoch !== epoch ||
+          binding?.context.disposed === true ||
+          (previous !== undefined
+            ? runtime !== previous ||
+              runtime.incarnation !== incarnation ||
+              runtime.valueRevision !== revision ||
+              runtime.generation !== generation
+            : definition === undefined
+              ? runtime.incarnation !== undefined ||
+                runtime.valueRevision !== 0 ||
+                runtime.generation !== 0 ||
+                runtime.baseAvailable
+              : runtime.generation !== 0 || runtime.valueRevision !== 1 || !runtime.declared)
+        )
+          throw new Fault("snapshot", [key]);
+        const before = runtime.valueRevision;
+        const beforeIncarnation = runtime.incarnation;
+        const beforeGeneration = runtime.generation;
+        const beforeSession = runtime.stream;
+        const beforeGuard = address?.guard;
+        const owns = (expectedGeneration = beforeGeneration): boolean =>
+          !state.disposed &&
+          !runtime.disposed &&
+          binding?.context.disposed !== true &&
+          state.resetEpoch === epoch &&
+          lookup() === runtime &&
+          runtime.incarnation === beforeIncarnation &&
+          runtime.valueRevision === before &&
+          runtime.generation === expectedGeneration &&
+          runtime.stream === beforeSession &&
+          runtime.boundRetirement === undefined &&
+          (address === undefined ||
+            (address.guard === beforeGuard &&
+              address.operations.size === 1 &&
+              address.operations.has(operation!)));
+        if (binding !== undefined) {
+          const policy = binding.kind === "query" ? binding.execution : binding.definition;
+          configureKeyedValue(
+            runtime,
+            policy,
+            binding.kind === "query" ? binding.value : undefined,
+            undefined,
+            false,
+            false,
+          );
+        }
+        if (!owns()) throw new Fault("snapshot", [key]);
+        const effectiveSnapshot = runtime.snapshot;
+        const effectiveEquals = runtime.equals;
+        if (
+          binding?.kind === "stream" &&
+          (runtime.baseAvailable ||
+            runtime.requests.size > 0 ||
+            (runtime.stream !== undefined && !runtime.stream.ended))
+        )
+          return undefined;
+        const next = nextValueRevision(before);
+        const adoptedGeneration = nextGeneration(runtime.generation, foreignGeneration);
+        reactiveInternal.assertWritesAllowed(runtime.committed);
+        runtime.generation = adoptedGeneration;
+        let stamp:
+          | { readonly identity: StoreIdentity; readonly valueRevision: ValueRevision }
+          | undefined;
+        const landed = reactiveInternal.guardedWrite(
+          runtime.committed,
+          value,
+          () =>
+            owns(adoptedGeneration) &&
+            runtime.snapshot === effectiveSnapshot &&
+            runtime.equals === effectiveEquals,
+          () => {
+            if (runtime.incarnation === undefined) runtime.incarnation = {};
+            runtime.valueRevision = next;
+            runtime.baseAvailable = true;
+            runtime.hasAcceptedLanding = landingAt !== undefined;
+            runtime.lastLandingAt = landingAt;
+            runtime.transferEligible = true;
+            runtime.transitioning = false;
+            runtime.dropped = false;
+            runtime.failing = false;
+            runtime.invalidated = false;
+            runtime.importedBaseline =
+              binding?.kind === "stream"
+                ? {
+                    incarnation: runtime.incarnation,
+                    resetEpoch: epoch,
+                    generation: adoptedGeneration,
+                    valueRevision: next,
+                  }
+                : undefined;
+            stamp = Object.freeze({ identity: runtime.identity, valueRevision: next });
+            runtime.errorCell.set(undefined);
+            runtime.presence.set(true);
+          },
+        );
+        if (!landed || stamp === undefined) throw new Fault("snapshot", [key]);
+        touch(runtime);
+        writeAllStatuses(runtime);
+        armStoreTimer(runtime);
+        return stamp;
+      } finally {
+        endBindingAddress(binding, key, operation);
+      }
+    },
+  };
 }
 
 function adoptRealmEntry(
@@ -84,18 +385,42 @@ function adoptRealmEntry(
 ): void {
   const state = (graph as GraphRuntime<any>).__runtime;
   assertGraphOpen(state);
+  nextGeneration(0, foreignGeneration);
   const definition = state.declaredStores.get(key) as StoreDefinition<unknown> | undefined;
-  const runtime = getOrCreateStore(state, storeKey(key), definition);
-  runtime.generation = Math.max(runtime.generation, foreignGeneration);
-  issue(runtime);
-  runtime.lastLandingAt = landingAt;
-  runtime.failing = false;
-  runtime.invalidated = false;
-  runtime.errorCell.set(undefined);
-  runtime.committed.set(value);
-  runtime.hasCommitted = true;
-  runtime.presence.set(true);
-  runtime.dropped = false;
+  const runtime = getOrCreateStore(state, storeKey(key), definition, undefined, false);
+  const revision = nextValueRevision(runtime.valueRevision);
+  reactiveInternal.assertWritesAllowed(runtime.committed);
+  issue(runtime, foreignGeneration);
+  const generation = runtime.generation;
+  const incarnation = runtime.incarnation;
+  const epoch = state.resetEpoch;
+  const previousRevision = runtime.valueRevision;
+  const landed = reactiveInternal.guardedWrite(
+    runtime.committed,
+    value,
+    () =>
+      !state.disposed &&
+      !runtime.disposed &&
+      runtime.incarnation === incarnation &&
+      state.resetEpoch === epoch &&
+      runtime.valueRevision === previousRevision &&
+      runtime.generation === generation,
+    () => {
+      if (runtime.incarnation === undefined) runtime.incarnation = {};
+      runtime.valueRevision = revision;
+      runtime.lastLandingAt = landingAt;
+      runtime.failing = false;
+      runtime.invalidated = false;
+      runtime.baseAvailable = true;
+      runtime.hasAcceptedLanding = true;
+      runtime.transferEligible = true;
+      runtime.transitioning = false;
+      runtime.errorCell.set(undefined);
+      runtime.presence.set(true);
+      runtime.dropped = false;
+    },
+  );
+  if (!landed) throw new Fault("snapshot", [key]);
   touch(runtime);
   writeAllStatuses(runtime);
   armStoreTimer(runtime);
@@ -107,7 +432,8 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
     if (isStoreDefinition(value)) {
       api[property] = () => getOrCreateStore(state, storeKey(value.name), value).store;
     } else if (isOperationDefinition(value)) {
-      if (value.kind === "query")
+      if (value.kind === "query") {
+        state.queryDefinitions.add(value);
         api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) => {
           const [input, options] = args;
           const call = normalizeQueryCall(input, options, args.length > 1);
@@ -118,7 +444,8 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
             call.options,
           );
         };
-      else if (value.kind === "mutation")
+      } else if (value.kind === "mutation") {
+        state.mutationDefinitions.add(value);
         api[property] = (...args: [input?: unknown, options?: MutationOptions]) => {
           const [input, options] = args;
           const call = normalizeMutationCall(input, options, args.length > 1);
@@ -129,18 +456,23 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
             call.options,
           );
         };
-      else
-        api[property] = (input: unknown, options?: ValueOptions<unknown>) =>
-          streamMember(state, value as StreamDefinition<unknown, unknown, any>, input, options);
+      } else {
+        const definition = value as StreamDefinition<unknown, unknown, any>;
+        const member = (input: unknown, options?: ValueOptions<unknown>) =>
+          streamMember(state, definition, input, options);
+        rawStreamMemberByFunction.set(member, { state, definition });
+        api[property] = member;
+      }
     } else if (value !== null && typeof value === "object")
       api[property] = buildApi(state, value as OperationTree);
   }
   return Object.freeze(api);
 }
 
-function normalizeQueryCall(
+/** @internal Shared raw and bound query argument normalization. */
+export function normalizeQueryCall(
   input: unknown,
-  options: StoreOptions<unknown> | undefined,
+  options: unknown,
   hasSecondArgument: boolean,
 ): {
   readonly input: unknown;
@@ -165,16 +497,14 @@ function normalizeQueryCall(
   return { input: callInput, options: callOptions };
 }
 
-function normalizeMutationCall(
+/** @internal Shared argument shape rules; each execution route validates its own options. */
+export function normalizeMutationArguments(
   input: unknown,
-  options: MutationOptions | undefined,
+  options: unknown,
   hasSecondArgument: boolean,
-): {
-  readonly input: unknown;
-  readonly options?: MutationOptions;
-} {
+): { readonly input: unknown; readonly options?: unknown } {
   let callInput = input;
-  let callOptions: unknown = options;
+  let callOptions = options;
   if (hasQueryOptionsBrand(input)) {
     if (
       options !== undefined &&
@@ -187,14 +517,170 @@ function normalizeMutationCall(
     callInput = undefined;
     callOptions = input;
   }
-  if (callOptions === undefined) return { input: callInput };
-  if (!isMutationOptions(callOptions)) throw new TypeError("Invalid mutation options.");
   return { input: callInput, options: callOptions };
+}
+
+function normalizeMutationCall(
+  input: unknown,
+  options: MutationOptions | undefined,
+  hasSecondArgument: boolean,
+): { readonly input: unknown; readonly options?: MutationOptions } {
+  const call = normalizeMutationArguments(input, options, hasSecondArgument);
+  if (call.options === undefined) return { input: call.input };
+  if (!isMutationOptions(call.options)) throw new TypeError("Invalid mutation options.");
+  return { input: call.input, options: call.options };
+}
+
+function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?: unknown): void {
+  if (state.disposed) return;
+  const cancellation = reason === undefined ? new AbortError("Graph work was canceled.") : reason;
+  const operation = state.resetOperation;
+  const controllers = [...state.activeControllers];
+  const streams = [...state.stores.values()].flatMap((runtime) => {
+    const session = runtime.stream;
+    return session !== undefined && !session.ended ? [{ runtime, session }] : [];
+  });
+  const projections = [...state.projections].flatMap((projection) => {
+    const cancel = projection.captureCancellation();
+    return cancel === undefined ? [] : [cancel];
+  });
+  const streamControllers = new Set(streams.map(({ session }) => session.controller));
+  const failures: unknown[] = [];
+  const attempt = (action: () => void): void => {
+    try {
+      action();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+  if (operation !== undefined) {
+    if (state.resetOperation === operation) state.resetOperation = undefined;
+    attempt(() => operation.reject(cancellation));
+    attempt(() => operation.abort(cancellation));
+  }
+  for (const controller of controllers)
+    if (!streamControllers.has(controller)) attempt(() => controller.abort(cancellation));
+  for (const { runtime, session } of streams)
+    attempt(() => {
+      endStream(runtime, session, "closed", undefined, { abortReason: cancellation });
+    });
+  for (const cancel of projections) attempt(() => cancel(cancellation));
+  if (failures.length > 0)
+    throw new AggregateError(failures, "Several graph cancellation operations failed");
+}
+
+/** @internal Revokes a binding branch through the native graph/store owners. */
+export function disposeBindingContextRuntime(context: BindingContextRuntime): void {
+  if (context.disposed) return;
+  reactiveInternal.assertWritesAllowed(context.activeCell);
+  const state = context.state;
+  const stores = [
+    ...[...context.bindings.values()].flatMap((profiles) =>
+      [...profiles.values()].flatMap((binding) => [...binding.stores.values()]),
+    ),
+    ...[...context.streamBindings.values()].flatMap((members) =>
+      [...members.values()].flatMap((binding) => [...binding.stores.values()]),
+    ),
+  ];
+  const revisions = stores.map((runtime) =>
+    state.disposed ? runtime.valueRevision : nextValueRevision(runtime.valueRevision),
+  );
+  const mutationControllers = [...context.mutationControllers];
+  context.disposed = true;
+  for (const profiles of context.bindings.values())
+    for (const binding of profiles.values()) binding.addresses.clear();
+  for (const members of context.streamBindings.values())
+    for (const binding of members.values()) binding.addresses.clear();
+  context.mutationControllers.clear();
+  for (const controller of mutationControllers) state.activeControllers.delete(controller);
+  state.bindingContexts.delete(context);
+  for (const runtime of stores) {
+    runtime.disposed = true;
+    runtime.incarnation = undefined;
+    state.stores.delete(runtime.identity);
+    updateCollectionCandidate(runtime);
+  }
+  armCollectionTimer(state);
+  const attempt = (action: () => void): void => {
+    try {
+      action();
+    } catch (error) {
+      reportContinuationError(state, error);
+    }
+  };
+  attempt(() =>
+    reactiveInternal.batch(() => {
+      for (const [index, runtime] of stores.entries()) {
+        runtime.valueRevision = revisions[index]!;
+        retireObservation(runtime);
+      }
+      context.activeCell.set(false);
+    }),
+  );
+  for (const controller of mutationControllers)
+    attempt(() => controller.abort(new Fault("disposed", [String(state.graph.id)])));
+  for (const runtime of stores) {
+    const session = runtime.stream;
+    if (session !== undefined && runtime.binding?.kind === "stream")
+      attempt(() => {
+        endStream(runtime, session, "closed", new Fault("disposed", [String(state.graph.id)]));
+      });
+    if (runtime.timer !== undefined) clearTimeout(runtime.timer);
+    runtime.timer = undefined;
+    runtime.source = undefined;
+    runtime.onReadableActivation = undefined;
+    runtime.refreshOnActivation = false;
+    runtime.baseAvailable = false;
+    runtime.hasAcceptedLanding = false;
+    runtime.transferEligible = true;
+    for (const request of [...runtime.requests]) {
+      const reason = new Fault("disposed", [String(runtime.key)]);
+      request.superseded = true;
+      state.activeControllers.delete(request.controller);
+      attempt(() => {
+        finishRequest(runtime, request);
+      });
+      if (!request.outcomeReported) {
+        request.outcomeReported = true;
+        request.resolveOutcome({ ok: false, error: reason });
+      }
+      attempt(() => request.controller.abort(reason));
+    }
+    runtime.requests.clear();
+    runtime.activeRequest = undefined;
+    for (const prediction of reactiveInternal.signalValue(runtime.predictionStack))
+      prediction.dead = true;
+    attempt(() => runtime.predictionStack.set([]));
+    attempt(() => runtime.committed.set(undefined));
+    attempt(() => runtime.presence.set(false));
+    attempt(() => runtime.errorCell.set(undefined));
+    attempt(() => runtime.lifecycle.update((value) => value + 1));
+    for (const stop of [...runtime.livenessStops, ...runtime.readStops]) attempt(stop);
+    runtime.livenessStops.length = 0;
+    runtime.readStops.length = 0;
+    runtime.callers.length = 0;
+  }
 }
 
 function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
   if (state.disposed) return;
+  const revisions = new Map(
+    [...state.stores.values()].map(
+      (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
+    ),
+  );
   state.disposed = true;
+  try {
+    reactiveInternal.batch(() => {
+      for (const [runtime, revision] of revisions) {
+        runtime.valueRevision = revision;
+        retireObservation(runtime);
+      }
+    });
+  } catch (error) {
+    reportContinuationError(state, error);
+  }
+  for (const context of [...state.bindingContexts]) disposeBindingContextRuntime(context);
   state.resetOperation?.reject(new Fault("disposed", []));
   state.resetOperation?.abort(new Fault("disposed", []));
   state.resetOperation = undefined;
@@ -220,23 +706,20 @@ function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
     runtime.readStops.length = 0;
     const stream = runtime.stream;
     if (stream != null && !stream.ended) {
-      stream.ended = true;
-      runtime.stream = undefined;
-      state.activeControllers.delete(stream.controller);
-      stream.controller.abort();
-      if (stream.iterator != null && typeof stream.iterator.return === "function") {
-        try {
-          void Promise.resolve(stream.iterator.return()).catch(() => undefined);
-        } catch {
-          /* disposal is terminal */
-        }
+      try {
+        endStream(runtime, stream, "closed");
+      } catch (error) {
+        reportContinuationError(state, error);
       }
     }
-    runtime.presence.set(false);
     runtime.disposed = true;
+    runtime.incarnation = undefined;
     runtime.collectionIndex = -1;
     try {
-      runtime.lifecycle.update((value) => value + 1);
+      reactiveInternal.batch(() => {
+        runtime.presence.set(false);
+        runtime.lifecycle.update((value) => value + 1);
+      });
     } catch (error) {
       reportContinuationError(state, error);
     }
@@ -276,6 +759,9 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
       ? {}
       : { onUnobservedFault: options.onUnobservedFault }),
     stores: new Map(),
+    queryDefinitions: new Set(),
+    mutationDefinitions: new Set(),
+    bindingContexts: new Set(),
     declaredStores: new Map(),
     faultObservers: new Set(),
     activeControllers: new Set(),
@@ -312,6 +798,7 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     api: buildApi(state, options.contract.operations) as ContractApi<C>,
     resetVersion: computed(() => state.resetVersion.get(), { label: `graph:${id}:reset-version` }),
     reset: () => resetGraph(state),
+    cancelPending: (reason?: unknown) => cancelPending(state, reason),
     store: graphStore,
     at: graphAt,
     dispose: () => disposeGraph(state),
@@ -345,4 +832,8 @@ export const __internal = Object.freeze({
   realmStores,
   realmNamespace,
   adoptRealmEntry,
+  realmBinding,
+  prepareRealmAdoption,
+  realmPreparationCurrent,
+  realmCurrent,
 });

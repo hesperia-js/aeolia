@@ -1,14 +1,55 @@
 import type { Readable } from "../reactive.ts";
 import { isAbortSignal, isObject } from "../utils.ts";
-import type { GraphId, StoreKey, StoreStatus, StreamStatus } from "./identity.ts";
+import type {
+  GraphId,
+  StoreIdentity,
+  StoreKey,
+  StoreStatus,
+  StreamStatus,
+  ValueRevision,
+} from "./identity.ts";
 import { isStoreKey } from "./identity.ts";
 import { affectedBrand } from "./symbols.ts";
 import type { queryOptionsBrand } from "./symbols.ts";
 export type { Readable } from "../reactive.ts";
-export type { Generation, GraphId, StoreKey, StoreStatus, StreamStatus } from "./identity.ts";
+export type {
+  Generation,
+  GraphId,
+  StoreIdentity,
+  StoreKey,
+  StoreStatus,
+  StreamStatus,
+  ValueRevision,
+} from "./identity.ts";
+
+/** A coherent borrowed visible value, or an invalidated capture with no value. */
+export type StoreCapture<T> =
+  | {
+      /** Authority or visible revision changed during the read. */
+      readonly kind: "changed";
+    }
+  | ({
+      /** This capture describes one unchanged native value revision. */
+      readonly kind: "stable";
+      /** Physical identity of the captured native entry. */
+      readonly identity: StoreIdentity;
+      /** Store-local visible-value ordering at capture. */
+      readonly valueRevision: ValueRevision;
+    } & (
+      | {
+          /** No base or effective prediction is present. */
+          readonly present: false;
+        }
+      | {
+          /** A value is present, even when that value is undefined. */
+          readonly present: true;
+          /** Borrowed authored value; its object graph is neither cloned nor frozen. */
+          readonly value: T;
+        }
+    ));
 
 /**
- * The graph-owned value for one store key.
+ * The graph-owned value for one physical entry.
  *
  * `value` exposes the committed value with active optimistic predictions
  * folded over it. Reading it never starts I/O, but reads and live observers
@@ -16,7 +57,10 @@ export type { Generation, GraphId, StoreKey, StoreStatus, StreamStatus } from ".
  * identity if an idle keyed store later releases its contents.
  */
 export interface Store<T> {
-  /** The graph-local key shared by all views of this store. */
+  /** Physical identity shared across caller wrappers, reset and collection. */
+  readonly identity: StoreIdentity;
+
+  /** Authored logical key; different bound entries may have the same key. */
   readonly key: StoreKey;
 
   /** The graph that owns this store. */
@@ -30,6 +74,13 @@ export interface Store<T> {
    * does not initiate a backend call.
    */
   readonly value: Readable<T | undefined>;
+
+  /**
+   * Visible presence, including a present `undefined` or an effective prediction.
+   * Reads touch retention; live observers retain metadata without fetching or
+   * arming freshness/recovery. Presence does not imply request readiness.
+   */
+  readonly available: Readable<boolean>;
 
   /**
    * Commits a local value and advances the store generation.
@@ -63,7 +114,7 @@ export interface Store<T> {
 /**
  * A query-specific view of a keyed {@link Store}.
  *
- * Multiple calls for one key share the value, error, and active request, but
+ * Calls for one raw key or one bound query/key share value, error and request, but
  * each returned view has its own status and freshness window. It remains a
  * writable store, so `set` and `update` can establish local authoritative
  * state while a request is in flight.
@@ -378,7 +429,8 @@ export interface CreateQueryInput<I, T, K extends string> {
    * Derives the shared store key for an input.
    *
    * Inputs producing the same key share committed value, errors, requests,
-   * predictions, and freshness source. The key must be non-empty.
+   * predictions and freshness source within their raw namespace or query binding.
+   * The key must be non-empty.
    */
   readonly key: (input: I) => K;
 
@@ -1034,7 +1086,8 @@ export interface Graph<C extends Contract = Contract> {
   ): Store<T>;
 
   /**
-   * Gets or creates the store at an exact runtime key.
+   * Gets or creates the raw-namespace store at an exact logical key.
+   * This does not address a context-bound query profile.
    *
    * Declared stores are configured when their declared name is reached;
    * otherwise the returned store starts empty. The type narrows the value only
@@ -1080,6 +1133,24 @@ export interface Graph<C extends Contract = Contract> {
    * restricted by the current reactive scope.
    */
   reset(): Promise<void>;
+
+  /**
+   * Cancels the requests, stream sessions, projection source generations and
+   * reset operation present at entry, retaining stores and readable values.
+   *
+   * Uses `reason`, or a new `AbortError` when it is undefined. Cancellation
+   * does not reset or dispose the graph, roll back mutations, or prevent new
+   * work, including work started by abort listeners or existing timers.
+   * Iterator cleanup remains best-effort and unawaited. Synchronous failures
+   * that escape cleanup are collected in an `AggregateError` after all captured
+   * work has been attempted. Calling this on a disposed graph does nothing.
+   *
+   * @param reason - Abort reason shared by the captured work. An undefined
+   * value selects a new cancellation `AbortError`.
+   * @throws AggregateError containing synchronous failures that escape the
+   * captured cancellation and cleanup actions.
+   */
+  cancelPending(reason?: unknown): void;
 
   /**
    * Permanently disposes the graph.

@@ -1,22 +1,71 @@
-import type { StreamDefinition, StreamStore, ValueOptions } from "./types.ts";
+import type {
+  Readable,
+  StreamDefinition,
+  StreamStore,
+  ValueOptions,
+  ValueRevision,
+} from "./types.ts";
 import { isValueOptions } from "./types.ts";
-import { __internal as reactiveInternal, computed } from "../reactive.ts";
+import { __internal as reactiveInternal, computed, signal, subscribe } from "../reactive.ts";
 import { addSignalAbort } from "../utils.ts";
-import type { StreamSession, StoreRuntime, GraphRuntimeState } from "./runtime.ts";
+import type {
+  BoundStreamSessionRuntime,
+  StreamBindingRuntime,
+  StreamSession,
+  StoreRuntime,
+  GraphRuntimeState,
+} from "./runtime.ts";
 import { assertGraphOpen, graphFault, reportContinuationError } from "./faults.ts";
-import { storeKey } from "./identity.ts";
-import { configureKeyedValue, issue, recordLanding } from "./store-state.ts";
-import { getOrCreateStore, observeStoreReadable } from "./store.ts";
-import { endStream, setStreamStatus, touch } from "./collection.ts";
+import { nextValueRevision, storeKey } from "./identity.ts";
+import { configureKeyedValue, issue, nextGeneration, recordLanding } from "./store-state.ts";
+import {
+  STORE_ABSENT,
+  admitStore,
+  directWrite,
+  getOrCreateStore,
+  observeStoreReadable,
+} from "./store.ts";
+import {
+  endStream,
+  scheduleSweep,
+  setStreamStatus,
+  touch,
+  updateCollectionCandidate,
+} from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
 import { publishStreamEvent } from "./stream-events.ts";
+import {
+  assertBindingContextOpen,
+  boundStreamByStore,
+  captureStoreRuntime,
+  changeBoundAddress,
+  beginBindingAddress,
+  endBindingAddress,
+  runtimeByStore,
+} from "./registry.ts";
+import { importedBaselineCurrent, reserveBoundStreamAddress } from "./binding-address.ts";
+import type {
+  BoundStreamSession,
+  StreamDetachment,
+  StreamSessionIdentity,
+} from "./stream-binding.ts";
+import { storeSubscribe } from "../subscribe.ts";
+import { Fault } from "../fault.ts";
 
 function sameSessionEpoch<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
-  return session.resetEpoch === runtime.graph.__runtime.resetEpoch;
+  return (
+    session.resetEpoch === runtime.graph.__runtime.resetEpoch &&
+    runtime.streamToken === session.token
+  );
 }
 
 function isCurrentSession<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
-  return !session.ended && runtime.stream === session && sameSessionEpoch(runtime, session);
+  return (
+    !session.ended &&
+    runtime.stream === session &&
+    sameSessionEpoch(runtime, session) &&
+    (session.bound === undefined || boundSessionCurrent(session.bound))
+  );
 }
 
 export function failStream<T>(
@@ -48,7 +97,9 @@ export async function consumeStream<T>(
       issue(runtime);
       session.emitted = true;
       try {
-        reactiveInternal.batch(() => recordLanding(runtime, result.value));
+        reactiveInternal.batch(() =>
+          recordLanding(runtime, result.value, undefined, session.bound),
+        );
       } catch (error) {
         if (isCurrentSession(runtime, session))
           reportContinuationError(runtime.graph.__runtime, error);
@@ -77,23 +128,55 @@ export function openStream<T>(
 ): void {
   const state = runtime.graph.__runtime;
   const controller = new AbortController();
-  const removeAbort = addSignalAbort(abortSignal, controller);
+  const removeSignalAbort = addSignalAbort(abortSignal, controller);
+  let callerAttached = true;
+  const removeAbort = (): void => {
+    if (!callerAttached) return;
+    callerAttached = false;
+    removeSignalAbort();
+  };
   const session: StreamSession<T> = {
     controller,
+    token: {},
     resetEpoch: state.resetEpoch,
     listeners: new Set(),
     ended: false,
     emitted: false,
+    removeCallerAbort: removeAbort,
     unobservedSince: runtime.liveReadableCount === 0 ? Date.now() : undefined,
   };
   runtime.stream = session;
+  runtime.streamToken = session.token;
   state.activeControllers.add(controller);
+  driveStreamSource(runtime, session, stream, input, key, abortSignal, removeAbort);
+}
+
+function driveStreamSource<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+  stream: StreamDefinition<any, T, any>,
+  input: unknown,
+  key: ReturnType<typeof storeKey>,
+  abortSignal: AbortSignal | undefined,
+  rawRemoveAbort?: () => void,
+): void {
+  const state = runtime.graph.__runtime;
+  const controller = session.controller;
+  const removeAbort =
+    rawRemoveAbort ??
+    (() => {
+      try {
+        session.removeCallerAbort?.();
+      } catch (cause) {
+        reportContinuationError(state, cause);
+      }
+    });
   try {
     reactiveInternal.batch(() => {
       runtime.failing = false;
       runtime.invalidated = false;
       runtime.errorCell.set(undefined);
-      setStreamStatus(runtime, "opening");
+      if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "opening");
     });
   } catch (error) {
     if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
@@ -110,6 +193,63 @@ export function openStream<T>(
       if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
     }
   };
+  let controllerAttached = false;
+  const removeControllerAbort = (): void => {
+    if (!controllerAttached) return;
+    controllerAttached = false;
+    controller.signal.removeEventListener("abort", closeOnAbort);
+  };
+  const attachController = (): void => {
+    if (controllerAttached) return;
+    controllerAttached = true;
+    session.removeControllerAbort = removeControllerAbort;
+    controller.signal.addEventListener("abort", closeOnAbort, { once: true });
+  };
+  if (session.bound !== undefined) {
+    let linked = false;
+    const abort = (): void => controller.abort(abortSignal?.reason);
+    const unlinkCaller = (): void => {
+      if (!linked || abortSignal === undefined) return;
+      linked = false;
+      abortSignal.removeEventListener("abort", abort);
+    };
+    session.removeCallerAbort = unlinkCaller;
+    try {
+      attachController();
+      if (abortSignal !== undefined) {
+        const aborted = abortSignal.aborted;
+        if (!isCurrentSession(runtime, session)) {
+          removeAbort();
+          return;
+        }
+        if (aborted) abort();
+        else {
+          linked = true;
+          try {
+            abortSignal.addEventListener("abort", abort, { once: true });
+          } finally {
+            // A signal can install its listener after a reentrant retirement already unlinked it.
+            if (!isCurrentSession(runtime, session)) {
+              linked = true;
+              try {
+                unlinkCaller();
+              } catch (cause) {
+                reportContinuationError(state, cause);
+              }
+            }
+          }
+        }
+      }
+    } catch (cause) {
+      removeAbort();
+      failStream(runtime, session, cause);
+      return;
+    }
+    if (!isCurrentSession(runtime, session)) {
+      removeAbort();
+      return;
+    }
+  }
   if (controller.signal.aborted) {
     closeOnAbort();
     removeAbort();
@@ -124,22 +264,21 @@ export function openStream<T>(
       reportGap: () => {
         if (!isCurrentSession(runtime, session)) return;
         publishStreamEvent(runtime, session, { kind: "gap" });
-        if (!isCurrentSession(runtime, session)) return;
-        if (!session.emitted) return;
+        if (!isCurrentSession(runtime, session) || !session.emitted) return;
         runtime.invalidated = true;
         try {
           reactiveInternal.batch(() => {
             writeAllStatuses(runtime);
-            setStreamStatus(runtime, "stale");
+            if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "stale");
           });
         } catch (error) {
           if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
         }
       },
     });
-  } catch (error) {
+  } catch (cause) {
     removeAbort();
-    failStream(runtime, session, error);
+    failStream(runtime, session, cause);
     return;
   }
   if (!isCurrentSession(runtime, session)) {
@@ -149,9 +288,9 @@ export function openStream<T>(
   let iterator: AsyncIterator<T>;
   try {
     iterator = iterable[Symbol.asyncIterator]();
-  } catch (error) {
+  } catch (cause) {
     removeAbort();
-    failStream(runtime, session, error);
+    failStream(runtime, session, cause);
     return;
   }
   if (!isCurrentSession(runtime, session)) {
@@ -159,23 +298,375 @@ export function openStream<T>(
       try {
         void Promise.resolve(iterator.return()).catch(() => undefined);
       } catch {
-        /* A reset owns the current session now. */
+        /* Native lifetime retirement already owns this source. */
       }
     }
     removeAbort();
     return;
   }
   session.iterator = iterator;
-  controller.signal.addEventListener("abort", closeOnAbort, { once: true });
+  attachController();
   void consumeStream(runtime, session)
     .finally(() => {
-      controller.signal.removeEventListener("abort", closeOnAbort);
+      removeControllerAbort();
       removeAbort();
       state.activeControllers.delete(controller);
     })
-    .catch((error) => {
-      if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+    .catch((cause) => {
+      if (sameSessionEpoch(runtime, session)) reportContinuationError(state, cause);
     });
+}
+
+function boundSessionCurrent<T>(bound: BoundStreamSessionRuntime<T>): boolean {
+  const { runtime, session } = bound;
+  return (
+    bound.phase === "active" &&
+    !session.ended &&
+    !runtime.disposed &&
+    !runtime.graph.__runtime.disposed &&
+    !bound.binding.context.disposed &&
+    runtime.graph.__runtime.resetEpoch === session.resetEpoch &&
+    runtime.stream?.token === session.token &&
+    runtime.incarnation === bound.incarnation
+  );
+}
+
+function assertBoundSession<T>(bound: BoundStreamSessionRuntime<T>): void {
+  assertBindingContextOpen(bound.binding.context);
+  if (!boundSessionCurrent(bound))
+    throw new TypeError("The bound stream session is no longer active");
+}
+
+function installBoundSession<T>(
+  runtime: StoreRuntime<T>,
+  binding: StreamBindingRuntime,
+): StreamSession<T> {
+  const session: StreamSession<T> = {
+    controller: new AbortController(),
+    token: Object.freeze({}),
+    resetEpoch: runtime.graph.__runtime.resetEpoch,
+    listeners: new Set(),
+    ended: false,
+    emitted: false,
+    unobservedSince: Date.now(),
+  };
+  let resolveDetached!: (receipt: StreamDetachment<T>) => void;
+  const detached = new Promise<StreamDetachment<T>>((resolve) => {
+    resolveDetached = resolve;
+  });
+  const handle: BoundStreamSession<T> = Object.freeze({
+    identity: session.token as StreamSessionIdentity,
+    storeIdentity: runtime.identity,
+    abortSignal: session.controller.signal,
+    detached,
+  });
+  const lifecycle = signal(0);
+  const bound: BoundStreamSessionRuntime<T> = {
+    runtime,
+    binding,
+    session,
+    incarnation: runtime.incarnation!,
+    handle,
+    lifecycle,
+    resolveDetached,
+    phase: "active",
+    liveReadables: 0,
+  };
+  session.bound = bound;
+  runtime.stream = session;
+  runtime.streamToken = session.token;
+  runtime.graph.__runtime.activeControllers.add(session.controller);
+  reactiveInternal.bindReadable(lifecycle, {
+    graphId: runtime.graph.id,
+    reportFault: (fault) => graphFault(runtime.graph.__runtime, fault),
+  });
+  return session;
+}
+
+function boundTerminalValue<T>(bound: BoundStreamSessionRuntime<T>): {
+  readonly present: boolean;
+  readonly value?: T;
+} {
+  assertBindingContextOpen(bound.binding.context);
+  const receipt = bound.receipt;
+  if (bound.phase !== "detached" || receipt === undefined)
+    throw new TypeError("The bound stream is completing its native retirement");
+  const terminal = receipt.terminalCapture;
+  if (terminal.kind === "fault") throw terminal.cause;
+  if (terminal.capture.kind === "changed")
+    throw new TypeError("The terminal stream capture changed");
+  return terminal.capture.present
+    ? { present: true, value: terminal.capture.value }
+    : { present: false };
+}
+
+function boundFacets<T>(
+  bound: BoundStreamSessionRuntime<T>,
+): NonNullable<BoundStreamSessionRuntime<T>["facets"]> {
+  if (bound.facets !== undefined) return bound.facets;
+  const { runtime } = bound;
+  const readValue = (): { readonly present: boolean; readonly value?: T } => {
+    assertBindingContextOpen(bound.binding.context);
+    if (bound.phase !== "active") return boundTerminalValue(bound);
+    assertBoundSession(bound);
+    const capture = captureStoreRuntime(runtime);
+    assertBoundSession(bound);
+    if (capture.kind === "changed")
+      throw new TypeError("The bound stream changed during its native read");
+    return capture.present ? { present: true, value: capture.value } : { present: false };
+  };
+  const facet = <V>(read: () => V): Readable<V> => {
+    const readable = computed(() => {
+      bound.lifecycle.get();
+      return read();
+    });
+    reactiveInternal.bindReadable(readable, {
+      graphId: runtime.graph.id,
+      reportFault: (fault) => graphFault(runtime.graph.__runtime, fault),
+    });
+    reactiveInternal.onActualRead(readable, () => {
+      assertBindingContextOpen(bound.binding.context);
+      if (boundSessionCurrent(bound)) touch(runtime);
+    });
+    reactiveInternal.onLivenessChange(readable, (live) => {
+      if (!boundSessionCurrent(bound)) return;
+      bound.liveReadables = Math.max(0, bound.liveReadables + (live ? 1 : -1));
+      if (bound.liveReadables > 0 || bound.session.listeners.size > 0)
+        bound.session.unobservedSince = undefined;
+      else bound.session.unobservedSince = Date.now();
+      if (live) touch(runtime);
+      updateCollectionCandidate(runtime);
+      scheduleSweep(runtime.graph.__runtime);
+    });
+    return readable;
+  };
+  const status = (): "empty" | "opening" | "live" | "stale" | "closed" | "failed" => {
+    assertBindingContextOpen(bound.binding.context);
+    if (bound.phase !== "active") {
+      if (bound.receipt === undefined)
+        throw new TypeError("The bound stream is completing retirement");
+      return bound.receipt.status;
+    }
+    assertBoundSession(bound);
+    return reactiveInternal.signalValue(runtime.streamStatusCell);
+  };
+  bound.facets = Object.freeze({
+    value: facet(() => {
+      const value = readValue();
+      return value.present ? value.value : undefined;
+    }),
+    available: facet(() => readValue().present),
+    status: facet(status),
+    pending: facet(() => status() === "opening"),
+    error: facet(() => {
+      assertBindingContextOpen(bound.binding.context);
+      if (bound.phase !== "active") {
+        if (bound.receipt === undefined)
+          throw new TypeError("The bound stream is completing retirement");
+        return bound.receipt.status === "failed" ? bound.receipt.reason : undefined;
+      }
+      assertBoundSession(bound);
+      return reactiveInternal.signalValue(runtime.errorCell);
+    }),
+  });
+  return bound.facets;
+}
+
+function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): StreamStore<T> {
+  const bound = session.bound!;
+  const facets = boundFacets(bound);
+  const wrapper: StreamStore<T> = {
+    graph: runtime.graph.id,
+    identity: runtime.identity,
+    key: runtime.key,
+    ...facets,
+    set(value: T): void {
+      assertBoundSession(bound);
+      directWrite(runtime, value, bound);
+    },
+    update(next: (current: T | undefined) => T): void {
+      assertBoundSession(bound);
+      reactiveInternal.assertWritesAllowed(runtime.committed);
+      nextValueRevision(runtime.valueRevision);
+      nextGeneration(runtime.generation);
+      const write = beginBindingAddress(bound.binding, String(runtime.key));
+      try {
+        const value = next(reactiveInternal.signalValue(runtime.committed));
+        assertBoundSession(bound);
+        directWrite(runtime, value, bound);
+      } finally {
+        endBindingAddress(bound.binding, String(runtime.key), write);
+      }
+    },
+  };
+  Object.defineProperty(wrapper, storeSubscribe, {
+    value: (observer: (value: T) => void) => {
+      const present = computed(
+        () => {
+          const value = facets.value.get();
+          return facets.available.get() ? value : STORE_ABSENT;
+        },
+        { equals: () => false },
+      );
+      return subscribe(present, (value) => {
+        if (value !== STORE_ABSENT) observer(value as T);
+      });
+    },
+    enumerable: false,
+    configurable: false,
+  });
+  Object.freeze(wrapper);
+  boundStreamByStore.set(wrapper, bound as unknown as BoundStreamSessionRuntime<unknown>);
+  runtimeByStore.set(wrapper, runtime as StoreRuntime<unknown>);
+  return wrapper;
+}
+
+function boundMember<T>(
+  state: GraphRuntimeState<any>,
+  stream: StreamDefinition<any, T, any>,
+  input: unknown,
+  supplied: ValueOptions<T> | undefined,
+  binding: StreamBindingRuntime,
+): StreamStore<T> {
+  assertBindingContextOpen(binding.context);
+  const epoch = state.resetEpoch;
+  const current = (): void => {
+    assertBindingContextOpen(binding.context);
+    if (state.resetEpoch !== epoch)
+      throw new TypeError("Bound stream acquisition crossed a graph reset");
+  };
+  if (
+    supplied !== undefined &&
+    (supplied === null || typeof supplied !== "object" || Array.isArray(supplied))
+  )
+    throw new TypeError("Invalid bound stream options");
+  const read = (key: string): unknown => {
+    const value = supplied === undefined ? undefined : Reflect.get(supplied, key);
+    current();
+    return value;
+  };
+  const abortSignal = read("abortSignal");
+  const initial = read("initial");
+  const equals = read("equals");
+  const snapshot = read("snapshot");
+  const expectEmpty = read("expectEmpty");
+  const initialStated = supplied !== undefined && Object.hasOwn(supplied, "initial");
+  current();
+  const options: Record<string, unknown> = {
+    ...(abortSignal === undefined ? {} : { abortSignal }),
+    ...(initialStated ? { initial } : {}),
+    ...(equals === undefined ? {} : { equals }),
+    ...(snapshot === undefined ? {} : { snapshot }),
+  };
+  if (!isValueOptions(options)) throw new TypeError("Invalid bound stream value options");
+  current();
+  const values = options as ValueOptions<T>;
+  const key = storeKey(stream.key(input));
+  current();
+  const existing = binding.stores.get(String(key)) as StoreRuntime<T> | undefined;
+  if (existing?.boundRetirement !== undefined || existing?.transitioning === true)
+    throw new TypeError("The bound stream is still completing native retirement");
+  if (existing !== undefined) configureKeyedValue(existing, stream, values, undefined, true);
+  else {
+    if (
+      values.equals !== undefined &&
+      stream.equals !== undefined &&
+      values.equals !== stream.equals
+    )
+      throw new Fault("contract", [String(key), "equals"]);
+    if (
+      values.snapshot !== undefined &&
+      stream.snapshot !== undefined &&
+      values.snapshot !== stream.snapshot
+    )
+      throw new Fault("contract", [String(key), "snapshot"]);
+  }
+  current();
+  const joined = existing?.stream;
+  if (
+    expectEmpty === undefined &&
+    joined?.bound !== undefined &&
+    boundSessionCurrent(joined.bound)
+  ) {
+    const admission = beginBindingAddress(binding, String(key));
+    try {
+      configureKeyedValue(existing!, stream, values, joined.bound);
+      assertBoundSession(joined.bound);
+      return boundWrapper(existing!, joined);
+    } finally {
+      endBindingAddress(binding, String(key), admission);
+    }
+  }
+  const claim =
+    existing !== undefined && importedBaselineCurrent(existing as StoreRuntime<unknown>);
+  nextGeneration(existing?.generation ?? 0);
+  const clearRevision = claim
+    ? existing!.valueRevision
+    : nextValueRevision(existing?.valueRevision ?? (0 as ValueRevision));
+  const admission = reserveBoundStreamAddress(binding, key, expectEmpty);
+  let session: StreamSession<T> | undefined;
+  let runtime: StoreRuntime<T> | undefined;
+  try {
+    runtime = getOrCreateStore<T>(state, key, undefined, binding, false);
+    current();
+    if (claim && !importedBaselineCurrent(runtime as StoreRuntime<unknown>))
+      throw new TypeError("The imported stream baseline is no longer current");
+    issue(runtime);
+    runtime.importedBaseline = undefined;
+    runtime.incarnation = {};
+    runtime.dropped = false;
+    session = installBoundSession(runtime, binding);
+    const bound = session.bound!;
+    runtime.transitioning = true;
+    changeBoundAddress(runtime);
+    reactiveInternal.batch(() => {
+      if (!claim) runtime!.valueRevision = clearRevision;
+      if (!claim) runtime!.baseAvailable = false;
+      if (!claim) runtime!.hasAcceptedLanding = false;
+      runtime!.transferEligible = true;
+      runtime!.failing = false;
+      runtime!.invalidated = false;
+      if (!claim) runtime!.lastLandingAt = undefined;
+      if (!claim) runtime!.lastSettledAt = undefined;
+      runtime!.refreshOnActivation = false;
+      for (const prediction of reactiveInternal.signalValue(runtime!.predictionStack))
+        prediction.dead = true;
+      runtime!.predictionStack.set([]);
+      if (!boundSessionCurrent(bound)) return;
+      if (!claim)
+        reactiveInternal.guardedWrite(
+          runtime!.committed,
+          undefined,
+          () => boundSessionCurrent(bound),
+          () => undefined,
+        );
+      if (!boundSessionCurrent(bound)) return;
+      if (!claim) runtime!.presence.set(false);
+      if (!boundSessionCurrent(bound)) return;
+      runtime!.errorCell.set(undefined);
+    });
+    assertBoundSession(bound);
+    configureKeyedValue(runtime, stream, values, bound);
+    assertBoundSession(bound);
+    if (initialStated && !runtime.baseAvailable)
+      recordLanding(runtime, initial as T, undefined, bound);
+    assertBoundSession(bound);
+    runtime.transitioning = false;
+    runtime.streamSource = {
+      stream,
+      input,
+      ...(values.abortSignal === undefined ? {} : { abortSignal: values.abortSignal }),
+    };
+    admitStore(runtime);
+    driveStreamSource(runtime, session, stream, input, key, values.abortSignal);
+    return boundWrapper(runtime, session);
+  } catch (cause) {
+    if (runtime !== undefined && session !== undefined && !session.ended)
+      failStream(runtime, session, cause);
+    throw cause;
+  } finally {
+    endBindingAddress(binding, String(key), admission);
+  }
 }
 
 export function streamMember<T>(
@@ -183,22 +674,26 @@ export function streamMember<T>(
   stream: StreamDefinition<any, T, any>,
   input: unknown,
   options: ValueOptions<T> | undefined,
+  binding?: StreamBindingRuntime,
 ): StreamStore<T> {
+  if (binding !== undefined) return boundMember(state, stream, input, options, binding);
   assertGraphOpen(state);
   if (options !== undefined && !isValueOptions(options))
     throw new TypeError("Invalid stream options.");
   const key = storeKey(stream.key(input));
-  const runtime = getOrCreateStore(state, key) as StoreRuntime<T>;
+  const runtime = getOrCreateStore<T>(state, key, undefined, undefined, false);
   configureKeyedValue(runtime, stream, options);
+  const abortSignal = options?.abortSignal;
+  admitStore(runtime);
 
   const active = runtime.stream;
   if (active === undefined) {
     runtime.streamSource = {
       stream,
       input,
-      ...(options?.abortSignal === undefined ? {} : { abortSignal: options.abortSignal }),
+      ...(abortSignal === undefined ? {} : { abortSignal }),
     };
-    openStream(runtime, stream, input, key, options?.abortSignal);
+    openStream(runtime, stream, input, key, abortSignal);
   }
   const status = runtime.streamStatus;
   const pending = computed(() => status.get() === "opening", {
@@ -207,6 +702,7 @@ export function streamMember<T>(
   const streamStore = Object.create(runtime.store) as StreamStore<T>;
   Object.assign(streamStore, { pending, error: runtime.error, status });
   Object.freeze(streamStore);
+  runtimeByStore.set(streamStore, runtime as StoreRuntime<unknown>);
 
   observeStoreReadable(runtime, status);
   observeStoreReadable(runtime, pending);

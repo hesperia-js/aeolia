@@ -8,7 +8,7 @@ import type {
 import { __internal as reactiveInternal } from "../reactive.ts";
 import { addSignalAbort } from "../utils.ts";
 import { Fault } from "../fault.ts";
-import { assertStoreOpen, reportContinuationError } from "./faults.ts";
+import { AbortError, assertStoreOpen, reportContinuationError } from "./faults.ts";
 import {
   isCurrentRequest,
   createCaller,
@@ -17,13 +17,16 @@ import {
   writeElapsedStatuses,
 } from "./status.ts";
 import { interact, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
-import { issue, recordLanding, retirePredictions } from "./store-state.ts";
+import { issue, nextGeneration, recordLanding, retirePredictions } from "./store-state.ts";
+
+import { beginBindingAddress, changeBoundAddress, endBindingAddress } from "./registry.ts";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export function finishRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   if (request.settled) return false;
   request.settled = true;
+  changeBoundAddress(runtime);
   request.removeCallerAbort();
   request.removeRequestAbort?.();
   request.removeRequestAbort = undefined;
@@ -130,10 +133,11 @@ export function startQuery<T>(
   force: boolean,
   abortSignal?: AbortSignal,
   automaticRecovery = false,
+  expectedIncarnation?: object,
 ): Promise<void> {
   return (
-    startQueryRequest(runtime, caller, force, abortSignal, automaticRecovery)?.promise ??
-    Promise.resolve()
+    startQueryRequest(runtime, caller, force, abortSignal, automaticRecovery, expectedIncarnation)
+      ?.promise ?? Promise.resolve()
   );
 }
 
@@ -143,127 +147,197 @@ export function startQueryRequest<T>(
   force: boolean,
   abortSignal?: AbortSignal,
   automaticRecovery = false,
+  expectedIncarnation?: object,
 ): QueryRequest | undefined {
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
   const state = runtime.graph.__runtime;
   const resetEpoch = state.resetEpoch;
-  interact(state);
-  if (!force) {
-    const existing = isCurrentRequest(runtime);
-    if (existing != null) {
-      runtime.refreshOnActivation = false;
-      return existing;
+  const entryIncarnation =
+    runtime.binding === undefined ? undefined : (expectedIncarnation ?? runtime.incarnation);
+  if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation) return undefined;
+  if ((force || isCurrentRequest(runtime) === undefined) && (force || !runtime.recoveryDisarmed))
+    nextGeneration(runtime.generation);
+  const admission = beginBindingAddress(runtime.binding, String(runtime.key));
+  try {
+    // Effects supply their ticket before interaction can collect or replace the entry.
+    interact(state);
+    if (runtime.binding !== undefined) {
+      assertStoreOpen(runtime);
+      if (
+        state.resetEpoch !== resetEpoch ||
+        (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation)
+      )
+        return undefined;
     }
-  }
-  if (!force && runtime.recoveryDisarmed) return undefined;
-  runtime.refreshOnActivation = false;
-  if (force) {
-    runtime.recoveryDisarmed = false;
-  }
-  if (runtime.activeRequest != null && !runtime.activeRequest.settled) {
-    runtime.activeRequest.superseded = true;
-    runtime.activeRequest.controller.abort();
-    if (state.resetEpoch !== resetEpoch || state.disposed) return undefined;
-  }
-  if (runtime.timer != null) {
-    clearTimeout(runtime.timer);
-    runtime.timer = undefined;
-  }
-  const controller = new AbortController();
-  const removeCallerAbort = addSignalAbort(abortSignal, controller);
-  const generation = issue(runtime);
-  const source: QuerySource<T> = { query: caller.query, input: caller.input };
-  let resolveOutcome!: QueryRequest["resolveOutcome"];
-  const outcome = new Promise<QueryOutcome>((resolve) => {
-    resolveOutcome = resolve;
-  });
-  const request: QueryRequest = {
-    controller,
-    generation,
-    resetEpoch,
-    automaticRecovery,
-    predictionIds: reactiveInternal
-      .signalValue(runtime.predictionStack)
-      .filter((prediction) => prediction.succeeded && !prediction.dead)
-      .map((prediction) => prediction.id),
-    promise: Promise.resolve(),
-    outcome,
-    resolveOutcome,
-    outcomeReported: false,
-    removeCallerAbort,
-    settled: false,
-    superseded: false,
-  };
-  runtime.source = source;
-  runtime.requests.add(request);
-  updateCollectionCandidate(runtime);
-  const predecessor = runtime.activeRequest;
-  if (
-    state.resetOperation?.epoch === resetEpoch &&
-    predecessor !== undefined &&
-    !predecessor.settled &&
-    !predecessor.outcomeReported &&
-    predecessor.resetEpoch === resetEpoch
-  ) {
-    predecessor.outcomeReported = true;
-    void outcome.then((result) => predecessor.resolveOutcome(result));
-  }
-  runtime.activeRequest = request;
-  state.activeControllers.add(controller);
-  let setupError: unknown;
-  let setupFailed = false;
-  try {
-    reactiveInternal.batch(() => {
-      runtime.failing = false;
-      runtime.errorCell.set(undefined);
-      touch(runtime);
-      writeAllStatuses(runtime);
-    });
-  } catch (error) {
-    setupError = error;
-    setupFailed = true;
-  }
-  if (state.resetEpoch !== resetEpoch || state.disposed) {
-    if (setupFailed) reportContinuationError(state, setupError);
-    return request;
-  }
-  const onRequestAbort = (): void => {
+    if (!force) {
+      const existing = isCurrentRequest(runtime);
+      if (existing != null) {
+        runtime.refreshOnActivation = false;
+        return existing;
+      }
+    }
+    if (!force && runtime.recoveryDisarmed) return undefined;
+    runtime.refreshOnActivation = false;
+    if (force) {
+      runtime.recoveryDisarmed = false;
+    }
+    if (runtime.activeRequest != null && !runtime.activeRequest.settled) {
+      runtime.activeRequest.superseded = true;
+      runtime.activeRequest.controller.abort();
+      if (state.resetEpoch !== resetEpoch || state.disposed) return undefined;
+      if (runtime.binding !== undefined) {
+        assertStoreOpen(runtime);
+        if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation)
+          return undefined;
+      }
+    }
+    nextGeneration(runtime.generation);
+    if (runtime.timer != null) {
+      clearTimeout(runtime.timer);
+      runtime.timer = undefined;
+    }
+    if (runtime.binding !== undefined) {
+      assertStoreOpen(runtime);
+      if (state.resetEpoch !== resetEpoch) return undefined;
+      if (runtime.incarnation === undefined) runtime.incarnation = {};
+    }
+    const incarnation = runtime.incarnation;
+    const controller = new AbortController();
+    const removeCallerAbort = addSignalAbort(abortSignal, controller);
     if (
-      !request.superseded &&
-      !request.settled &&
-      runtime.activeRequest === request &&
-      request.generation === runtime.generation &&
-      request.resetEpoch === state.resetEpoch &&
-      !runtime.disposed
-    )
-      settleQueryFailure(runtime, request, controller.signal.reason);
-  };
-  controller.signal.addEventListener("abort", onRequestAbort, { once: true });
-  request.removeRequestAbort = () => controller.signal.removeEventListener("abort", onRequestAbort);
-  if (controller.signal.aborted) onRequestAbort();
-  if (request.resetEpoch !== state.resetEpoch || runtime.disposed) return request;
-  let result: Promise<T>;
-  try {
-    const options = {
-      abortSignal: controller.signal,
-      graph: state.graph.id,
-      key: runtime.key,
+      runtime.binding !== undefined &&
+      (runtime.disposed ||
+        state.disposed ||
+        state.resetEpoch !== resetEpoch ||
+        runtime.incarnation !== incarnation)
+    ) {
+      removeCallerAbort();
+      assertStoreOpen(runtime);
+      return undefined;
+    }
+    let generation: number;
+    try {
+      generation = issue(runtime);
+    } catch (error) {
+      try {
+        removeCallerAbort();
+      } catch (cleanupError) {
+        reportContinuationError(state, cleanupError);
+      }
+      throw error;
+    }
+    const source: QuerySource<T> = { query: caller.query, input: caller.input };
+    let resolveOutcome!: QueryRequest["resolveOutcome"];
+    const outcome = new Promise<QueryOutcome>((resolve) => {
+      resolveOutcome = resolve;
+    });
+    const request: QueryRequest = {
+      controller,
+      generation,
+      resetEpoch,
+      automaticRecovery,
+      predictionIds: reactiveInternal
+        .signalValue(runtime.predictionStack)
+        .filter((prediction) => prediction.succeeded && !prediction.dead)
+        .map((prediction) => prediction.id),
+      promise: Promise.resolve(),
+      outcome,
+      resolveOutcome,
+      outcomeReported: false,
+      removeCallerAbort,
+      settled: false,
+      superseded: false,
     };
-    result = Promise.resolve(caller.query.fetch(caller.input, options));
-  } catch (error) {
-    result = Promise.reject(error);
+    runtime.source = source;
+    runtime.requests.add(request);
+    updateCollectionCandidate(runtime);
+    const predecessor = runtime.activeRequest;
+    if (
+      state.resetOperation?.epoch === resetEpoch &&
+      predecessor !== undefined &&
+      !predecessor.settled &&
+      !predecessor.outcomeReported &&
+      predecessor.resetEpoch === resetEpoch
+    ) {
+      predecessor.outcomeReported = true;
+      void outcome.then((result) => predecessor.resolveOutcome(result));
+    }
+    runtime.activeRequest = request;
+    state.activeControllers.add(controller);
+    let setupError: unknown;
+    let setupFailed = false;
+    try {
+      reactiveInternal.batch(() => {
+        runtime.failing = false;
+        runtime.errorCell.set(undefined);
+        touch(runtime);
+        writeAllStatuses(runtime);
+      });
+    } catch (error) {
+      setupError = error;
+      setupFailed = true;
+    }
+    if (state.resetEpoch !== resetEpoch || state.disposed || runtime.disposed) {
+      settleQueryFailure(
+        runtime,
+        request,
+        state.disposed || runtime.disposed
+          ? new Fault("disposed", [String(runtime.key)])
+          : new AbortError("Query request was superseded before dispatch."),
+      );
+      if (setupFailed) reportContinuationError(state, setupError);
+      return request;
+    }
+    const onRequestAbort = (): void => {
+      if (
+        !request.superseded &&
+        !request.settled &&
+        runtime.activeRequest === request &&
+        request.generation === runtime.generation &&
+        request.resetEpoch === state.resetEpoch &&
+        !runtime.disposed
+      )
+        settleQueryFailure(runtime, request, controller.signal.reason);
+    };
+    controller.signal.addEventListener("abort", onRequestAbort, { once: true });
+    request.removeRequestAbort = () =>
+      controller.signal.removeEventListener("abort", onRequestAbort);
+    if (controller.signal.aborted) onRequestAbort();
+    if (request.resetEpoch !== state.resetEpoch || runtime.disposed) {
+      settleQueryFailure(
+        runtime,
+        request,
+        runtime.disposed
+          ? new Fault("disposed", [String(runtime.key)])
+          : new AbortError("Query request was superseded before dispatch."),
+      );
+      return request;
+    }
+    let result: Promise<T>;
+    try {
+      const options = {
+        abortSignal: controller.signal,
+        graph: state.graph.id,
+        key: runtime.key,
+      };
+      result = Promise.resolve(caller.query.fetch(caller.input, options));
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+    request.promise = result.then(
+      (value) => {
+        settleQuerySuccess(runtime, request, value);
+      },
+      (error) => {
+        settleQueryFailure(runtime, request, error);
+      },
+    );
+    if (setupFailed) throw setupError;
+    return request;
+  } finally {
+    endBindingAddress(runtime.binding, String(runtime.key), admission);
   }
-  request.promise = result.then(
-    (value) => {
-      settleQuerySuccess(runtime, request, value);
-    },
-    (error) => {
-      settleQueryFailure(runtime, request, error);
-    },
-  );
-  if (setupFailed) throw setupError;
-  return request;
 }
 
 export function callerForSource<T>(

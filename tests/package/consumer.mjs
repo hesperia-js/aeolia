@@ -1,5 +1,30 @@
-import { Fault, createGraph, defineContract, signal, subscribe } from "aeolia";
-import { affects, createMutation, createQuery } from "aeolia/contract";
+import {
+  Fault,
+  adopt,
+  bindOperation as rootBindOperation,
+  bindStream as rootBindStream,
+  inspectBoundAddress as rootInspectBoundAddress,
+  createGraph,
+  createStore,
+  defineContract,
+  peekStore,
+  signal,
+  snapshot,
+  subscribe,
+} from "aeolia";
+import {
+  affects,
+  bindOperation,
+  createBindingContext,
+  createMutation,
+  createQuery,
+  createStream,
+  bindStream,
+  inspectBoundAddress,
+  storeKey,
+  predictionFor,
+  profileEffect,
+} from "aeolia/contract";
 import { computed, subscribe as subscribeSignal } from "aeolia/reactive";
 import { testBackend } from "aeolia/testing";
 
@@ -8,6 +33,9 @@ function check(condition, message) {
 }
 
 export async function verifyConsumer() {
+  await verifyTransferConsumer();
+  await verifyBoundConsumer();
+  await verifyBoundStreamConsumer();
   const count = signal(2);
   const doubled = computed(() => count.get() * 2);
   const signalValues = [];
@@ -80,6 +108,437 @@ export async function verifyConsumer() {
     check(!observed.includes("late response"), "Disposed graph published a late response");
   } finally {
     stop();
+    graph.dispose();
+  }
+}
+
+async function verifyTransferConsumer() {
+  const source = createTransferRuntime("source");
+  let target;
+  let sourceStream;
+  let sourceSession;
+  let targetQuery;
+  let targetStream;
+  let targetSession;
+  try {
+    const sourceRaw = source.graph.api.raw();
+    check(
+      sourceRaw.value.get().origin === "source",
+      "Transfer source raw value was not initialized",
+    );
+    const sourceQuery = source.queryBinding.member({ key: "shared" });
+    await sourceQuery.ready;
+    sourceStream = source.streamBinding.member({ key: "shared" });
+    sourceSession = source.streamBinding.session(sourceStream);
+    const sourceUndefined = waitForValue(
+      sourceStream,
+      (value) => value === undefined,
+      sourceSession,
+    );
+    source.queue.push(undefined);
+    await sourceUndefined;
+    check(
+      sourceStream.available.get() && sourceStream.value.get() === undefined,
+      "Transfer source did not commit a present undefined stream value",
+    );
+
+    const wireSnapshot = snapshot(source.graph, {
+      version: 2,
+      bindings: [
+        {
+          binding: source.queryBinding,
+          reference: { profile: { result: "query" }, operation: source.query.name },
+        },
+        {
+          binding: source.streamBinding,
+          reference: { profile: { channel: "events" }, operation: source.stream.name },
+        },
+      ],
+    });
+    const transported = JSON.parse(JSON.stringify(wireSnapshot));
+    target = createTransferRuntime("target", { deferQuery: true, gateSource: true });
+    const report = adopt(target.graph, transported, {
+      bindings: [
+        {
+          binding: target.queryBinding,
+          reference: { operation: target.query.name, profile: { result: "query" } },
+        },
+        {
+          binding: target.streamBinding,
+          reference: { operation: target.stream.name, profile: { channel: "events" } },
+        },
+      ],
+    });
+    check(report.version === 2, "V2 adoption returned the wrong report version");
+    check(report.skipped.length === 0, "V2 adoption skipped a valid transfer row");
+    check(report.adopted.length === 3, "V2 adoption did not keep raw, query, and stream siblings");
+    check(
+      target.metrics.queryKeys === 0 &&
+        target.metrics.queryFetches === 0 &&
+        target.metrics.streamKeys === 0 &&
+        target.metrics.streamOpens === 0,
+      "V2 adoption ran a key, query fetch, or stream source",
+    );
+
+    const rawRow = report.adopted.find(
+      (entry) => entry.address.kind === "raw" && entry.address.key === "shared",
+    );
+    const queryRow = report.adopted.find(
+      (entry) => entry.address.kind === "binding" && entry.address.key === "shared",
+    );
+    const streamRow = report.adopted.find(
+      (entry) => entry.address.kind === "stream-binding" && entry.address.key === "shared",
+    );
+    check(rawRow && queryRow && streamRow, "V2 report lost a full logical address");
+
+    const rawCapture = peekStore(target.graph.api.raw());
+    check(
+      rawCapture.kind === "stable" &&
+        rawCapture.present &&
+        rawCapture.identity === rawRow.identity &&
+        rawCapture.value.kind === "raw",
+      "V2 raw adoption did not match its reported public identity",
+    );
+
+    targetQuery = target.queryBinding.member({ key: "shared" });
+    const queryCapture = peekStore(targetQuery);
+    check(
+      queryCapture.kind === "stable" &&
+        queryCapture.present &&
+        queryCapture.identity === queryRow.identity &&
+        queryCapture.value.kind === "query" &&
+        queryCapture.value.origin === "source",
+      "V2 query adoption did not match its reported public identity and value",
+    );
+    check(
+      target.metrics.queryKeys === 1 && target.metrics.queryFetches === 0,
+      "Reading the imported query started a fetch or skipped its authored key",
+    );
+
+    targetStream = target.streamBinding.member({ key: "shared" });
+    targetSession = target.streamBinding.session(targetStream);
+    const streamCapture = peekStore(targetStream);
+    check(
+      targetStream.pending.get() &&
+        targetStream.available.get() &&
+        targetStream.value.get() === undefined &&
+        streamCapture.kind === "stable" &&
+        streamCapture.present &&
+        streamCapture.value === undefined,
+      "The first imported stream session did not stay pending with present undefined",
+    );
+    check(
+      streamCapture.identity === streamRow.identity &&
+        targetSession.storeIdentity === streamRow.identity &&
+        streamCapture.valueRevision === streamRow.valueRevision,
+      "V2 stream report did not match public capture and session identity",
+    );
+    check(
+      target.metrics.streamKeys === 1 && target.metrics.streamOpens === 1,
+      "The first target stream session did not use its real key and source",
+    );
+    check(
+      target.metrics.streamEffects === 0,
+      "The gated stream source effect ran before its local identity and revision were checked",
+    );
+
+    target.sourceGate.resolve();
+    await target.sourceStarted.promise;
+    const event = { kind: "event", origin: "target", sequence: 1 };
+    const receivedEvent = waitForValue(
+      targetStream,
+      (value) => value?.kind === "event",
+      targetSession,
+    );
+    target.queue.push(event);
+    check((await receivedEvent) === event, "The adopted stream did not accept its next real event");
+    target.queue.end();
+    const receipt = await targetSession.detached;
+    check(
+      receipt.terminalCapture.kind === "captured" &&
+        receipt.terminalCapture.capture.kind === "stable" &&
+        receipt.terminalCapture.capture.present &&
+        receipt.terminalCapture.capture.value === event,
+      "The adopted stream session did not retain its own terminal capture",
+    );
+  } finally {
+    source.queue.end();
+    source.graph.dispose();
+    if (sourceSession) await sourceSession.detached;
+    if (target) {
+      target.sourceGate.resolve();
+      target.queue.end();
+      if (target.metrics.queryFetches > 0)
+        target.queryGate.resolve({ kind: "query", origin: "target" });
+      target.graph.dispose();
+      if (targetSession) await targetSession.detached;
+    }
+  }
+}
+
+function createTransferRuntime(origin, { deferQuery = false, gateSource = false } = {}) {
+  const metrics = {
+    queryKeys: 0,
+    queryFetches: 0,
+    streamKeys: 0,
+    streamOpens: 0,
+    streamEffects: 0,
+  };
+  const queue = createAsyncQueue();
+  const queryGate = createDeferred();
+  const sourceGate = createDeferred();
+  const sourceStarted = createDeferred();
+  const raw = createStore({
+    name: "shared",
+    initial: { kind: "raw", origin },
+    snapshot: true,
+  });
+  const query = createQuery({
+    name: "transfer.query",
+    key: (input) => {
+      metrics.queryKeys += 1;
+      return input.key;
+    },
+    fetch: async (input) => {
+      metrics.queryFetches += 1;
+      if (deferQuery) return queryGate.promise;
+      return { kind: "query", origin, key: input.key };
+    },
+    snapshot: true,
+  });
+  const stream = createStream({
+    name: "transfer.stream",
+    key: (input) => {
+      metrics.streamKeys += 1;
+      return input.key;
+    },
+    open: () => {
+      metrics.streamOpens += 1;
+      if (gateSource)
+        return {
+          async *[Symbol.asyncIterator]() {
+            await sourceGate.promise;
+            metrics.streamEffects += 1;
+            sourceStarted.resolve();
+            yield* queue;
+          },
+        };
+      return queue;
+    },
+    snapshot: true,
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "packed-transfer", operations: { raw, query, stream } }),
+  });
+  const context = createBindingContext(graph);
+  const queryBinding = bindOperation(graph, query, {
+    context,
+    profile: {},
+    fetch: query.fetch,
+    value: { snapshot: true },
+  });
+  const streamBinding = bindStream(graph, stream, graph.api.stream, { context });
+  return {
+    graph,
+    query,
+    stream,
+    raw,
+    queryBinding,
+    streamBinding,
+    queue,
+    queryGate,
+    sourceGate,
+    sourceStarted,
+    metrics,
+  };
+}
+
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
+function createAsyncQueue() {
+  const values = [];
+  const waiters = [];
+  let ended = false;
+  const finish = () => {
+    ended = true;
+    while (waiters.length > 0) waiters.shift()({ value: undefined, done: true });
+  };
+  return {
+    push(value) {
+      const waiter = waiters.shift();
+      if (waiter) waiter({ value, done: false });
+      else if (!ended) values.push(value);
+    },
+    end: finish,
+    [Symbol.asyncIterator]() {
+      return {
+        next() {
+          if (values.length > 0) return Promise.resolve({ value: values.shift(), done: false });
+          if (ended) return Promise.resolve({ value: undefined, done: true });
+          return new Promise((resolve) => waiters.push(resolve));
+        },
+        return() {
+          finish();
+          return Promise.resolve({ value: undefined, done: true });
+        },
+      };
+    },
+  };
+}
+
+function waitForValue(store, predicate, session) {
+  let stop = () => {};
+  let matched = false;
+  let resolveValue;
+  let rejectValue;
+  const result = new Promise((resolve, reject) => {
+    resolveValue = resolve;
+    rejectValue = reject;
+  });
+  const unsubscribe = subscribe(store, (value) => {
+    if (matched || !predicate(value)) return;
+    matched = true;
+    stop();
+    resolveValue(value);
+  });
+  stop = unsubscribe;
+  if (matched) stop();
+  session.detached.then(() => {
+    if (matched) return;
+    matched = true;
+    stop();
+    rejectValue(new Error("The source session detached before the expected value"));
+  });
+  return result;
+}
+
+async function verifyBoundConsumer() {
+  check(bindOperation === rootBindOperation, "Binding constructors differ across package entries");
+  const backend = testBackend();
+  const query = createQuery({
+    name: "bound.read",
+    key: (input) => input.id,
+    fetch: backend.respond("bound.read"),
+  });
+  const mutation = createMutation({
+    name: "bound.save",
+    run: backend.perform("bound.save"),
+    affects: [affects(query, { select: (input) => ({ id: input.id }), on: "revalidate" })],
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "packed-bound", operations: { query, mutation } }),
+  });
+  try {
+    const context = createBindingContext(graph);
+    const numbers = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+    const labels = bindOperation(graph, query, {
+      context,
+      profile: {},
+      fetch: async (input, call) => "label:" + (await query.fetch(input, call)),
+    });
+    const number = numbers.member({ id: "one" }, { initial: 1 });
+    const label = labels.member({ id: "one" }, { initial: "label:1" });
+    const effect = profileEffect(mutation, 0, query, {
+      prepare: (phase) =>
+        phase.existing(phase.selectedInput).map((target) => phase.prepare(target)),
+      settle: (phase) =>
+        phase
+          .existing(phase.selectedInput)
+          .map((target) => phase.selected(target, phase.selectedInput)),
+    });
+    const save = bindOperation(graph, mutation, {
+      context,
+      profile: {},
+      effects: [effect],
+      run: async (input, call) => ({ receipt: await mutation.run(input, call) }),
+    });
+    const override = predictionFor(mutation, numbers.target(number), () => 9);
+    const running = save.member({ id: "one" }, { optimistic: [override] });
+    check(
+      number.value.get() === 9 && label.value.get() === "label:1",
+      "Physical prediction override crossed profiles",
+    );
+    const pending = backend.pending("bound.save");
+    check(pending.length === 1, "Bound mutation did not dispatch exactly once");
+    backend.resolve(pending[0], "saved");
+    check((await running).receipt === "saved", "Bound completion lost its exact result");
+    const refreshes = backend.pending("bound.read");
+    check(refreshes.length === 2, "Bound effect did not refresh both existing profiles");
+    for (const call of refreshes) backend.resolve(call, 12);
+    await Promise.all([number.ready, label.ready]);
+    check(
+      number.value.get() === 12 && label.value.get() === "label:12",
+      "Refresh lost the profile completion callback",
+    );
+  } finally {
+    graph.dispose();
+  }
+}
+
+async function verifyBoundStreamConsumer() {
+  check(
+    bindStream === rootBindStream && inspectBoundAddress === rootInspectBoundAddress,
+    "Stream/address constructors differ across package entries",
+  );
+  const backend = testBackend();
+  const stream = createStream({
+    name: "packed.events",
+    key: (input) => input,
+    open: backend.stream("packed.events"),
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "packed-stream", operations: { stream } }),
+  });
+  try {
+    const binding = bindStream(graph, stream, graph.api.stream, {
+      context: createBindingContext(graph),
+    });
+    const empty = rootInspectBoundAddress(binding, storeKey("one"));
+    check(
+      empty.kind === "stable" && empty.state === "empty",
+      "Packed address did not inspect empty",
+    );
+    const a = binding.member("one", { expectEmpty: empty.condition });
+    const ticket = binding.session(a);
+    backend.emit("packed.events", undefined);
+    backend.end("packed.events");
+    const receipt = await ticket.detached;
+    const terminal = receipt.terminalCapture;
+    check(
+      terminal.kind === "captured" &&
+        terminal.capture.kind === "stable" &&
+        terminal.capture.present &&
+        terminal.capture.value === undefined,
+      "Packed stream lost present undefined at native retirement",
+    );
+    const b = binding.member("one");
+    check(
+      a.identity === b.identity && ticket.identity !== binding.session(b).identity,
+      "Packed stream did not separate native sessions on the physical entry",
+    );
+    check(
+      a.available.get() && !b.available.get() && b.pending.get(),
+      "Packed fixed facets followed another session",
+    );
+    check(
+      rootInspectBoundAddress(binding, storeKey("one"), { expected: empty.stamp }).kind ===
+        "changed",
+      "Packed address stamp survived acquisition",
+    );
+    let rejected = false;
+    try {
+      a.set(99);
+    } catch (cause) {
+      rejected = cause instanceof TypeError;
+    }
+    check(rejected && !b.available.get(), "Retired packed wrapper wrote into its successor");
+  } finally {
     graph.dispose();
   }
 }

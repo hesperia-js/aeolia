@@ -9,6 +9,10 @@ export {
   queryOptions,
   project,
   storeKey,
+  bindOperation,
+  createBindingContext,
+  peekStore,
+  observeStore,
 } from "./contract/index.ts";
 export type {
   Affected,
@@ -42,6 +46,9 @@ export type {
   StoreDefinition,
   CreateStoreInput,
   StoreKey,
+  StoreIdentity,
+  StoreCapture,
+  ValueRevision,
   StoreNames,
   StoreOptions,
   StorePatterns,
@@ -51,6 +58,17 @@ export type {
   StreamStatus,
   StreamStore,
   ValueOptions,
+} from "./contract/index.ts";
+export type {
+  BindingContext,
+  BoundQueryMember,
+  ExistingTarget,
+  QueryBinding,
+  ObservationLease,
+  ObservationPublishOptions,
+  QueryBindingConfiguration,
+  QueryBindingHandle,
+  TypedTarget,
 } from "./contract/index.ts";
 export { Fault, onFault } from "./fault.ts";
 export type { FaultKind, Unsubscribe } from "./fault.ts";
@@ -63,7 +81,24 @@ export type {
   ReducePolicy,
 } from "./contract/index.ts";
 export { adopt, AEOLIA_TAGGED_ENCODING, snapshot } from "./realm.ts";
-export type { AdoptionReport, EncodingId, Snapshot, SnapshotEntry } from "./realm.ts";
+export type {
+  AdoptionReport,
+  EncodingId,
+  Snapshot,
+  SnapshotEntry,
+  SnapshotLanding,
+  SnapshotAddress,
+  RawOrQuerySnapshotAddressV2,
+  StreamSnapshotAddressV2,
+  SnapshotEntryFieldsV2,
+  SnapshotEntryV2,
+  SnapshotV2,
+  SnapshotBindingReference,
+  SnapshotOptionsV2,
+  AdoptOptionsV2,
+  AdoptedEntryV2,
+  AdoptionReportV2,
+} from "./realm.ts";
 export {
   Signal,
   afterPropagation,
@@ -83,3 +118,37 @@ export type {
   SignalOptions,
   WritableSignal,
 } from "./reactive.ts";
+
+export { profileEffect, predictionFor } from "./contract/mutation-binding.ts";
+export type {
+  BindingMutationOptions,
+  BrandedBindingMutationOptions,
+  BoundMutationMember,
+  EffectContext,
+  MutationBinding,
+  MutationBindingConfiguration,
+  PreparedEffect,
+  PrepareEffectContext,
+  ProfileEffect,
+  SettledEffect,
+  SettleEffectContext,
+  TargetPrediction,
+} from "./contract/mutation-binding.ts";
+
+export { bindStream } from "./contract/stream-binding.ts";
+export type {
+  BoundStreamMember,
+  BoundStreamSession,
+  BoundStreamValueOptions,
+  StreamBinding,
+  StreamBindingHandle,
+  StreamDetachment,
+  StreamSessionIdentity,
+  StreamTerminalCapture,
+} from "./contract/stream-binding.ts";
+export { inspectBoundAddress } from "./contract/binding-address.ts";
+export type {
+  BoundAddressEmpty,
+  BoundAddressInspection,
+  BoundAddressStamp,
+} from "./contract/binding-address.ts";

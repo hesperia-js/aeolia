@@ -24,16 +24,16 @@ export function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 
 /**
  * Forwards caller cancellation to an execution's controller.
- * An already-aborted signal aborts the controller immediately. The returned
- * cleanup removes the listener without aborting the execution.
+ * An already-aborted signal immediately forwards its reason to the controller.
+ * The returned cleanup removes the listener without aborting the execution.
  */
 export function addSignalAbort(
   signalToWatch: AbortSignal | undefined,
   controller: AbortController,
 ): () => void {
   if (signalToWatch === undefined) return () => undefined;
-  const abort = (): void => controller.abort();
-  if (signalToWatch.aborted) controller.abort();
+  const abort = (): void => controller.abort(signalToWatch.reason);
+  if (signalToWatch.aborted) abort();
   else signalToWatch.addEventListener("abort", abort, { once: true });
   return () => signalToWatch.removeEventListener("abort", abort);
 }

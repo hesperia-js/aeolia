@@ -1,7 +1,9 @@
 import { __internal as reactiveInternal } from "../reactive.ts";
 import { AbortError, assertGraphOpen, reportContinuationError } from "./faults.ts";
-import { isLive, touch, updateCollectionCandidate } from "./collection.ts";
-import { issue } from "./store-state.ts";
+import { endStream, isLive, touch, updateCollectionCandidate } from "./collection.ts";
+import { nextGeneration } from "./store-state.ts";
+import { retireObservation } from "./observation-state.ts";
+import { nextValueRevision } from "./identity.ts";
 import { callerForSource, startQueryRequest } from "./query-request.ts";
 import { openStream } from "./stream.ts";
 import type { Contract } from "./types.ts";
@@ -10,7 +12,6 @@ import type {
   GraphRuntimeState,
   QueryCaller,
   QueryRequest,
-  StreamSession,
   StreamSource,
   StoreRuntime,
 } from "./runtime.ts";
@@ -51,11 +52,27 @@ function detachRequest<C extends Contract>(
   return request.controller;
 }
 
-function clearRuntime(runtime: StoreRuntime<unknown>): void {
+function clearRuntime(
+  runtime: StoreRuntime<unknown>,
+  current: () => boolean,
+  generation: number,
+): void {
+  const streamToken = runtime.streamToken;
+  const incarnation = runtime.incarnation;
+  const revision = runtime.valueRevision;
+  const owns = (): boolean =>
+    current() &&
+    !runtime.disposed &&
+    runtime.streamToken === streamToken &&
+    runtime.valueRevision === revision &&
+    runtime.incarnation === incarnation &&
+    runtime.generation === generation;
+  if (!owns()) return;
   if (runtime.timer !== undefined) clearTimeout(runtime.timer);
   runtime.timer = undefined;
-  runtime.generation = issue(runtime);
-  runtime.hasCommitted = runtime.declared;
+  runtime.baseAvailable = runtime.declared;
+  runtime.hasAcceptedLanding = runtime.declared;
+  runtime.transferEligible = true;
   runtime.initial = runtime.declared ? runtime.initial : undefined;
   runtime.initialSpecified = runtime.declared;
   runtime.refreshOnActivation = !runtime.declared && runtime.source !== undefined;
@@ -65,15 +82,29 @@ function clearRuntime(runtime: StoreRuntime<unknown>): void {
   runtime.lastLandingAt = runtime.declared ? Date.now() : undefined;
   runtime.lastSettledAt = undefined;
   runtime.errorCell.set(undefined);
+  if (!owns()) return;
   for (const prediction of reactiveInternal.signalValue(runtime.predictionStack))
     prediction.dead = true;
   runtime.predictionStack.set([]);
-  runtime.committed.set(runtime.declared ? runtime.initial : undefined);
+  if (!owns()) return;
+  reactiveInternal.guardedWrite(
+    runtime.committed,
+    runtime.declared ? runtime.initial : undefined,
+    owns,
+    () => undefined,
+  );
+  if (!owns()) return;
   runtime.presence.set(runtime.declared);
+  if (!owns()) return;
   runtime.streamStatusCell.set(runtime.streamSource?.abortSignal?.aborted ? "closed" : "empty");
-  for (const caller of runtime.callers) caller.statusCell.set("empty");
+  for (const caller of runtime.callers) {
+    if (!owns()) return;
+    caller.statusCell.set("empty");
+  }
+  if (!owns()) return;
   touch(runtime);
   updateCollectionCandidate(runtime);
+  if (owns()) runtime.transitioning = false;
 }
 
 function currentOperation<C extends Contract>(
@@ -193,6 +224,17 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
   assertGraphOpen(state);
   reactiveInternal.assertWritesAllowed(state.resetVersion);
 
+  const generations = new Map(
+    [...state.stores.values()]
+      .filter((runtime) => !runtime.disposed)
+      .map((runtime) => [runtime, nextGeneration(runtime.generation)] as const),
+  );
+  const revisions = new Map(
+    [...state.stores.values()].map(
+      (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
+    ),
+  );
+
   const queries: ActiveQuery<unknown>[] = [];
   const streams: ActiveStream<unknown>[] = [];
   for (const runtime of state.stores.values()) {
@@ -202,7 +244,7 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
         runtime,
         caller: callerForSource(runtime, runtime.source),
       });
-    if (runtime.streamSource !== undefined)
+    if (runtime.binding?.kind !== "stream" && runtime.streamSource !== undefined)
       streams.push({ runtime, source: runtime.streamSource, key: runtime.key });
   }
   const projections = [...state.projections];
@@ -210,6 +252,22 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
   const previous = state.resetOperation;
   const epoch = state.resetEpoch + 1;
   state.resetEpoch = epoch;
+  for (const context of state.bindingContexts) {
+    for (const profiles of context.bindings.values())
+      for (const binding of profiles.values()) binding.addresses.clear();
+    for (const members of context.streamBindings.values())
+      for (const binding of members.values()) binding.addresses.clear();
+  }
+  for (const runtime of state.stores.values())
+    if (
+      !runtime.disposed &&
+      runtime.binding?.kind !== "stream" &&
+      (runtime.binding === undefined ? !runtime.dropped : runtime.incarnation !== undefined)
+    )
+      runtime.incarnation = {};
+  for (const [runtime, revision] of revisions) runtime.valueRevision = revision;
+  for (const [runtime, generation] of generations) runtime.generation = generation;
+  for (const runtime of state.stores.values()) runtime.transitioning = true;
   let resolvePromise!: () => void;
   let rejectPromise!: (error: unknown) => void;
   let settled = false;
@@ -234,34 +292,40 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
   previous?.reject(new AbortError("A newer graph reset superseded this reset."));
 
   const oldControllers: AbortController[] = [];
-  const oldSessions: StreamSession<unknown>[] = [];
-  for (const runtime of state.stores.values()) {
-    for (const request of runtime.requests) {
-      const detached = detachRequest(
-        state,
-        runtime,
-        request,
-        new AbortError("A graph reset canceled this query request."),
-      );
-      if (detached !== undefined) oldControllers.push(detached);
-    }
-    runtime.requests.clear();
-    runtime.activeRequest = undefined;
-    const session = runtime.stream;
-    if (session !== undefined && !session.ended) {
-      session.ended = true;
-      runtime.stream = undefined;
-      session.listeners.clear();
-      state.activeControllers.delete(session.controller);
-      oldSessions.push(session);
-    }
-  }
-  oldControllers.push(...state.activeControllers);
-  state.activeControllers.clear();
-
+  const streamCleanup: Array<() => void> = [];
   const projectionCleanup: Array<() => void> = [];
   try {
     reactiveInternal.batch(() => {
+      for (const runtime of state.stores.values()) retireObservation(runtime);
+      for (const runtime of state.stores.values()) {
+        if (!currentOperation(state, operation)) return;
+        for (const request of runtime.requests) {
+          const detached = detachRequest(
+            state,
+            runtime,
+            request,
+            new AbortError("A graph reset canceled this query request."),
+          );
+          if (detached !== undefined) oldControllers.push(detached);
+        }
+        runtime.requests.clear();
+        runtime.activeRequest = undefined;
+        const session = runtime.stream;
+        if (session !== undefined && !session.ended) {
+          const cleanup = endStream(runtime, session, "closed", undefined, {
+            abortReason: new AbortError("A graph reset canceled work from the previous state."),
+            deferCleanup: true,
+          });
+          if (cleanup !== undefined) streamCleanup.push(cleanup);
+        }
+        if (runtime.binding?.kind === "stream" && runtime.incarnation !== undefined) {
+          runtime.incarnation = {};
+          runtime.streamSource = undefined;
+        }
+      }
+      oldControllers.push(...state.activeControllers);
+      state.activeControllers.clear();
+
       for (const projection of projections) {
         if (!currentOperation(state, operation)) return;
         try {
@@ -273,12 +337,16 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
       }
       for (const runtime of state.stores.values()) {
         if (!currentOperation(state, operation)) return;
+        const generation = generations.get(runtime);
+        if (generation === undefined) continue;
         try {
-          clearRuntime(runtime);
+          clearRuntime(runtime, () => currentOperation(state, operation), generation);
         } catch (error) {
           reportContinuationError(state, error);
         }
       }
+      if (currentOperation(state, operation))
+        for (const runtime of state.stores.values()) runtime.transitioning = false;
       if (currentOperation(state, operation)) state.resetVersion.set(epoch);
     });
   } catch (error) {
@@ -288,20 +356,13 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
   previous?.abort(new AbortError("A newer graph reset superseded this reset."));
   for (const controller of oldControllers)
     controller.abort(new AbortError("A graph reset canceled work from the previous state."));
-  for (const session of oldSessions) {
-    session.controller.abort(
-      new AbortError("A graph reset canceled work from the previous state."),
-    );
-    const iterator = session.iterator;
-    if (iterator != null && typeof iterator.return === "function") {
-      try {
-        void Promise.resolve(iterator.return()).catch(() => undefined);
-      } catch {
-        // The session has already been retired from the graph.
-      }
+  for (const cleanup of [...streamCleanup, ...projectionCleanup]) {
+    try {
+      cleanup();
+    } catch (error) {
+      reportContinuationError(state, error);
     }
   }
-  for (const cleanup of projectionCleanup) cleanup();
 
   if (!currentOperation(state, operation)) return promise;
 

@@ -12,6 +12,13 @@ import {
 import { Fault } from "../../src/fault.ts";
 import { computed, subscribe, withoutWrites } from "../../src/reactive.ts";
 import { testBackend } from "../../src/testing.ts";
+import {
+  adopt,
+  observeStore,
+  peekStore,
+  snapshot,
+  subscribe as subscribeStore,
+} from "../../src/index.ts";
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -21,6 +28,58 @@ beforeEach(() => {
 afterEach(() => {
   jest.clearAllTimers();
   jest.useRealTimers();
+});
+
+it("preflights every reset generation before changing an earlier store or the graph epoch", async () => {
+  const left = createStore({ name: "left", initial: 1, snapshot: true });
+  const right = createStore({ name: "right", initial: 2, snapshot: true });
+  const targetLeft = createStore({ name: "left", initial: 10, snapshot: true });
+  const targetRight = createStore({ name: "right", initial: 20, snapshot: true });
+  const source = createGraph({
+    contract: defineContract({ namespace: "reset-counter", operations: { left, right } }),
+  });
+  const target = createGraph({
+    contract: defineContract({
+      namespace: "reset-counter",
+      operations: { left: targetLeft, right: targetRight },
+    }),
+  });
+  try {
+    source.api.left();
+    source.api.right();
+    const first = target.api.left();
+    const second = target.api.right();
+    const encoded = snapshot(source, { version: 2 });
+    const incoming = {
+      ...encoded,
+      entries: encoded.entries.map((row) => ({
+        ...row,
+        generation: row.address.key === "right" ? Number.MAX_SAFE_INTEGER - 1 : 10,
+      })),
+    } as unknown as typeof encoded;
+    adopt(target, incoming, {});
+    const before = [peekStore(first), peekStore(second)];
+    const epoch = target.resetVersion.get();
+    let threw = false;
+    let reason: unknown;
+    let reset: Promise<void> | undefined;
+    try {
+      reset = target.reset();
+    } catch (error) {
+      threw = true;
+      reason = error;
+    }
+    if (reset !== undefined) await reset;
+
+    expect(threw).toBe(true);
+    expect(reason).toBeInstanceOf(RangeError);
+    expect(target.resetVersion.get()).toBe(epoch);
+    expect([peekStore(first), peekStore(second)]).toEqual(before);
+    expect([first.value.get(), second.value.get()]).toEqual([1, 2]);
+  } finally {
+    source.dispose();
+    target.dispose();
+  }
 });
 
 async function flush(): Promise<void> {
@@ -35,6 +94,65 @@ async function nextTurn(): Promise<void> {
 }
 
 describe("Graph.reset", () => {
+  it("rejects a reset cancelled in its first refresh, stops dispatch, and preserves reentrant raw work", async () => {
+    const reason = new Error("cancel running reset");
+    const requests: Array<{
+      input: string;
+      signal: AbortSignal;
+      result: ReturnType<typeof Promise.withResolvers<number>>;
+    }> = [];
+    let startSuccessor = (): void => undefined;
+    const query = createQuery({
+      name: "cancel-reset.query",
+      key: (input: string) => `cancel-reset/${input}`,
+      fetch: (input, options) => {
+        const result = Promise.withResolvers<number>();
+        requests.push({ input, signal: options.abortSignal, result });
+        if (input === "first") {
+          options.abortSignal.addEventListener("abort", () => startSuccessor(), { once: true });
+          graph.cancelPending(reason);
+        }
+        return result.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cancel-reset", operations: { query } }),
+    });
+    const first = graph.api.query("first", { initial: 1 });
+    const second = graph.api.query("second", { initial: 2 });
+    const stopFirst = subscribe(first.status, () => undefined);
+    const stopSecond = subscribe(second.status, () => undefined);
+    let successor: typeof first | undefined;
+    startSuccessor = () => {
+      successor = graph.api.query("successor");
+    };
+    try {
+      const reset = graph.reset();
+      await expect(reset).rejects.toBe(reason);
+      expect(requests.map((request) => request.input)).toEqual(["first", "successor"]);
+      expect(requests[0]!.signal.reason).toBe(reason);
+      expect(requests[1]!.signal.aborted).toBe(false);
+      await expect(first.ready).rejects.toBe(reason);
+      expect(graph.resetVersion.get()).toBe(1);
+      expect(first.value.get()).toBeUndefined();
+      expect(second.value.get()).toBeUndefined();
+      expect(second.status.get()).toBe("empty");
+      expect(successor).toBeDefined();
+      const ready = successor!.ready;
+      requests[1]!.result.resolve(3);
+      await ready;
+      expect(successor!.value.get()).toBe(3);
+      requests[0]!.result.resolve(99);
+      await requests[0]!.result.promise;
+      expect(first.value.get()).toBeUndefined();
+      expect(successor!.value.get()).toBe(3);
+    } finally {
+      stopFirst();
+      stopSecond();
+      graph.dispose();
+    }
+  });
+
   it("preserves graph and store handles, restores declarations, and accepts fresh undefined data", async () => {
     const backend = testBackend();
     const query = createQuery({
@@ -195,34 +313,122 @@ describe("Graph.reset", () => {
     graph.dispose();
   });
 
-  it("immediately fetches when a reset-cleared query handle becomes live again", async () => {
+  for (const facet of ["store", "value", "available", "issue"] as const) {
+    it(`distinguishes ${facet} activation after an unobserved query reset`, async () => {
+      const backend = testBackend();
+      const query = createQuery({
+        name: "reset.reactivate",
+        key: () => "reset/reactivate",
+        revalidateAfterMs: 10,
+        fetch: backend.respond<void, number>("reset.reactivate"),
+      });
+      const graph = createGraph({
+        contract: defineContract({ namespace: "reset-reactivate", operations: { query } }),
+      });
+      const store = graph.api.query();
+      const initial = store.ready;
+      backend.resolve(backend.calls[0]!, 4);
+      expect(await initial).toBe(4);
+
+      await expect(graph.reset()).resolves.toBeUndefined();
+      expect(store.value.get()).toBeUndefined();
+      expect(backend.calls).toHaveLength(1);
+
+      const seen: unknown[] = [];
+      const stop =
+        facet === "store"
+          ? subscribeStore(store, (value) => {
+              seen.push(value);
+            })
+          : facet === "value"
+            ? subscribe(store.value, (value) => {
+                seen.push(value);
+              })
+            : facet === "available"
+              ? subscribe(store.available, (value) => {
+                  seen.push(value);
+                })
+              : subscribe(observeStore(graph, store).issue, (value) => {
+                  seen.push(value);
+                });
+      if (facet === "store" || facet === "value") {
+        expect(backend.calls).toHaveLength(2);
+        if (facet === "store") expect(seen).toEqual([]);
+        const refreshed = store.ready;
+        backend.resolve(backend.calls[1]!, 5);
+        expect(await refreshed).toBe(5);
+        expect(seen.at(-1)).toBe(5);
+      } else {
+        expect(backend.calls).toHaveLength(1);
+        expect(seen).toStrictEqual([facet === "available" ? false : undefined]);
+      }
+
+      stop();
+      graph.dispose();
+    });
+  }
+
+  it("keeps shared whole-store activation until the last subscriber leaves and releases it afterward", async () => {
     const backend = testBackend();
     const query = createQuery({
-      name: "reset.reactivate",
-      key: () => "reset/reactivate",
+      name: "reset.shared-store",
+      key: () => "reset/shared-store",
       revalidateAfterMs: 10,
-      fetch: backend.respond<void, number>("reset.reactivate"),
+      fetch: backend.respond<void, number>("reset.shared-store"),
     });
     const graph = createGraph({
-      contract: defineContract({ namespace: "reset-reactivate", operations: { query } }),
+      contract: defineContract({ namespace: "reset-shared-store", operations: { query } }),
     });
-    const store = graph.api.query();
-    backend.resolve(backend.calls[0]!, 4);
-    await flush();
-    expect(store.value.get()).toBe(4);
-
-    await expect(graph.reset()).resolves.toBeUndefined();
-    expect(store.value.get()).toBeUndefined();
-    expect(backend.calls).toHaveLength(1);
-
-    const stop = subscribe(store.value, () => undefined);
-    expect(backend.calls).toHaveLength(2);
-    backend.resolve(backend.calls[1]!, 5);
-    await flush();
-    expect(store.value.get()).toBe(5);
-
-    stop();
-    graph.dispose();
+    try {
+      const store = graph.api.query();
+      const initial = store.ready;
+      backend.resolve(backend.calls[0]!, 4);
+      await initial;
+      await graph.reset();
+      const first: number[] = [];
+      const second: number[] = [];
+      const stopFirst = subscribeStore(store, (value) => {
+        first.push(value);
+      });
+      const stopSecond = subscribeStore(store, (value) => {
+        second.push(value);
+      });
+      expect(backend.calls).toHaveLength(2);
+      const refreshed = store.ready;
+      backend.resolve(backend.calls[1]!, 5);
+      await refreshed;
+      expect(first).toEqual([5]);
+      expect(second).toEqual([5]);
+      stopFirst();
+      jest.advanceTimersByTime(10);
+      expect(backend.calls).toHaveLength(3);
+      const fresh = store.ready;
+      backend.resolve(backend.calls[2]!, 6);
+      await fresh;
+      expect(second).toEqual([5, 6]);
+      stopSecond();
+      jest.advanceTimersByTime(20);
+      expect(backend.calls).toHaveLength(3);
+      await graph.reset();
+      expect(backend.calls).toHaveLength(3);
+      const stopMetadata = subscribe(store.available, () => undefined);
+      expect(backend.calls).toHaveLength(3);
+      stopMetadata();
+      const next: number[] = [];
+      const stopNext = subscribeStore(store, (value) => {
+        next.push(value);
+      });
+      expect(backend.calls).toHaveLength(4);
+      const nextReady = store.ready;
+      backend.resolve(backend.calls[3]!, 7);
+      await nextReady;
+      expect(next).toEqual([7]);
+      expect(first).toEqual([5]);
+      expect(second).toEqual([5, 6]);
+      stopNext();
+    } finally {
+      graph.dispose();
+    }
   });
 
   it("allows a keyed initial seed after reset only while empty and idle", async () => {

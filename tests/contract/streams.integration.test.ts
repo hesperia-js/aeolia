@@ -4,6 +4,7 @@ import {
   defineContract,
   createStream,
   snapshot,
+  subscribe,
   watch,
   type Graph,
   type StreamDefinition,
@@ -53,6 +54,127 @@ function streamMember<T>(graph: Graph): StreamStore<T> {
 }
 
 describe("stream stores", () => {
+  for (const phase of ["open", "iterator"] as const) {
+    it(`retires a stream cancelled during ${phase} and admits a later session`, async () => {
+      const backend = testBackend();
+      const openSuccessor = backend.stream<void, number>("cancel-setup.successor");
+      const reason = new Error(`cancel during ${phase}`);
+      let opens = 0;
+      let acquisitions = 0;
+      let nextCalls = 0;
+      let returns = 0;
+      let firstSignal: AbortSignal | undefined;
+      const stream = createStream({
+        name: "cancel-setup",
+        key: () => "cancel-setup/one",
+        open: (input: void, options): AsyncIterable<number> => {
+          opens += 1;
+          if (opens > 1) return openSuccessor(input, options);
+          firstSignal = options.abortSignal;
+          if (phase === "open") graph.cancelPending(reason);
+          return {
+            [Symbol.asyncIterator]() {
+              acquisitions += 1;
+              if (phase === "iterator") graph.cancelPending(reason);
+              return {
+                next: () => {
+                  nextCalls += 1;
+                  return Promise.resolve({ done: false as const, value: 99 });
+                },
+                return: () => {
+                  returns += 1;
+                  return Promise.resolve({ done: true as const, value: undefined });
+                },
+              };
+            },
+          };
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({ namespace: "cancel-setup", operations: { stream } }),
+      });
+      try {
+        const cancelled = graph.api.stream(undefined, { initial: 7 });
+        expect(firstSignal!.reason).toBe(reason);
+        expect(cancelled.status.get()).toBe("closed");
+        expect(cancelled.pending.get()).toBe(false);
+        expect(cancelled.value.get()).toBe(7);
+        expect(acquisitions).toBe(phase === "open" ? 0 : 1);
+        expect(returns).toBe(phase === "open" ? 0 : 1);
+        expect(nextCalls).toBe(0);
+        const successor = graph.api.stream(undefined);
+        const received = Promise.withResolvers<void>();
+        const stop = subscribe(successor.value, (value) => {
+          if (value === 8) received.resolve();
+        });
+        try {
+          backend.emit("cancel-setup.successor", 8);
+          await received.promise;
+        } finally {
+          stop();
+        }
+        expect(successor.value.get()).toBe(8);
+        expect(successor.status.get()).toBe("live");
+        expect(backend.calls[0]!.aborted).toBe(false);
+        expect(nextCalls).toBe(0);
+        expect(opens).toBe(2);
+        expect(graph.resetVersion.get()).toBe(0);
+      } finally {
+        graph.dispose();
+      }
+    });
+  }
+
+  it("keeps a same-epoch successor failure when old iterator cleanup reopens and closes the source", () => {
+    const failure = new Error("successor cannot open");
+    const signals: AbortSignal[] = [];
+    let opens = 0;
+    let returns = 0;
+    const stream = createStream({
+      name: "cancel-successor",
+      key: () => "cancel-successor/one",
+      open: (_input: void, options): AsyncIterable<number> => {
+        opens += 1;
+        signals.push(options.abortSignal);
+        if (opens === 2) throw failure;
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => new Promise<IteratorResult<number>>(() => undefined),
+              return: () => {
+                returns += 1;
+                graph.api.stream(undefined);
+                return Promise.resolve({ done: true as const, value: undefined });
+              },
+            };
+          },
+        };
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cancel-successor", operations: { stream } }),
+    });
+    try {
+      const store = graph.api.stream(undefined, { initial: 4 });
+      const reason = new Error("cancel old source");
+      graph.cancelPending(reason);
+      expect(opens).toBe(2);
+      expect(returns).toBe(1);
+      expect(signals[0]!.reason).toBe(reason);
+      expect(signals[1]!.aborted).toBe(true);
+      expect(store.status.get()).toBe("failed");
+      expect(store.error.get()).toBe(failure);
+      expect(store.value.get()).toBe(4);
+      expect(graph.resetVersion.get()).toBe(0);
+      graph.cancelPending();
+      expect(returns).toBe(1);
+      expect(store.status.get()).toBe("failed");
+      expect(store.error.get()).toBe(failure);
+    } finally {
+      graph.dispose();
+    }
+  });
+
   it("accepts a later explicit snapshot policy after an opener omitted it", () => {
     const backend = testBackend();
     const stream = numberStream(backend, "snapshot-policy");

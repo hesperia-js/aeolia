@@ -1,13 +1,36 @@
-import type { QueryDefinition, QueryStore, StoreOptions, StoreStatus } from "./types.ts";
+import type {
+  QueryDefinition,
+  QueryStore,
+  StoreOptions,
+  StoreStatus,
+  ValueOptions,
+} from "./types.ts";
 import { isCancellationOptions } from "./types.ts";
 import { Fault, type Unsubscribe } from "../fault.ts";
 import { __internal as reactiveInternal, computed, subscribe } from "../reactive.ts";
 import type { Computed } from "../reactive.ts";
-import type { GraphRuntimeState, QueryCaller, StoreRuntime } from "./runtime.ts";
-import { assertGraphOpen, assertStoreOpen, graphFault, reportContinuationError } from "./faults.ts";
-import { getOrCreateStore } from "./store.ts";
+import type {
+  GraphRuntimeState,
+  QueryBindingRuntime,
+  QueryCaller,
+  StoreRuntime,
+} from "./runtime.ts";
+import {
+  AbortError,
+  assertGraphOpen,
+  assertStoreOpen,
+  graphFault,
+  reportContinuationError,
+} from "./faults.ts";
+import {
+  beginBindingAddress,
+  endBindingAddress,
+  queryRuntimeByStore,
+  runtimeByStore,
+} from "./registry.ts";
+import { admitStore, getOrCreateStore } from "./store.ts";
 import { observeStoreReadable } from "./store.ts";
-import { configureKeyedValue } from "./store-state.ts";
+import { configureKeyedValue, nextGeneration } from "./store-state.ts";
 import { startQuery, armStoreTimer } from "./query-request.ts";
 import { asWindow, createCaller, queryIsStale, writeCallerStatus } from "./status.ts";
 import { storeKey } from "./identity.ts";
@@ -93,58 +116,98 @@ export function makeQueryStore<T>(
   query: QueryDefinition<any, T, any>,
   input: unknown,
   options: StoreOptions<T> | undefined,
+  binding?: QueryBindingRuntime,
+  bindingDefaults?: Pick<ValueOptions<NoInfer<T>>, "initial">,
 ): QueryStore<T> {
   assertGraphOpen(state);
+  const epoch = state.resetEpoch;
   const window = asWindow(options?.revalidateAfterMs, query.revalidateAfterMs);
+  if (binding !== undefined) {
+    assertGraphOpen(state);
+    if (binding.context.disposed) throw new Fault("disposed", [String(state.graph.id)]);
+    if (state.resetEpoch !== epoch)
+      throw new AbortError("Query acquisition crossed a graph reset.");
+  }
   const key = storeKey(query.key(input));
-  const runtime = getOrCreateStore(state, key) as StoreRuntime<T>;
-  configureKeyedValue(runtime, query, options);
-  const caller = createCaller(runtime, query, input, window, options?.abortSignal);
-  addCaller(runtime, caller);
-  runtime.source = { query, input };
-  runtime.onReadableActivation = () => {
-    if (!runtime.refreshOnActivation || runtime.source === undefined) return;
-    const activeSource = runtime.source;
-    const activeCaller = runtime.callers.find(
-      (candidate) =>
-        candidate.query === activeSource.query && Object.is(candidate.input, activeSource.input),
-    );
-    if (activeCaller === undefined) return;
-    try {
-      void startQuery(runtime, activeCaller, false, activeCaller.abortSignal, runtime.failing);
-    } catch (error) {
-      reportContinuationError(state, error);
+  if (binding !== undefined) {
+    assertGraphOpen(state);
+    if (binding.context.disposed) throw new Fault("disposed", [String(state.graph.id)]);
+    if (state.resetEpoch !== epoch)
+      throw new AbortError("Query acquisition crossed a graph reset.");
+  }
+  const admission = beginBindingAddress(binding, String(key));
+  try {
+    const runtime = getOrCreateStore<T>(state, key, undefined, binding, false);
+    const configuredOptions =
+      !runtime.configured &&
+      bindingDefaults !== undefined &&
+      Object.hasOwn(bindingDefaults, "initial")
+        ? { initial: bindingDefaults.initial, ...options }
+        : options;
+    configureKeyedValue(runtime, query, configuredOptions);
+    if (binding !== undefined) {
+      assertStoreOpen(runtime);
+      if (state.resetEpoch !== epoch)
+        throw new AbortError("Query acquisition crossed a graph reset.");
     }
-  };
-  writeCallerStatus(caller);
-  const status = caller.status;
-  const pending = caller.pending;
-  const queryStore = Object.create(runtime.store) as QueryStore<T>;
-  const revalidate = (revalidateOptions?: {
-    readonly abortSignal?: AbortSignal;
-  }): Promise<void> => {
-    assertStoreOpen(runtime);
-    if (revalidateOptions !== undefined && !isCancellationOptions(revalidateOptions))
-      throw new TypeError("Invalid query revalidation options.");
+    const caller = createCaller(runtime, query, input, window, options?.abortSignal);
+    admitStore(runtime);
     addCaller(runtime, caller);
-    return startQuery(runtime, caller, true, revalidateOptions?.abortSignal ?? caller.abortSignal);
-  };
-  Object.assign(queryStore, { pending, error: runtime.error, status, revalidate });
-  Object.defineProperty(queryStore, "ready", {
-    configurable: false,
-    enumerable: true,
-    get: () => ready(runtime, caller),
-  });
-  Object.freeze(queryStore);
-  observeStoreReadable(runtime, status, { armsFreshness: true });
-  observeStoreReadable(runtime, pending, { armsFreshness: true });
-  reactiveInternal.bindReadable(pending, {
-    graphId: state.graph.id,
-    reportFault: (fault) => graphFault(state, fault),
-  });
-  const stale = queryIsStale(caller);
-  if (stale) void startQuery(runtime, caller, false, caller.abortSignal, runtime.failing);
-  else armStoreTimer(runtime);
-  touch(runtime);
-  return queryStore;
+    runtime.source = { query, input };
+    runtime.onReadableActivation = () => {
+      if (!runtime.refreshOnActivation || runtime.source === undefined) return;
+      const activeSource = runtime.source;
+      const activeCaller = runtime.callers.find(
+        (candidate) =>
+          candidate.query === activeSource.query && Object.is(candidate.input, activeSource.input),
+      );
+      if (activeCaller === undefined) return;
+      try {
+        void startQuery(runtime, activeCaller, false, activeCaller.abortSignal, runtime.failing);
+      } catch (error) {
+        reportContinuationError(state, error);
+      }
+    };
+    writeCallerStatus(caller);
+    const status = caller.status;
+    const pending = caller.pending;
+    const queryStore = Object.create(runtime.store) as QueryStore<T>;
+    const revalidate = (revalidateOptions?: {
+      readonly abortSignal?: AbortSignal;
+    }): Promise<void> => {
+      assertStoreOpen(runtime);
+      if (revalidateOptions !== undefined && !isCancellationOptions(revalidateOptions))
+        throw new TypeError("Invalid query revalidation options.");
+      nextGeneration(runtime.generation);
+      addCaller(runtime, caller);
+      return startQuery(
+        runtime,
+        caller,
+        true,
+        revalidateOptions?.abortSignal ?? caller.abortSignal,
+      );
+    };
+    Object.assign(queryStore, { pending, error: runtime.error, status, revalidate });
+    Object.defineProperty(queryStore, "ready", {
+      configurable: false,
+      enumerable: true,
+      get: () => ready(runtime, caller),
+    });
+    Object.freeze(queryStore);
+    queryRuntimeByStore.set(queryStore, runtime as StoreRuntime<unknown>);
+    runtimeByStore.set(queryStore, runtime as StoreRuntime<unknown>);
+    observeStoreReadable(runtime, status, { armsFreshness: true });
+    observeStoreReadable(runtime, pending, { armsFreshness: true });
+    reactiveInternal.bindReadable(pending, {
+      graphId: state.graph.id,
+      reportFault: (fault) => graphFault(state, fault),
+    });
+    const stale = queryIsStale(caller);
+    if (stale) void startQuery(runtime, caller, false, caller.abortSignal, runtime.failing);
+    else armStoreTimer(runtime);
+    touch(runtime);
+    return queryStore;
+  } finally {
+    endBindingAddress(binding, String(key), admission);
+  }
 }

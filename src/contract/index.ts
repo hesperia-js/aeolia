@@ -10,6 +10,19 @@ export {
 } from "./api.ts";
 export { project } from "./projection.ts";
 export { queryOptions } from "./query-options.ts";
+export { peekStore } from "./store.ts";
+export { observeStore } from "./observation.ts";
+export type { ObservationLease, ObservationPublishOptions } from "./observation.ts";
+export { bindOperation, createBindingContext } from "./query-binding.ts";
+export type {
+  BindingContext,
+  BoundQueryMember,
+  ExistingTarget,
+  QueryBinding,
+  QueryBindingConfiguration,
+  QueryBindingHandle,
+  TypedTarget,
+} from "./query-binding.ts";
 export type {
   AccumulatePolicy,
   Projection,
@@ -51,6 +64,9 @@ export type {
   StoreAt,
   StoreDefinition,
   StoreKey,
+  StoreIdentity,
+  StoreCapture,
+  ValueRevision,
   StoreNames,
   StoreOptions,
   StorePatterns,
@@ -60,3 +76,37 @@ export type {
   StreamStore,
   ValueOptions,
 } from "./types.ts";
+
+export { profileEffect, predictionFor } from "./mutation-binding.ts";
+export type {
+  BindingMutationOptions,
+  BrandedBindingMutationOptions,
+  BoundMutationMember,
+  EffectContext,
+  MutationBinding,
+  MutationBindingConfiguration,
+  PreparedEffect,
+  PrepareEffectContext,
+  ProfileEffect,
+  SettledEffect,
+  SettleEffectContext,
+  TargetPrediction,
+} from "./mutation-binding.ts";
+
+export { bindStream } from "./stream-binding.ts";
+export type {
+  BoundStreamMember,
+  BoundStreamSession,
+  BoundStreamValueOptions,
+  StreamBinding,
+  StreamBindingHandle,
+  StreamDetachment,
+  StreamSessionIdentity,
+  StreamTerminalCapture,
+} from "./stream-binding.ts";
+export { inspectBoundAddress } from "./binding-address.ts";
+export type {
+  BoundAddressEmpty,
+  BoundAddressInspection,
+  BoundAddressStamp,
+} from "./binding-address.ts";

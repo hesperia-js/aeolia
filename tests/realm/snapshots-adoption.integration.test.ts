@@ -12,6 +12,8 @@ import {
   createStream,
   affects,
   snapshot,
+  observeStore,
+  peekStore,
   watch,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
@@ -296,6 +298,12 @@ describe("realm snapshots and adoption", () => {
     expect(queryStore.value.get()).toEqual({ count: 1 });
     const encoded = snapshot(source);
     expect(encoded.entries["realm/predicted"]!.value).toEqual({ count: 0 });
+    const encodedV2 = snapshot(source, { version: 2 });
+    expect(encodedV2.entries).toHaveLength(1);
+    expect(encodedV2.entries[0]).toMatchObject({
+      address: { kind: "raw", key: "realm/predicted" },
+      value: { count: 0 },
+    });
 
     const target = createGraph({ contract: queryContract({ query }) });
     const a = target.at("a");
@@ -544,3 +552,275 @@ describe("realm snapshots and adoption", () => {
     expect(() => adopt(graph, encoded)).toThrow("disposed");
   });
 });
+
+it("v1 refuses observation-only authority and preserves current accepted age and eligibility", async () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "raw",
+    key: (_input: void) => "raw",
+    fetch: backend.respond<void, number | undefined>("raw"),
+  });
+  const graph = createGraph({ contract: { namespace: "observed-realm", operations: { query } } });
+  try {
+    const store = graph.api.query();
+    const lease = observeStore(graph, store);
+    lease.publish(undefined);
+    expect(() => snapshot(graph)).toThrow(Fault);
+    lease.publish(2, { transfer: "exclude" });
+    expect(Object.keys(snapshot(graph).entries)).toEqual([]);
+    expect(snapshot(graph, { version: 2 }).entries).toEqual([]);
+    const ready = store.ready;
+    backend.resolve(backend.calls[0]!, 3);
+    await ready;
+    jest.advanceTimersByTime(5);
+    lease.publish(4);
+    expect(snapshot(graph).entries.raw).toMatchObject({ value: 4, age: 5 });
+    lease.publish(5, { transfer: "exclude" });
+    expect(Object.keys(snapshot(graph).entries)).toEqual([]);
+    expect(snapshot(graph, { version: 2 }).entries).toEqual([]);
+    store.set(6);
+    expect(snapshot(graph).entries.raw).toMatchObject({ value: 6, age: 0 });
+    expect(snapshot(graph, { version: 2 }).entries).toMatchObject([
+      { address: { kind: "raw", key: "raw" }, value: 6, landing: { kind: "accepted", age: 0 } },
+    ]);
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("v1 faults encoding reentry instead of returning old bytes with new observed authority", () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "raw",
+    key: (_input: void) => "raw",
+    fetch: backend.respond<void, { value: number }>("raw"),
+  });
+  const graph = createGraph({ contract: { namespace: "encoding-reentry", operations: { query } } });
+  try {
+    const store = graph.api.query();
+    const lease = observeStore(graph, store);
+    store.set({
+      get value() {
+        lease.publish({ value: 2 });
+        return 1;
+      },
+    });
+    expect(() => snapshot(graph)).toThrow(Fault);
+    expect(peekStore(store)).toMatchObject({ kind: "stable", present: true, value: { value: 2 } });
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("ordinary v1 adoption advances local visible revision without clearing an observation issue", async () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "raw",
+    key: (_input: void) => "raw",
+    fetch: backend.respond<void, number | undefined>("raw"),
+  });
+  const contract = { namespace: "adopt-observed", operations: { query } };
+  const source = createGraph({ contract });
+  const target = createGraph({ contract });
+  try {
+    const original = source.api.query();
+    original.set(undefined);
+    const store = target.api.query();
+    const lease = observeStore(target, store);
+    const issue = Object.freeze({ invalid: true });
+    lease.reject(issue);
+    const before = peekStore(store);
+    const report = adopt(target, snapshot(source));
+    const after = peekStore(store);
+    expect(report.adopted).toEqual([store.key]);
+    expect(lease.issue.get()).toBe(issue);
+    if (before.kind !== "stable" || after.kind !== "stable")
+      throw new Error("Expected stable adoption captures");
+    expect(after.valueRevision).toBeGreaterThan(before.valueRevision);
+    expect(after).toMatchObject({ present: true, value: undefined });
+    expect(await store.ready).toBeUndefined();
+
+    const beforeV2 = peekStore(store);
+    const v2Report = adopt(target, snapshot(source, { version: 2 }), {});
+    const afterV2 = peekStore(store);
+    expect(v2Report.adopted).toMatchObject([{ address: { kind: "raw", key: String(store.key) } }]);
+    expect(lease.issue.get()).toBe(issue);
+    if (beforeV2.kind !== "stable" || afterV2.kind !== "stable")
+      throw new Error("Expected stable v2 adoption captures");
+    expect(afterV2.valueRevision).toBeGreaterThan(beforeV2.valueRevision);
+    expect(afterV2).toMatchObject({ present: true, value: undefined });
+  } finally {
+    source.dispose();
+    target.dispose();
+  }
+});
+
+it("ordinary v1 adoption admits a collected entry after a rejected recall and remains collectible", async () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "query",
+    key: (_input: void) => "one",
+    fetch: backend.respond<void, number>("query"),
+  });
+  const contract = { namespace: "adopt-after-rejection", operations: { query } };
+  const source = createGraph({ contract });
+  const target = createGraph({ contract, idleMs: 10 });
+  try {
+    const original = source.api.query(undefined, { initial: 9 });
+    const store = target.api.query(undefined, { initial: 1 });
+    await original.ready;
+    await store.ready;
+    jest.advanceTimersByTime(11);
+    expect(() => target.api.query(undefined, { initial: 2 })).toThrow(Fault);
+    expect(() => observeStore(target, store)).toThrow(TypeError);
+    expect(adopt(target, snapshot(source)).adopted).toEqual([store.key]);
+    const lease = observeStore(target, store);
+    expect(await store.ready).toBe(9);
+    expect(lease.publish(10)).toBe(true);
+    expect(peekStore(store)).toMatchObject({ kind: "stable", present: true, value: 10 });
+    jest.advanceTimersByTime(11);
+    expect(lease.active.get()).toBe(false);
+    expect(backend.calls).toHaveLength(0);
+  } finally {
+    source.dispose();
+    target.dispose();
+  }
+});
+
+it("v2 preserves an observed undefined landing:none and an accepted age after an observed replacement", async () => {
+  const backend = testBackend();
+  const key = "realm/observed-v2";
+  const query = createQuery({
+    name: "realm.observed-v2",
+    key: () => key,
+    fetch: backend.respond("realm.observed-v2"),
+  });
+  const contract = queryContract({ query });
+  const source = createGraph({ contract });
+  const target = createGraph({ contract });
+  try {
+    const store = source.api.query(undefined);
+    const lease = observeStore(source, store);
+    lease.publish(undefined);
+
+    const none = snapshot(source, { version: 2 });
+    expect(none.entries).toHaveLength(1);
+    expect(none.entries[0]).toMatchObject({
+      address: { kind: "raw", key },
+      value: { $undefined: true },
+      landing: { kind: "none" },
+    });
+    expect(none.entries[0]?.valueRevision).toBeGreaterThan(0);
+    adopt(target, JSON.parse(JSON.stringify(none)) as typeof none, {});
+    const adopted = target.at(key);
+    expect(adopted.available.get()).toBe(true);
+    expect(adopted.value.get()).toBeUndefined();
+
+    const ready = store.ready;
+    backend.resolve(backend.calls[0]!, "accepted");
+    await ready;
+    jest.advanceTimersByTime(40);
+    lease.publish("observed");
+
+    const accepted = snapshot(source, { version: 2 });
+    expect(accepted.entries).toHaveLength(1);
+    expect(accepted.entries[0]).toMatchObject({
+      address: { kind: "raw", key },
+      value: "observed",
+      landing: { kind: "accepted", age: 40 },
+    });
+    adopt(target, JSON.parse(JSON.stringify(accepted)) as typeof accepted, {});
+    const adoptedQuery = target.api.query(undefined);
+    expect(adoptedQuery.value.get()).toBe("observed");
+    const reexported = snapshot(target, { version: 2 });
+    expect(reexported.entries[0]).toMatchObject({
+      address: { kind: "raw", key },
+      value: "observed",
+      landing: { kind: "accepted", age: 40 },
+    });
+  } finally {
+    source.dispose();
+    target.dispose();
+  }
+});
+
+it("v2 skips a malformed row independently and rejects duplicate physical addresses before writes", () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "realm.v2-preflight",
+    key: () => "good",
+    fetch: backend.respond("realm.v2-preflight"),
+  });
+  const contract = queryContract({ query });
+  const source = createGraph({ contract });
+  const target = createGraph({ contract });
+  const duplicateTarget = createGraph({ contract });
+  try {
+    source.api.query(undefined, { initial: 4 });
+    const valid = snapshot(source, { version: 2 });
+    const malformedAddress = { kind: "raw", key: "bad" } as const;
+    const withMalformed = {
+      ...valid,
+      entries: [
+        ...valid.entries,
+        {
+          ...valid.entries[0]!,
+          address: malformedAddress,
+          value: { $unknown: true },
+        },
+      ],
+    };
+    const report = adopt(target, withMalformed, {});
+    expect(report.adopted.map((row) => row.address)).toEqual([{ kind: "raw", key: "good" }]);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]?.address).toBe(malformedAddress);
+    expect(target.at("good").value.get()).toBe(4);
+
+    const duplicate = {
+      ...valid,
+      entries: [valid.entries[0]!, valid.entries[0]!],
+    } as typeof valid;
+    expect(() => adopt(duplicateTarget, duplicate, {})).toThrow(Fault);
+    expect(duplicateTarget.at("good").available.get()).toBe(false);
+    expect(snapshot(duplicateTarget, { version: 2 }).entries).toHaveLength(0);
+  } finally {
+    source.dispose();
+    target.dispose();
+    duplicateTarget.dispose();
+  }
+});
+
+it.each([false, true])(
+  "v2 rejects a duplicate address even when its row has an unsupported field (malformedFirst=%s)",
+  (malformedFirst) => {
+    const backend = testBackend();
+    const query = createQuery({
+      name: "realm.v2-malformed-duplicate",
+      key: (_input: void) => "duplicate",
+      fetch: backend.respond<void, number>("realm.v2-malformed-duplicate"),
+    });
+    const contract = queryContract({ query });
+    const source = createGraph({ contract });
+    const target = createGraph({ contract });
+    try {
+      source.api.query(undefined, { initial: 4 });
+      const incumbent = target.api.query(undefined, { initial: 9 });
+      const before = peekStore(incumbent);
+      const encoded = snapshot(source, { version: 2 });
+      const row = encoded.entries[0]!;
+      const malformed = { ...row, extra: true };
+      const incoming = {
+        ...encoded,
+        entries: malformedFirst ? [malformed, row] : [row, malformed],
+      } as unknown as typeof encoded;
+
+      expect(() => adopt(target, incoming, {})).toThrow(Fault);
+      expect(peekStore(incumbent)).toEqual(before);
+      expect(incumbent.value.get()).toBe(9);
+      expect(backend.calls).toHaveLength(0);
+    } finally {
+      source.dispose();
+      target.dispose();
+    }
+  },
+);

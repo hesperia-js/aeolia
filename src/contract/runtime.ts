@@ -1,17 +1,26 @@
 import type {
   Contract,
+  Affected,
   Graph,
+  MutationDefinition,
+  CallContext,
   QueryDefinition,
   Readable,
   Store,
   StoreDefinition,
   StoreKey,
+  StoreIdentity,
   StoreStatus,
   StreamDefinition,
   StreamStatus,
+  StreamStore,
+  ValueRevision,
+  ValueOptions,
 } from "./types.ts";
 import type { Fault, Unsubscribe } from "../fault.ts";
 import type { Computed, WritableSignal } from "../reactive.ts";
+import type { BindingContext } from "./query-binding.ts";
+import type { BoundStreamSession, StreamDetachment } from "./stream-binding.ts";
 
 export type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -61,14 +70,18 @@ export type QueryOutcome = { readonly ok: true } | { readonly ok: false; readonl
 
 export interface StreamSession<T> {
   readonly controller: AbortController;
+  readonly token: object;
   /** Reset identity under which this session was opened. */
   readonly resetEpoch: number;
   readonly listeners: Set<(event: StreamEvent<T>) => void>;
   iterator?: AsyncIterator<T>;
+  removeCallerAbort?: () => void;
+  removeControllerAbort?: () => void;
   /** Start of the current uninterrupted interval without live readables. */
   unobservedSince?: number;
   ended: boolean;
   emitted: boolean;
+  bound?: BoundStreamSessionRuntime<T>;
 }
 
 export interface StreamSource<T> {
@@ -85,6 +98,7 @@ export interface GraphResetOperation {
 }
 
 export interface GraphProjection {
+  readonly captureCancellation: () => ((reason: unknown) => void) | undefined;
   readonly reset: () => (() => void) | undefined;
   readonly restart: () => void;
   readonly dispose: () => void;
@@ -100,8 +114,22 @@ export interface CollectionCandidate {
   deadline: number;
 }
 
+/** Issue and publication ownership for one native incarnation. */
+export interface ObservationState {
+  readonly incarnation: object;
+  readonly issue: WritableSignal<Readonly<object> | undefined>;
+  readonly live: WritableSignal<boolean>;
+  publisherActivity: WritableSignal<boolean> | undefined;
+  readonly stops: Unsubscribe[];
+  publisher: object | undefined;
+  retired: boolean;
+  liveReadables: number;
+  issueReadable?: Readable<Readonly<object> | undefined>;
+}
+
 export interface StoreRuntime<T> {
   readonly graph: GraphRuntime<any>;
+  readonly identity: StoreIdentity;
   readonly key: StoreKey;
   readonly store: Store<T>;
   readonly committed: WritableSignal<T | undefined>;
@@ -117,12 +145,17 @@ export interface StoreRuntime<T> {
   readonly requests: Set<QueryRequest>;
   readonly livenessStops: Unsubscribe[];
   readonly readStops: Unsubscribe[];
+  readonly binding?: StoreBindingRuntime;
+  /** Current entry authority, independent of request success and the legacy dropped flag. */
+  incarnation: object | undefined;
   source?: QuerySource<T>;
   streamSource?: StreamSource<T>;
   onReadableActivation?: () => void;
   refreshOnActivation: boolean;
   activeRequest?: QueryRequest;
   stream?: StreamSession<T>;
+  streamToken?: object;
+  boundRetirement?: BoundStreamSessionRuntime<T>;
   timer?: TimerHandle;
   initial?: T;
   equals: (a: T, b: T) => boolean;
@@ -132,7 +165,20 @@ export interface StoreRuntime<T> {
   initialSpecified: boolean;
   equalsSpecified: boolean;
   snapshotSpecified: boolean;
-  hasCommitted: boolean;
+  baseAvailable: boolean;
+  hasAcceptedLanding: boolean;
+  valueRevision: ValueRevision;
+  /** One unclaimed import on this exact native base; stale stamps grant no authority. */
+  importedBaseline?: {
+    readonly incarnation: object;
+    readonly resetEpoch: number;
+    readonly generation: number;
+    readonly valueRevision: ValueRevision;
+  };
+  transferEligible: boolean;
+  /** A reset is clearing this entry; capture must not expose partial state. */
+  transitioning: boolean;
+  observation?: ObservationState;
   failing: boolean;
   /** True after failed automatic recovery until explicit retry re-arms the query. */
   recoveryDisarmed: boolean;
@@ -159,7 +205,10 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly idleMs: number;
   readonly maxPredictions: number;
   readonly onUnobservedFault?: (error: unknown) => void;
-  readonly stores: Map<string, StoreRuntime<unknown>>;
+  readonly stores: Map<string | StoreIdentity, StoreRuntime<unknown>>;
+  readonly queryDefinitions: Set<QueryDefinition<any, any, any>>;
+  readonly mutationDefinitions: Set<MutationDefinition<any, any>>;
+  readonly bindingContexts: Set<BindingContextRuntime>;
   readonly declaredStores: Map<string, StoreDefinition<unknown>>;
   readonly faultObservers: Set<(fault: Fault) => void>;
   readonly activeControllers: Set<AbortController>;
@@ -175,12 +224,122 @@ export interface GraphRuntimeState<C extends Contract> {
   disposed: boolean;
 }
 
+export interface BindingContextRuntime {
+  readonly state: GraphRuntimeState<any>;
+  readonly handle: BindingContext;
+  readonly activeCell: WritableSignal<boolean>;
+  readonly bindings: Map<QueryDefinition<any, any, any>, Map<object, QueryBindingRuntime>>;
+  readonly streamBindings: Map<StreamDefinition<any, any, any>, Map<object, StreamBindingRuntime>>;
+  readonly mutations: Map<MutationDefinition<any, any>, Map<object, MutationBindingRuntime>>;
+  readonly mutationControllers: Set<AbortController>;
+  disposed: boolean;
+}
+
+export interface QueryBindingRuntime {
+  readonly kind: "query";
+  readonly addresses: Map<string, BindingAddressRuntime>;
+  readonly context: BindingContextRuntime;
+  readonly definition: QueryDefinition<any, any, any>;
+  readonly profile: object;
+  readonly execution: QueryDefinition<any, any, any>;
+  readonly value: ValueOptions<any> | undefined;
+  handle: object;
+  readonly stores: Map<string, StoreRuntime<unknown>>;
+}
+
+export interface StreamBindingRuntime {
+  readonly kind: "stream";
+  readonly context: BindingContextRuntime;
+  readonly definition: StreamDefinition<any, any, any>;
+  readonly originalMember: object;
+  readonly stores: Map<string, StoreRuntime<unknown>>;
+  readonly addresses: Map<string, BindingAddressRuntime>;
+  handle: object;
+}
+
+export type StoreBindingRuntime = QueryBindingRuntime | StreamBindingRuntime;
+
+export interface BindingAddressRuntime {
+  readonly binding: StoreBindingRuntime;
+  readonly key: string;
+  readonly operations: Set<object>;
+  guard: object;
+}
+
+export interface BoundStreamSessionRuntime<T> {
+  readonly runtime: StoreRuntime<T>;
+  readonly binding: StreamBindingRuntime;
+  readonly session: StreamSession<T>;
+  readonly incarnation: object;
+  readonly handle: BoundStreamSession<T>;
+  readonly lifecycle: WritableSignal<number>;
+  readonly resolveDetached: (receipt: StreamDetachment<T>) => void;
+  phase: "active" | "retiring" | "detached";
+  liveReadables: number;
+  facets?: Pick<StreamStore<T>, "value" | "available" | "status" | "pending" | "error">;
+  receipt?: StreamDetachment<T>;
+  retirement?: { readonly token: object; readonly epoch: number };
+}
+
+export interface QueryTargetRuntime {
+  readonly binding: QueryBindingRuntime;
+  readonly runtime: StoreRuntime<unknown>;
+  readonly incarnation: object;
+}
+
+export interface ProfileEffectRuntime {
+  readonly affected: Affected<any>;
+  readonly mutation: MutationDefinition<any, any>;
+  readonly index: number;
+  readonly query: QueryDefinition<any, any, any>;
+  readonly prepare: (phase: object) => unknown;
+  readonly settle: (phase: object) => unknown;
+}
+
+export interface MutationBindingRuntime {
+  readonly context: BindingContextRuntime;
+  readonly definition: MutationDefinition<any, any>;
+  readonly profile: object;
+  readonly run: (input: unknown, context: CallContext) => unknown;
+  readonly effects: readonly ProfileEffectRuntime[];
+}
+
+export interface BoundProducerRuntime {
+  readonly mutation: MutationDefinition<any, any>;
+  readonly target: QueryTargetRuntime;
+  readonly producer: (value: unknown, input: unknown) => unknown;
+}
+
+export interface EffectPhaseRuntime {
+  readonly binding: MutationBindingRuntime;
+  readonly effect: ProfileEffectRuntime;
+  readonly kind: "prepare" | "settle";
+  readonly members: Map<StoreRuntime<unknown>, Set<object>>;
+  active: boolean;
+}
+
+export interface EffectInstructionRuntime {
+  readonly phase: EffectPhaseRuntime;
+  readonly target: QueryTargetRuntime;
+  readonly kind: "prepare" | "original" | "predict" | "selected" | "current";
+  readonly prediction?: BoundProducerRuntime;
+  readonly input?: unknown;
+}
+
 /**
  * Graph-owned store state exposed only to Aeolia's realm-crossing implementation.
  *
  * @internal
  */
 export interface RealmStoreState {
+  /** Whether v1's raw-key representation cannot describe this store. */
+  readonly bound: boolean;
+  /** Exact native binding; undefined retains the raw-key namespace. */
+  readonly binding: StoreBindingRuntime | undefined;
+  /** Actual graph-local physical entry, never a transport address. */
+  readonly identity: StoreIdentity;
+  /** Captured local base revision, independent of request generation. */
+  readonly valueRevision: ValueRevision;
   /** Exact graph-local key for this runtime. */
   readonly key: StoreKey;
 
@@ -188,7 +347,13 @@ export interface RealmStoreState {
   readonly snapshot: boolean;
 
   /** Whether the runtime currently contains a committed value. */
-  readonly hasCommitted: boolean;
+  readonly baseAvailable: boolean;
+  /** Whether the current base has an accepted landing representable by v1. */
+  readonly hasAcceptedLanding: boolean;
+  /** Eligibility attached to this exact committed base revision. */
+  readonly transferEligible: boolean;
+  /** Checks the captured native identity and state after authored encoding. */
+  readonly current: () => boolean;
 
   /** Generation attached to the current committed value. */
   readonly generation: number;

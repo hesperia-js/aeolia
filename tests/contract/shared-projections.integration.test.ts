@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it, jest } from "bun:test";
 import {
+  bindStream,
+  createBindingContext,
   createGraph,
   createStream,
   defineContract,
@@ -39,6 +41,66 @@ function setup() {
   });
   return { backend, graph, source: graph.api.stream() };
 }
+
+it("delivers shared close before nested cancellation without replacing the outer source reason", async () => {
+  const backend = testBackend();
+  const open = backend.stream<void, number>("nested-cancel");
+  let sourceSignal: AbortSignal | undefined;
+  let returns = 0;
+  const stream = createStream({
+    name: "nested-cancel",
+    key: () => "nested-cancel/one",
+    open: (input: void, options): AsyncIterable<number> => {
+      sourceSignal = options.abortSignal;
+      const iterable = open(input, options);
+      return {
+        [Symbol.asyncIterator]() {
+          const iterator = iterable[Symbol.asyncIterator]();
+          return {
+            next: () => iterator.next(),
+            return: () => {
+              returns += 1;
+              return iterator.return!();
+            },
+          };
+        },
+      };
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "nested-cancel", operations: { stream } }),
+  });
+  const source = graph.api.stream(undefined);
+  const history = project(source, { kind: "accumulate", max: 3 });
+  const outerReason = new Error("outer cancellation");
+  const innerReason = new Error("nested cancellation");
+  let nestedCalls = 0;
+  const stop = subscribe(history.status, (status) => {
+    if (status !== "closed") return;
+    nestedCalls += 1;
+    graph.cancelPending(innerReason);
+  });
+  try {
+    const received = until(history.value, (items) => items.length === 1);
+    backend.emit("nested-cancel", 5);
+    await received;
+    graph.cancelPending(outerReason);
+    expect(nestedCalls).toBe(1);
+    expect(sourceSignal!.reason).toBe(outerReason);
+    expect(returns).toBe(1);
+    expect(source.status.get()).toBe("closed");
+    expect(history.status.get()).toBe("closed");
+    expect(history.error.get()).toBeUndefined();
+    expect(history.value.get()).toEqual([5]);
+    expect(source.value.get()).toBe(5);
+    graph.cancelPending();
+    expect(nestedCalls).toBe(1);
+    expect(returns).toBe(1);
+  } finally {
+    stop();
+    graph.dispose();
+  }
+});
 
 it("projects every shared emission without reopening, replaying, or observing direct writes", async () => {
   const { backend, graph, source } = setup();
@@ -144,3 +206,49 @@ it("ends projections with their source session and does not reconnect them on re
     graph.dispose();
   }
 });
+
+it.each(["end", "reset"] as const)(
+  "keeps bound shared projections on A after %s and starts B explicitly",
+  async (mode) => {
+    const backend = testBackend();
+    const stream = createStream({
+      name: "fixed-projection",
+      key: () => "one",
+      open: backend.stream<void, number>("fixed-projection"),
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "fixed-projection", operations: { stream } }),
+    });
+    try {
+      const binding = bindStream(graph, stream, graph.api.stream, {
+        context: createBindingContext(graph),
+      });
+      const a = binding.member();
+      const history = project(a, { kind: "accumulate", max: 3 });
+      const receivedA = until(history.value, (items) => items.length === 1);
+      backend.emit("fixed-projection", 5);
+      await receivedA;
+      let resetting: Promise<void> | undefined;
+      if (mode === "reset") resetting = graph.reset();
+      else backend.end("fixed-projection");
+      await binding.session(a).detached;
+      await resetting;
+      expect(history.status.get()).toBe("closed");
+      expect(backend.calls).toHaveLength(1);
+      const prior = mode === "reset" ? [] : [5];
+      expect(history.value.get()).toEqual(prior);
+      const b = binding.member();
+      const next = project(b, { kind: "accumulate", max: 3 });
+      const receivedB = until(next.value, (items) => items.length === 1);
+      backend.emit("fixed-projection", 9);
+      await receivedB;
+      expect(next.value.get()).toEqual([9]);
+      expect(history.value.get()).toEqual(prior);
+      expect(history.status.get()).toBe("closed");
+      expect(backend.calls).toHaveLength(2);
+      next.close();
+    } finally {
+      graph.dispose();
+    }
+  },
+);

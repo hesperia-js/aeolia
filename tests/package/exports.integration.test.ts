@@ -45,7 +45,10 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     "adopt",
     "affects",
     "afterPropagation",
+    "bindOperation",
+    "bindStream",
     "computed",
+    "createBindingContext",
     "createGraph",
     "createMutation",
     "createObserver",
@@ -53,7 +56,12 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     "createStore",
     "createStream",
     "defineContract",
+    "inspectBoundAddress",
+    "observeStore",
     "onFault",
+    "peekStore",
+    "predictionFor",
+    "profileEffect",
     "project",
     "queryOptions",
     "readableBrand",
@@ -74,12 +82,20 @@ test("the published entry point resolves to the built ESM artifact", async () =>
       "contract",
       [
         "affects",
+        "bindOperation",
+        "bindStream",
+        "createBindingContext",
         "createGraph",
         "createMutation",
         "createQuery",
         "createStore",
         "createStream",
         "defineContract",
+        "inspectBoundAddress",
+        "observeStore",
+        "peekStore",
+        "predictionFor",
+        "profileEffect",
         "project",
         "queryOptions",
         "storeKey",
@@ -89,6 +105,31 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     const subsystem = await import(`${packageName}/${subpath}`);
     expect(Object.keys(subsystem).sort()).toEqual([...names].sort());
     for (const name of names) expect(subsystem[name]).toBe(publicApi[name]);
+    const response = Promise.withResolvers<number>();
+    const query = publicApi.createQuery({
+      name: "observed",
+      key: () => "one",
+      fetch: () => response.promise,
+    });
+    const graph = publicApi.createGraph({
+      contract: { namespace: "built-observation", operations: { query } },
+    });
+    try {
+      const binding = publicApi.bindOperation(graph, query, {
+        context: publicApi.createBindingContext(graph),
+        profile: {},
+        fetch: query.fetch,
+      });
+      const store = binding.member(undefined);
+      const lease = subsystem.observeStore(graph, store);
+      lease.publish(3);
+      expect(publicApi.peekStore(store)).toMatchObject({ kind: "stable", present: true, value: 3 });
+      response.resolve(4);
+      expect(await store.ready).toBe(4);
+      expect(subsystem.peekStore(store)).toMatchObject({ kind: "stable", present: true, value: 4 });
+    } finally {
+      graph.dispose();
+    }
   }
 
   const reactivePackageName = `${packageName}/reactive`;
