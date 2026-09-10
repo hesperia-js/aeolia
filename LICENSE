@@ -1,0 +1,34 @@
+Aeolia
+
+Copyright © 2026 Werberth Lins <me@halkliff.dev>
+
+The Software is the project provided by this repository, identified above.
+
+MPL-2.0 License
+-------------------
+
+The Software is licensed under the Mozilla Public License, version 2.0.
+See COPYING for the full license text.
+
+This applies to the Software's source and releases, including prereleases, except
+material identified under separate terms. Copyright ownership is retained.
+MPL permissions and conditions are not changed by the commercial alternative.
+MPL permits commercial use and distribution subject to its conditions. Commercial
+activity or internal private modification alone does not require a paid license.
+
+Commercial License
+--------------------
+
+Alternative recurring and perpetual commercial sales open with the Software's
+stable 1.0 release.
+LICENSE-COMMERCIAL.md contains the commercial agreement. Commercial coverage
+applies to stable releases only, not prerelease versions.
+Publishing the commercial terms does not itself grant commercial rights.
+No exception to MPL's requirements is granted merely by downloading, modifying,
+or distributing the Software. A commercial exception requires a separately concluded
+agreement with the rights holder or an authorized representative.
+
+The licenses are alternatives: use the Software under MPL-2.0 or under an applicable,
+separately concluded commercial agreement. The commercial agreement is not an
+additional restriction on MPL users. Purchasing a commercial license does not
+withdraw independently available MPL permissions.

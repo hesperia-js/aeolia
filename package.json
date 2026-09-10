@@ -1,0 +1,70 @@
+{
+  "name": "aeolia",
+  "version": "0.0.0",
+  "description": "A framework-agnostic reactive state layer built on signals",
+  "keywords": [
+    "javascript",
+    "reactive",
+    "state-management",
+    "typescript"
+  ],
+  "homepage": "https://github.com/hesperiajs/aeolia",
+  "bugs": "https://github.com/hesperiajs/aeolia/issues",
+  "license": "MPL-2.0",
+  "author": {
+    "name": "Halk <Werberth Lins>",
+    "email": "halkliff@pm.me",
+    "url": "https://halkliff.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hesperiajs/aeolia.git"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./reactive": {
+      "types": "./dist/reactive/index.d.ts",
+      "import": "./dist/reactive/index.js",
+      "default": "./dist/reactive/index.js"
+    },
+    "./contract": {
+      "types": "./dist/contract/index.d.ts",
+      "import": "./dist/contract/index.js",
+      "default": "./dist/contract/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js",
+      "default": "./dist/testing.js"
+    }
+  },
+  "scripts": {
+    "build": "bunx tsc -p tsconfig.build.json",
+    "test": "bun run build && bun test tests",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "check": "bun run typecheck && bun run test",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "1.4.0",
+    "oxfmt": "0.66.0",
+    "oxlint": "1.81.0",
+    "typescript": "latest"
+  },
+  "packageManager": "bun@1.4.2"
+}
