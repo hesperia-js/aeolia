@@ -8,8 +8,8 @@
     "state-management",
     "typescript"
   ],
-  "homepage": "https://github.com/hesperiajs/aeolia",
-  "bugs": "https://github.com/hesperiajs/aeolia/issues",
+  "homepage": "https://github.com/hesperia-js/aeolia",
+  "bugs": "https://github.com/hesperia-js/aeolia/issues",
   "license": "MPL-2.0",
   "author": {
     "name": "Halk <Werberth Lins>",
@@ -18,7 +18,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/hesperiajs/aeolia.git"
+    "url": "https://github.com/hesperia-js/aeolia.git"
   },
   "files": [
     "dist"
