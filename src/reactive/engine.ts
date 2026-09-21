@@ -12,6 +12,7 @@ import type {
   LifecycleCallback,
 } from "./types.ts";
 import type { Watcher } from "./classes.ts";
+import type { Observer } from "./types.ts";
 
 interface WatchRecord {
   readonly source: Node<unknown>;
@@ -28,9 +29,10 @@ interface SubscriptionRecord {
 }
 
 interface ComputationFrame {
-  readonly owner: ComputedNode<unknown>;
+  readonly owner: ComputedNode<unknown> | ObserverState;
   readonly dependencies: Node<unknown>[];
   readonly dependencySet: Set<Node<unknown>>;
+  readonly dependencyTokens: Map<Node<unknown>, number>;
   graphId?: string;
 }
 
@@ -46,6 +48,7 @@ interface NodeBase<T> {
   readonly watchers: WatchRecord[];
   subscriptions?: SubscriptionRecord[];
   readonly canonicalWatchers: Set<Watcher>;
+  readonly observers: Set<ObserverState>;
   readonly watchedCallback?: LifecycleCallback<T>;
   readonly unwatchedCallback?: LifecycleCallback<T>;
   readonly livenessObservers: Set<LivenessObserver>;
@@ -80,6 +83,16 @@ interface ComputedNode<T> extends NodeBase<T> {
 
 type Node<T> = SignalNode<T> | ComputedNode<T>;
 
+interface ObserverState {
+  readonly observer: Observer;
+  readonly notifyCallback: (this: Observer) => void;
+  dependencies: Node<unknown>[];
+  dependencyTokens: Map<Node<unknown>, number>;
+  pending: boolean;
+  active: boolean;
+  tracking: boolean;
+}
+
 const nodeByReadable = new WeakMap<object, Node<unknown>>();
 const watcherNodes = new WeakSet<object>();
 const sourceNodesByWatcher = new WeakMap<object, Set<Node<unknown>>>();
@@ -92,6 +105,7 @@ interface WatcherState {
 }
 
 const watcherStates = new WeakMap<object, WatcherState>();
+const observerStates = new WeakMap<object, ObserverState>();
 
 let anonymousReadableId = 0;
 
@@ -103,6 +117,8 @@ let activeWalk: Set<Node<unknown>> | undefined;
 let helperNotificationDepth = 0;
 let canonicalNotificationDepth = 0;
 let subscriptionDeliveryDepth = 0;
+let observerNotificationDepth = 0;
+let writeRefusalDepth = 0;
 
 interface PropagationState {
   readonly pendingSeeds: Set<Node<unknown>>;
@@ -117,6 +133,9 @@ const propagation: PropagationState = {
   inProgress: false,
   batchDepth: 0,
 };
+
+const pendingObserverNotifications = new Set<ObserverState>();
+const afterPropagationQueue = new Set<() => void>();
 
 const MAX_CONSECUTIVE_WRITES = 8;
 
@@ -139,8 +158,16 @@ function watcherWriteFault(node: Node<unknown>): Fault {
   return new Fault("watcher-write", [node.name]);
 }
 
+function writeForbiddenFault<T>(node: Node<T>): Fault {
+  return new Fault("write-forbidden", [node.name]);
+}
+
 function ensureReadableOperationAllowed(node: Node<unknown>): void {
-  if (helperNotificationDepth > 0 || canonicalNotificationDepth > 0) {
+  if (
+    helperNotificationDepth > 0 ||
+    canonicalNotificationDepth > 0 ||
+    observerNotificationDepth > 0
+  ) {
     throw watcherReadFault(node);
   }
   if (predictionReadRefusalDepth > 0) throw new Fault("prediction", [node.name]);
@@ -152,6 +179,7 @@ function recordDependency(node: Node<unknown>): ComputationFrame | undefined {
   if (!frame.dependencySet.has(node)) {
     frame.dependencySet.add(node);
     frame.dependencies.push(node);
+    frame.dependencyTokens.set(node, node.token);
   }
   return frame;
 }
@@ -181,7 +209,8 @@ function cycleFault(node: ComputedNode<unknown>): Fault {
   const cycleFrames = index < 0 ? trackingStack : trackingStack.slice(index);
   const involved = new Set<string>();
   for (let i = 0; i < cycleFrames.length; i++) {
-    const name = cycleFrames[i]!.owner.name;
+    const owner = cycleFrames[i]!.owner;
+    const name = "name" in owner ? owner.name : "observer";
     if (!involved.has(name)) involved.add(name);
   }
   if (involved.size === 0) involved.add(node.name);
@@ -193,6 +222,36 @@ function addLiveEdge(source: Node<unknown>, dependent: ComputedNode<unknown>): v
   source.dependents.set(dependent, count + 1);
   source.liveDependentRefs += 1;
   if (!source.live && source.watcherRefs + source.liveDependentRefs > 0) activate(source);
+}
+
+function attachObserver(state: ObserverState, node: Node<unknown>): void {
+  if (node.observers.has(state)) return;
+  node.observers.add(state);
+  node.watcherRefs += 1;
+  if (!node.live) activate(node);
+}
+
+function detachObserver(state: ObserverState, node: Node<unknown>): void {
+  if (!node.observers.delete(state)) return;
+  node.watcherRefs = Math.max(0, node.watcherRefs - 1);
+  if (node.live && node.watcherRefs + node.liveDependentRefs === 0) deactivate(node);
+}
+
+function replaceObserverDependencies(
+  state: ObserverState,
+  next: Node<unknown>[],
+  tokens: Map<Node<unknown>, number>,
+): void {
+  const previous = new Set(state.dependencies);
+  const incoming = new Set(next);
+  state.dependencies = next;
+  state.dependencyTokens = new Map(tokens);
+  for (const dependency of previous) {
+    if (!incoming.has(dependency)) detachObserver(state, dependency);
+  }
+  for (const dependency of next) {
+    if (!previous.has(dependency)) attachObserver(state, dependency);
+  }
 }
 
 function removeLiveEdge(source: Node<unknown>, dependent: ComputedNode<unknown>): void {
@@ -312,15 +371,18 @@ function withWalk<T>(run: () => T): T {
   }
 }
 
-function dependencyChanged(node: ComputedNode<unknown>): boolean {
+function dependenciesChanged(
+  dependencies: readonly Node<unknown>[],
+  dependencyTokens: ReadonlyMap<Node<unknown>, number>,
+): boolean {
   return withWalk(() => {
-    for (const dependency of node.dependencies) {
+    for (const dependency of dependencies) {
       if (activeWalk?.has(dependency)) {
-        if (dependency.token !== node.dependencyTokens.get(dependency)) return true;
+        if (dependency.token !== dependencyTokens.get(dependency)) return true;
         continue;
       }
       activeWalk?.add(dependency);
-      const recordedToken = node.dependencyTokens.get(dependency);
+      const recordedToken = dependencyTokens.get(dependency);
       const previousSuppressed = trackingSuppressed;
       trackingSuppressed += 1;
       try {
@@ -337,6 +399,10 @@ function dependencyChanged(node: ComputedNode<unknown>): boolean {
     }
     return false;
   });
+}
+
+function dependencyChanged(node: ComputedNode<unknown>): boolean {
+  return dependenciesChanged(node.dependencies, node.dependencyTokens);
 }
 
 function ensureFreshComputed<T>(node: ComputedNode<T>): void {
@@ -366,6 +432,7 @@ function recompute<T>(node: ComputedNode<T>): void {
     owner: node as ComputedNode<unknown>,
     dependencies: [],
     dependencySet: new Set(),
+    dependencyTokens: new Map(),
     ...(node.explicitGraphId === undefined ? {} : { graphId: node.explicitGraphId }),
   };
   const hadValue = node.hasValue;
@@ -438,6 +505,9 @@ export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
     ensureFreshComputed(node);
   } finally {
     checkGraph(node as Node<unknown>, frame);
+    if (frame !== undefined && node.kind === "computed") {
+      frame.dependencyTokens.set(node as Node<unknown>, node.token);
+    }
   }
   if (node.hasError) throw node.error;
   return node.value as T;
@@ -478,6 +548,11 @@ function markFrom(seeds: Iterable<Node<unknown>>): {
         canonical.add(watcher);
       }
     }
+    for (const observer of current.observers) {
+      if (!observer.active || observer.pending) continue;
+      observer.pending = true;
+      pendingObserverNotifications.add(observer);
+    }
     for (const dependent of current.dependents.keys()) queue.push(dependent);
   }
   // Sibling registration order is intentionally not a public contract.
@@ -499,7 +574,12 @@ function beginPropagation(seeds: Iterable<Node<unknown>>): void {
   let pendingSubscriptions: Set<SubscriptionRecord> | undefined;
   try {
     for (const seed of seeds) propagation.pendingSeeds.add(seed);
-    while (propagation.pendingSeeds.size > 0 || (pendingSubscriptions?.size ?? 0) > 0) {
+    while (
+      propagation.pendingSeeds.size > 0 ||
+      (pendingSubscriptions?.size ?? 0) > 0 ||
+      afterPropagationQueue.size > 0 ||
+      pendingObserverNotifications.size > 0
+    ) {
       if (propagation.pendingSeeds.size > 0) {
         const currentSeeds = new Set(propagation.pendingSeeds);
         propagation.pendingSeeds.clear();
@@ -525,6 +605,26 @@ function beginPropagation(seeds: Iterable<Node<unknown>>): void {
             notifyCanonicalWatcher(watcher);
           } catch (error) {
             errors.push(error);
+          }
+        }
+      }
+
+      if (pendingObserverNotifications.size > 0) {
+        const observers = [...pendingObserverNotifications];
+        for (const observer of observers) {
+          if (!observer.active) {
+            pendingObserverNotifications.delete(observer);
+            continue;
+          }
+          const previousDepth = observerNotificationDepth;
+          observerNotificationDepth = previousDepth + 1;
+          try {
+            observer.notifyCallback.call(observer.observer);
+          } catch (error) {
+            errors.push(error);
+          } finally {
+            observerNotificationDepth = previousDepth;
+            pendingObserverNotifications.delete(observer);
           }
         }
       }
@@ -557,6 +657,22 @@ function beginPropagation(seeds: Iterable<Node<unknown>>): void {
             for (let remaining = index + 1; remaining < settledSubscriptions.length; remaining += 1)
               (pendingSubscriptions ??= new Set()).add(settledSubscriptions[remaining]!);
             break;
+          }
+        }
+      }
+
+      if (
+        propagation.pendingSeeds.size === 0 &&
+        (pendingSubscriptions?.size ?? 0) === 0 &&
+        afterPropagationQueue.size > 0
+      ) {
+        const callbacks = [...afterPropagationQueue];
+        afterPropagationQueue.clear();
+        for (const callback of callbacks) {
+          try {
+            callback();
+          } catch (error) {
+            errors.push(error);
           }
         }
       }
@@ -599,7 +715,9 @@ function invokeStateEquals<T>(node: SignalNode<T>, a: T, b: T): boolean {
 }
 
 export function writeNode<T>(node: SignalNode<T>, value: T): void {
-  if (canonicalNotificationDepth > 0) throw watcherWriteFault(node as Node<unknown>);
+  ensureWritesAllowed(node as Node<unknown>);
+  if (canonicalNotificationDepth > 0 || observerNotificationDepth > 0)
+    throw watcherWriteFault(node as Node<unknown>);
   if (helperNotificationDepth > 0) {
     if (!invokeStateEquals(node, node.value, value)) {
       node.value = value;
@@ -781,6 +899,7 @@ function initializeNodeBase<T, K extends Node<T>["kind"]>(
     dependents: new Map(),
     watchers: [],
     canonicalWatchers: new Set(),
+    observers: new Set(),
     watchedCallback: options[watched],
     unwatchedCallback: options[unwatched],
     livenessObservers: new Set(),
@@ -830,6 +949,12 @@ export function initializeComputedNode<T>(
 function watcherState(watcher: Watcher): WatcherState {
   const state = watcherStates.get(watcher);
   if (state === undefined) throw new TypeError("Invalid Signal.subtle.Watcher receiver");
+  return state;
+}
+
+function observerState(observer: Observer): ObserverState {
+  const state = observerStates.get(observer);
+  if (state === undefined) throw new TypeError("Invalid Aeolia observer receiver");
   return state;
 }
 
@@ -922,6 +1047,130 @@ export function watcherGetPending(watcher: Watcher): Signal<unknown>[] {
     .map((node) => node.api as Signal<unknown>);
 }
 
+/** Register the state for a framework-controlled observer. */
+export function initializeObserver(observer: Observer, notify: (this: Observer) => void): void {
+  if (typeof notify !== "function") throw new TypeError("Observer notify must be a function");
+  observerStates.set(observer, {
+    observer,
+    notifyCallback: notify,
+    dependencies: [],
+    dependencyTokens: new Map(),
+    pending: false,
+    active: true,
+    tracking: false,
+  });
+}
+
+/** Evaluate observer work and replace its dynamic dependencies. */
+export function observerTrack<T>(observer: Observer, run: () => T): T {
+  const state = observerState(observer);
+  if (!state.active) throw new Fault("disposed");
+  if (
+    observerNotificationDepth > 0 ||
+    helperNotificationDepth > 0 ||
+    canonicalNotificationDepth > 0
+  ) {
+    throw new Fault("watcher-read");
+  }
+  if (typeof run !== "function") throw new TypeError("Observer track callback must be a function");
+  if (state.tracking) throw new Fault("cycle", ["observer"]);
+
+  const frame: ComputationFrame = {
+    owner: state,
+    dependencies: [],
+    dependencySet: new Set(),
+    dependencyTokens: new Map(),
+  };
+  const previousTrackingSuppressed = trackingSuppressed;
+  state.tracking = true;
+  trackingStack.push(frame);
+  trackingSuppressed = 0;
+  let result!: T;
+  let thrown: unknown;
+  let succeeded = false;
+  try {
+    result = run();
+    if (isPromiseLike(result)) thrown = new Fault("async-compute", ["observer"]);
+    else succeeded = true;
+  } catch (error) {
+    thrown = error;
+  } finally {
+    if (trackingStack[trackingStack.length - 1] === frame) trackingStack.pop();
+    else {
+      const frameIndex = trackingStack.indexOf(frame);
+      if (frameIndex >= 0) trackingStack.splice(frameIndex, 1);
+    }
+    trackingSuppressed = previousTrackingSuppressed;
+    state.tracking = false;
+  }
+
+  if (state.active) {
+    state.pending = false;
+    pendingObserverNotifications.delete(state);
+    replaceObserverDependencies(state, frame.dependencies, frame.dependencyTokens);
+    for (const dependency of frame.dependencies) {
+      if (dependency.token !== frame.dependencyTokens.get(dependency)) {
+        state.pending = true;
+        pendingObserverNotifications.add(state);
+        break;
+      }
+    }
+  }
+  if (pendingObserverNotifications.has(state) && !propagation.inProgress) beginPropagation([]);
+  if (!succeeded) throw thrown;
+  return result;
+}
+
+/** Check observer dependencies without evaluating the tracked callback. */
+export function observerCheck(observer: Observer): boolean {
+  const state = observerState(observer);
+  if (!state.active) return false;
+  if (
+    observerNotificationDepth > 0 ||
+    helperNotificationDepth > 0 ||
+    canonicalNotificationDepth > 0
+  ) {
+    throw new Fault("watcher-read");
+  }
+  let changed = false;
+  try {
+    changed = dependenciesChanged(state.dependencies, state.dependencyTokens);
+  } finally {
+    state.pending = false;
+    pendingObserverNotifications.delete(state);
+  }
+  return changed;
+}
+
+/** Dispose a framework-controlled observer and detach all its sources. */
+export function observerDispose(observer: Observer): void {
+  const state = observerState(observer);
+  if (!state.active) return;
+  state.active = false;
+  state.pending = false;
+  pendingObserverNotifications.delete(state);
+  const dependencies = state.dependencies;
+  state.dependencies = [];
+  state.dependencyTokens = new Map();
+  for (const dependency of dependencies) detachObserver(state, dependency);
+}
+
+/** Queue a callback for the post-propagation handoff. */
+export function afterPropagation(callback: () => void): Unsubscribe {
+  if (typeof callback !== "function")
+    throw new TypeError("After-propagation callback must be a function");
+  afterPropagationQueue.add(callback);
+  if (!propagation.inProgress) {
+    beginPropagation([]);
+  }
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    afterPropagationQueue.delete(callback);
+  };
+}
+
 /** Test canonical watcher identity without importing the watcher constructor. */
 export function isWatcher(value: unknown): value is Watcher {
   return isObject(value) && watcherNodes.has(value);
@@ -940,9 +1189,8 @@ export function isComputed(value: unknown): boolean {
 /** Return the current computed owner, if dependency collection is active. */
 export function currentComputed(): Computed<unknown> | null {
   if (trackingSuppressed > 0) return null;
-  return (
-    (trackingStack[trackingStack.length - 1]?.owner.api as Computed<unknown> | undefined) ?? null
-  );
+  const owner = trackingStack[trackingStack.length - 1]?.owner;
+  return owner !== undefined && "kind" in owner ? (owner.api as Computed<unknown>) : null;
 }
 
 /** Run a callback while suppressing dependency collection. */
@@ -954,6 +1202,22 @@ export function untrack<T>(run: () => T): T {
   } finally {
     trackingSuppressed = previous;
   }
+}
+
+/** Run synchronous teardown while rejecting every reactive state write. */
+export function withoutWrites<T>(run: () => T): T {
+  if (typeof run !== "function") throw new TypeError("Read-only callback must be a function");
+  writeRefusalDepth += 1;
+  try {
+    return run();
+  } finally {
+    writeRefusalDepth -= 1;
+  }
+}
+
+/** Reject a state write when a read-only scope is active. */
+export function ensureWritesAllowed<T>(node: Node<T>): void {
+  if (writeRefusalDepth > 0) throw writeForbiddenFault(node);
 }
 
 /** Return a canonical readable's immediate sources without evaluating it. */
@@ -1108,6 +1372,14 @@ export interface ReactiveGraphBinding {
  * application API.
  */
 export const __internal = Object.freeze({
+  /** Reject forbidden managed writes before their non-signal bookkeeping changes. */
+  assertWritesAllowed: (readable: Readable<unknown>): void => {
+    const node = nodeFor(readable);
+    ensureWritesAllowed(node);
+    if (canonicalNotificationDepth > 0 || observerNotificationDepth > 0)
+      throw watcherWriteFault(node);
+  },
+
   /** Batch writes and propagate their combined seeds when the outer batch ends. */
   batch,
 
@@ -1116,13 +1388,16 @@ export const __internal = Object.freeze({
 
   /** Report whether the active computation stack contains a live computation. */
   isCurrentComputationLive: (): boolean | undefined =>
-    trackingStack.length === 0 ? undefined : trackingStack.some((frame) => frame.owner.live),
+    trackingStack.length === 0
+      ? undefined
+      : trackingStack.some((frame) => "kind" in frame.owner && frame.owner.live),
 
   /** Report whether a readable currently has a live descendant. */
   isLive: (readable: Readable<unknown>): boolean => nodeFor(readable).live,
 
   /** Report whether a watcher callback is currently being notified. */
-  isNotifying: (): boolean => helperNotificationDepth > 0 || canonicalNotificationDepth > 0,
+  isNotifying: (): boolean =>
+    helperNotificationDepth > 0 || canonicalNotificationDepth > 0 || observerNotificationDepth > 0,
 
   /** Report whether the graph is checking computed staleness rather than reading user state. */
   isStalenessWalk: (): boolean => stalenessWalkDepth > 0,

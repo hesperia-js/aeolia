@@ -3,7 +3,7 @@ import { adopt, snapshot } from "../../src/realm.ts";
 import { createGraph } from "../../src/contract/index.ts";
 import { Fault } from "../../src/fault.ts";
 import { affects, createMutation, createQuery, defineContract } from "../../src/contract/index.ts";
-import { subscribe, watch } from "../../src/reactive.ts";
+import { subscribe, watch, withoutWrites } from "../../src/reactive.ts";
 import { testBackend } from "../../src/testing.ts";
 
 beforeEach(() => {
@@ -334,6 +334,208 @@ describe("QueryStore.ready", () => {
     backend.resolve(backend.calls[1]!, 4);
     await expect(readyAfterCollection).resolves.toBe(4);
     await expect(reactivated.ready).resolves.toBe(4);
+    graph.dispose();
+  });
+
+  it("refuses revalidation before touching an active request in a read-only scope", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("active");
+    const first = backend.calls[0]!;
+
+    expect(() => withoutWrites(() => store.revalidate())).toThrow("write-forbidden");
+    expect(backend.calls).toHaveLength(1);
+    expect(first.aborted).toBe(false);
+    expect(store.status.get()).toBe("fetching");
+
+    backend.resolve(first, 9);
+    await expect(store.ready).resolves.toBe(9);
+    expect(store.value.get()).toBe(9);
+    graph.dispose();
+  });
+
+  it("allows one automatic recovery after an initial failure and disarms after recovery failure", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("automatic-recovery", { revalidateAfterMs: 1 });
+    const stop = watch(store.value, () => undefined);
+    const initialFailure = new Error("initial offline");
+    backend.reject(backend.calls[0]!, initialFailure);
+    await flush();
+    expect(store.status.get()).toBe("failed");
+
+    jest.advanceTimersByTime(2);
+    expect(backend.calls).toHaveLength(2);
+    const recoveryFailure = new Error("recovery offline");
+    backend.reject(backend.calls[1]!, recoveryFailure);
+    await flush();
+    expect(store.status.get()).toBe("failed");
+
+    jest.advanceTimersByTime(20);
+    expect(backend.calls).toHaveLength(2);
+    stop();
+    graph.dispose();
+  });
+
+  it("re-arms automatic recovery after an explicit retry succeeds", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("retry-recovery", { revalidateAfterMs: 1 });
+    const stop = watch(store.value, () => undefined);
+    backend.reject(backend.calls[0]!, new Error("initial offline"));
+    await flush();
+
+    jest.advanceTimersByTime(2);
+    expect(backend.calls).toHaveLength(2);
+    backend.reject(backend.calls[1]!, new Error("recovery offline"));
+    await flush();
+    expect(backend.calls).toHaveLength(2);
+
+    const retry = store.revalidate();
+    expect(backend.calls).toHaveLength(3);
+    backend.resolve(backend.calls[2]!, 42);
+    await retry;
+    expect(store.status.get()).toBe("ready");
+
+    jest.advanceTimersByTime(2);
+    expect(backend.calls).toHaveLength(4);
+    stop();
+    graph.dispose();
+  });
+
+  it("counts a failed query-member retry as the shared automatic recovery", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const first = graph.api.query("member-recovery", { revalidateAfterMs: 1 });
+    const initialFailure = new Error("initial offline");
+    backend.reject(backend.calls[0]!, initialFailure);
+    await flush();
+    expect(first.status.get()).toBe("failed");
+
+    const second = graph.api.query("member-recovery");
+    expect(backend.calls).toHaveLength(2);
+    const recoveryFailure = new Error("recovery offline");
+    backend.reject(backend.calls[1]!, recoveryFailure);
+    await flush();
+    expect(second.status.get()).toBe("failed");
+
+    const third = graph.api.query("member-recovery");
+    expect(backend.calls).toHaveLength(2);
+    expect(third.status.get()).toBe("failed");
+    graph.dispose();
+  });
+
+  it("committing local data does not restart automatic requests after recovery is exhausted", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("local-after-recovery", { revalidateAfterMs: 1 });
+    const stop = watch(store.value, () => undefined);
+    try {
+      const initial = store.ready.catch((error: unknown) => error);
+      backend.reject(backend.calls[0]!, new Error("initial failure"));
+      await initial;
+      jest.advanceTimersByTime(2);
+      const recovery = store.ready.catch((error: unknown) => error);
+      backend.reject(backend.calls[1]!, new Error("recovery failure"));
+      await recovery;
+
+      store.set(42);
+      expect(store.error.get()).toBeUndefined();
+      const second = graph.api.query("local-after-recovery", { revalidateAfterMs: 1 });
+      expect(second.value.get()).toBe(42);
+      jest.advanceTimersByTime(20);
+      expect(backend.calls).toHaveLength(2);
+      graph.api.query("local-after-recovery", { revalidateAfterMs: 1 });
+      expect(backend.calls).toHaveLength(2);
+
+      const retry = store.revalidate();
+      expect(backend.calls).toHaveLength(3);
+      backend.resolve(backend.calls[2]!, 43);
+      await retry;
+      expect(store.value.get()).toBe(43);
+    } finally {
+      stop();
+      graph.dispose();
+    }
+  });
+
+  it("successful recovery restores the timer and the allowance for a later failure", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("successful-recovery", { revalidateAfterMs: 1 });
+    const stop = watch(store.value, () => undefined);
+    try {
+      const initial = store.ready.catch((error: unknown) => error);
+      backend.reject(backend.calls[0]!, new Error("initial failure"));
+      await initial;
+      jest.advanceTimersByTime(2);
+      expect(backend.calls).toHaveLength(2);
+
+      const recovered = store.ready;
+      backend.resolve(backend.calls[1]!, 42);
+      expect(await recovered).toBe(42);
+      expect(store.status.get()).toBe("ready");
+      jest.advanceTimersByTime(2);
+      expect(backend.calls).toHaveLength(3);
+
+      const refresh = store.ready.catch((error: unknown) => error);
+      backend.reject(backend.calls[2]!, new Error("later refresh failure"));
+      await refresh;
+      jest.advanceTimersByTime(2);
+      expect(backend.calls).toHaveLength(4);
+
+      const failedRecovery = store.ready.catch((error: unknown) => error);
+      const failure = new Error("later recovery failed");
+      backend.reject(backend.calls[3]!, failure);
+      expect(await failedRecovery).toBe(failure);
+      jest.advanceTimersByTime(20);
+      expect(backend.calls).toHaveLength(4);
+      expect(store.value.get()).toBe(42);
+    } finally {
+      stop();
+      graph.dispose();
+    }
+  });
+
+  it("allows one recovery after a healthy timed refresh fails and routes its failure", async () => {
+    const backend = testBackend();
+    const faults: unknown[] = [];
+    const queryDefinition = query(backend);
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "query-ready",
+        operations: { query: queryDefinition },
+      }),
+      onUnobservedFault: (error) => faults.push(error),
+    });
+    const store = graph.api.query("timed-recovery", { revalidateAfterMs: 1 });
+    const stop = watch(store.value, () => undefined);
+    backend.resolve(backend.calls[0]!, 1);
+    await flush();
+
+    jest.advanceTimersByTime(2);
+    expect(backend.calls).toHaveLength(2);
+    const refreshFailure = new Error("refresh offline");
+    backend.reject(backend.calls[1]!, refreshFailure);
+    await flush();
+    expect(store.status.get()).toBe("failed");
+
+    jest.advanceTimersByTime(2);
+    expect(backend.calls).toHaveLength(3);
+    const recoveryFailure = new Error("recovery offline");
+    backend.reject(backend.calls[2]!, recoveryFailure);
+    await flush();
+    expect(faults).toHaveLength(1);
+    expect(faults[0]).toMatchObject({
+      constructor: Fault,
+      kind: "contract",
+      involved: ["ready/timed-recovery", "automatic query recovery exhausted"],
+    });
+    expect(store.error.get()).toBe(recoveryFailure);
+
+    jest.advanceTimersByTime(20);
+    expect(backend.calls).toHaveLength(3);
+    stop();
     graph.dispose();
   });
 });

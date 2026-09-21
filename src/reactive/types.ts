@@ -79,3 +79,35 @@ export interface Computed<T = unknown> extends Signal<T> {}
 
 /** Options accepted by {@link computed} and {@link Signal.Computed}. */
 export interface ComputedOptions<T> extends SignalOptions<T> {}
+
+/**
+ * Notification options for a framework-controlled observer.
+ *
+ * The notification is an invalidation signal only. It runs during Aeolia's
+ * propagation phase, where reactive reads and writes are forbidden. Use
+ * {@link Observer.check} and {@link Observer.track} from an
+ * {@link afterPropagation} callback to perform framework work.
+ */
+export interface ObserverOptions {
+  /** Notify the framework that this observer has pending invalidation. */
+  readonly notify: (this: Observer) => void;
+}
+
+/**
+ * A manually controlled dependency observer.
+ *
+ * `track` evaluates framework work and replaces its dynamic dependencies.
+ * `check` refreshes dependency freshness without evaluating that work and
+ * returns whether it was invalidated. `dispose` removes all dependencies and
+ * makes the observer inert.
+ */
+export interface Observer {
+  /** Evaluate work synchronously and replace the observer's dependencies. */
+  track<T>(run: () => T): T;
+
+  /** Check dependency freshness without evaluating the tracked work. */
+  check(): boolean;
+
+  /** Dispose the observer; repeated calls are harmless. */
+  dispose(): void;
+}

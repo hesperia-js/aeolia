@@ -1,6 +1,7 @@
 import type { QueryCaller, QueryRequest, QuerySource, StoreRuntime } from "./runtime.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
 import { addSignalAbort } from "../utils.ts";
+import { Fault } from "../fault.ts";
 import { assertStoreOpen, reportContinuationError } from "./faults.ts";
 import {
   currentRequest,
@@ -40,6 +41,7 @@ export function settleQuerySuccess<T>(
     scheduleSweep(runtime.graph.__runtime);
     return;
   }
+  runtime.recoveryDisarmed = false;
   try {
     reactiveInternal.batch(() => {
       retirePredictions(runtime, request.predictionIds);
@@ -63,6 +65,7 @@ export function settleQueryFailure<T>(
     scheduleSweep(runtime.graph.__runtime);
     return;
   }
+  runtime.recoveryDisarmed = request.automaticRecovery;
   try {
     runtime.failing = true;
     runtime.invalidated = true;
@@ -72,6 +75,11 @@ export function settleQueryFailure<T>(
   } catch (error) {
     reportContinuationError(runtime.graph.__runtime, error);
   }
+  if (request.automaticRecovery)
+    reportContinuationError(
+      runtime.graph.__runtime,
+      new Fault("contract", [runtime.key as string, "automatic query recovery exhausted"]),
+    );
   armStoreTimer(runtime);
 }
 
@@ -80,13 +88,19 @@ export function startQuery<T>(
   caller: QueryCaller<T>,
   force: boolean,
   abortSignal?: AbortSignal,
+  automaticRecovery = false,
 ): Promise<void> {
   assertStoreOpen(runtime);
+  reactiveInternal.assertWritesAllowed(runtime.committed);
   const state = runtime.graph.__runtime;
   interact(state);
   if (!force) {
     const existing = currentRequest(runtime);
     if (existing != null) return existing.promise;
+  }
+  if (!force && runtime.recoveryDisarmed) return Promise.resolve();
+  if (force) {
+    runtime.recoveryDisarmed = false;
   }
   if (runtime.activeRequest != null && !runtime.activeRequest.settled) {
     runtime.activeRequest.superseded = true;
@@ -103,6 +117,7 @@ export function startQuery<T>(
   const request: QueryRequest = {
     controller,
     generation,
+    automaticRecovery,
     predictionIds: runtime.predictionStack
       .peek()
       .filter((prediction) => prediction.succeeded && !prediction.dead)
@@ -145,13 +160,12 @@ export function startQuery<T>(
   if (controller.signal.aborted) onRequestAbort();
   let result: Promise<T>;
   try {
-    result = Promise.resolve(
-      caller.query.fetch(caller.input, {
-        abortSignal: controller.signal,
-        graph: state.graph.id,
-        key: runtime.key,
-      }),
-    );
+    const options = {
+      abortSignal: controller.signal,
+      graph: state.graph.id,
+      key: runtime.key,
+    };
+    result = Promise.resolve(caller.query.fetch(caller.input, options));
   } catch (error) {
     result = Promise.reject(error);
   }
@@ -191,12 +205,14 @@ export function armStoreTimer<T>(runtime: StoreRuntime<T>): void {
     clearTimeout(runtime.timer);
     runtime.timer = undefined;
   }
+  if (runtime.recoveryDisarmed) return;
   if (runtime.dropped || currentRequest(runtime) != null) return;
   const base = Math.max(runtime.lastLandingAt ?? 0, runtime.lastSettledAt ?? 0);
   if (base === 0 && runtime.lastLandingAt === undefined && runtime.lastSettledAt === undefined)
     return;
   const at = Date.now();
-  let deadline: number | undefined;
+  let deadline: number | undefined =
+    runtime.invalidated && !runtime.failing && runtime.valueLive ? at : undefined;
   for (const caller of runtime.callers) {
     if (!Number.isFinite(caller.windowMs)) continue;
     const candidate = base + caller.windowMs;
@@ -224,8 +240,9 @@ export function armStoreTimer<T>(runtime: StoreRuntime<T>): void {
     if (runtime.valueLive && runtime.source != null) {
       const source = runtime.source;
       const caller = callerForSource(runtime, source);
+      const recovering = runtime.failing;
       try {
-        void startQuery(runtime, caller, true);
+        void startQuery(runtime, caller, false, undefined, recovering);
       } catch (error) {
         reportContinuationError(runtime.graph.__runtime, error);
       }

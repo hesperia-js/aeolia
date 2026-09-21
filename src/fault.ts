@@ -10,6 +10,7 @@ export type FaultKind =
   | "async-compute"
   | "watcher-read"
   | "watcher-write"
+  | "write-forbidden"
   | "propagation"
   | "disposed"
   | "contract"

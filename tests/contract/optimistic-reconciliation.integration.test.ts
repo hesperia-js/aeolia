@@ -34,6 +34,7 @@ async function fixture(on: "invalidate" | "revalidate" = "revalidate") {
     graph,
     store,
     values,
+    stop,
     close: () => {
       stop();
       graph.dispose();
@@ -114,49 +115,53 @@ test("a refresh retires its covered prediction but preserves a newer pending mut
   }
 });
 
-test("invalidation retains a successful prediction until an explicitly started refresh", async () => {
+test("unobserved invalidation retains a successful prediction until an explicitly started refresh", async () => {
   const f = await fixture("invalidate");
   try {
+    f.stop();
     const mutation = f.graph.api.mutation(42);
     f.backend.resolve(f.backend.calls[1]!, undefined);
     await mutation;
     expect(f.backend.calls).toHaveLength(2);
     expect(f.store.status.get()).toBe("stale");
-    expect(f.values).toEqual([undefined, 0, 42]);
+    expect(f.store.value.get()).toBe(42);
     const refresh = f.store.revalidate();
     const ready = f.store.ready;
     f.backend.resolve(f.backend.calls[2]!, 42);
     await refresh;
     expect(await ready).toBe(42);
-    expect(f.values).toEqual([undefined, 0, 42]);
+    expect(f.store.value.get()).toBe(42);
   } finally {
     f.close();
   }
 });
 
-test("a superseded refresh cannot retire predictions owned by the newer reconciliation", async () => {
-  const f = await fixture();
-  try {
-    const first = f.graph.api.mutation(1);
-    f.backend.resolve(f.backend.calls[1]!, undefined);
-    await first;
-    const obsoleteRefresh = f.backend.calls[2]!;
-    const second = f.graph.api.mutation(10);
-    f.backend.resolve(f.backend.calls[3]!, undefined);
-    await second;
-    expect(obsoleteRefresh.aborted).toBe(true);
-    const ready = f.store.ready;
-    f.backend.resolve(obsoleteRefresh, 1);
-    await Promise.resolve();
-    expect(f.store.status.get()).toBe("revalidating");
-    expect(f.values).toEqual([undefined, 0, 1, 11]);
-    f.backend.resolve(f.backend.calls[4]!, 11);
-    expect(await ready).toBe(11);
-    expect(f.values).toEqual([undefined, 0, 1, 11]);
-  } finally {
-    f.close();
-  }
-});
+test.each(["invalidate", "revalidate"] as const)(
+  "a superseded %s refresh cannot retire predictions owned by the newer reconciliation",
+  async (on) => {
+    const f = await fixture(on);
+    try {
+      const first = f.graph.api.mutation(1);
+      f.backend.resolve(f.backend.calls[1]!, undefined);
+      await first;
+      const obsoleteRefresh = f.backend.calls[2]!;
+      const second = f.graph.api.mutation(10);
+      f.backend.resolve(f.backend.calls[3]!, undefined);
+      await second;
+      expect(obsoleteRefresh.aborted).toBe(true);
+      const ready = f.store.ready;
+      f.backend.resolve(obsoleteRefresh, 1);
+      await Promise.resolve();
+      expect(f.store.status.get()).toBe("revalidating");
+      expect(f.values).toEqual([undefined, 0, 1, 11]);
+      f.backend.resolve(f.backend.calls[4]!, 11);
+      expect(await ready).toBe(11);
+      expect(f.values).toEqual([undefined, 0, 1, 11]);
+    } finally {
+      f.close();
+    }
+  },
+);
 
 test("a request started before mutation success cannot retire its later successful prediction", async () => {
   const f = await fixture("invalidate");
@@ -165,11 +170,12 @@ test("a request started before mutation success cannot retire its later successf
     const mutation = f.graph.api.mutation(42);
     f.backend.resolve(f.backend.calls[2]!, undefined);
     await mutation;
+    expect(f.backend.calls[1]!.aborted).toBe(true);
     f.backend.resolve(f.backend.calls[1]!, 0);
     await oldRefresh;
     expect(f.values).toEqual([undefined, 0, 42]);
 
-    const reconciliation = f.store.revalidate();
+    const reconciliation = f.store.ready;
     f.backend.resolve(f.backend.calls[3]!, 42);
     await reconciliation;
     expect(f.values).toEqual([undefined, 0, 42]);

@@ -1,9 +1,21 @@
 /** Public reactive subsystem entry point. */
-export { Signal, computed, readableBrand, signal, subscribe, watch } from "./api.ts";
+export {
+  Signal,
+  afterPropagation,
+  computed,
+  createObserver,
+  readableBrand,
+  signal,
+  subscribe,
+  withoutWrites,
+  watch,
+} from "./api.ts";
 export type {
   Computed,
   ComputedOptions,
   LifecycleCallback,
+  Observer,
+  ObserverOptions,
   Readable,
   SignalOptions,
   WritableSignal,

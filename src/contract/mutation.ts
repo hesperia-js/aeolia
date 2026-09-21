@@ -53,14 +53,16 @@ export function applyMutationEffects(
     if (runtime === undefined || runtime.disposed) continue;
     if (affected.on === "invalidate") {
       invalidateStore(runtime);
-      continue;
+      if (!runtime.valueLive) continue;
     }
     try {
       const caller = callerForSource(runtime, {
         query: target.affected.query,
         input: target.queryInput,
       });
-      void startQuery(runtime, caller, true);
+      const recovering =
+        runtime.recoveryDisarmed || runtime.activeRequest?.automaticRecovery === true;
+      void startQuery(runtime, caller, true, undefined, recovering);
     } catch (error) {
       reportContinuationError(state, error);
     }

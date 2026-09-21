@@ -1,11 +1,14 @@
 import type { Unsubscribe } from "../fault.ts";
 import {
   Computed as ComputedClass,
+  Observer as ObserverClass,
   State as StateClass,
   Watcher as WatcherClass,
 } from "./classes.ts";
 import {
   currentComputed as engineCurrentComputed,
+  afterPropagation as engineAfterPropagation,
+  withoutWrites as engineWithoutWrites,
   introspectComputedSources,
   introspectSinks as engineIntrospectSinks,
   introspectWatcherSources,
@@ -24,6 +27,8 @@ import type {
   Readable,
   Signal as SignalShape,
   SignalOptions,
+  Observer,
+  ObserverOptions,
   WritableSignal,
 } from "./types.ts";
 
@@ -35,6 +40,8 @@ export type {
   Computed,
   ComputedOptions,
   LifecycleCallback,
+  Observer,
+  ObserverOptions,
   Readable,
   SignalOptions,
   WritableSignal,
@@ -236,6 +243,56 @@ export namespace Signal {
   export function isWatcher(value: unknown): value is Signal.subtle.Watcher {
     return engineIsWatcher(value);
   }
+}
+
+/**
+ * Create a framework-controlled observer with a notification-only callback.
+ *
+ * The observer is inert until its first call to {@link Observer.track}.
+ *
+ * @param options - Notification callback invoked when tracked dependencies
+ * invalidate. The callback cannot read or write signals.
+ * @returns A manually controlled observer whose dependencies follow its latest
+ * tracked callback.
+ * @throws {TypeError} If `options` is not an object or its `notify` member is
+ * not callable.
+ */
+export function createObserver(options: ObserverOptions): Observer {
+  if (options === null || typeof options !== "object")
+    throw new TypeError("Observer options must be an object");
+  return new ObserverClass(options.notify);
+}
+
+/**
+ * Queue a callback after the current synchronous propagation settles.
+ *
+ * The callback runs before the outermost signal write returns and outside
+ * Aeolia's notification read/write freeze. Calls made during a handoff are
+ * delivered by a later handoff. The returned unsubscribe is idempotent.
+ *
+ * @param callback - Synchronous callback to invoke after propagation settles.
+ * @returns An idempotent unsubscribe function that cancels a queued callback.
+ * @throws {TypeError} If `callback` is not callable.
+ */
+export function afterPropagation(callback: () => void): Unsubscribe {
+  return engineAfterPropagation(callback);
+}
+
+/**
+ * Run synchronous cleanup while forbidding every Aeolia state write.
+ *
+ * Reads remain allowed, nested scopes are supported, and the previous write
+ * policy is restored even when the callback throws. The scope does not cross
+ * asynchronous continuations.
+ *
+ * @param run - Synchronous cleanup callback. Its return value is returned to
+ * the caller.
+ * @returns The value returned by `run`.
+ * @throws {TypeError} If `run` is not callable, or the callback attempts a
+ * signal write. The callback's own errors are rethrown unchanged.
+ */
+export function withoutWrites<T>(run: () => T): T {
+  return engineWithoutWrites(run);
 }
 
 type SignalOptionsShape<T> = SignalOptions<T>;

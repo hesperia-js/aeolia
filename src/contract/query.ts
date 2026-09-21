@@ -116,7 +116,7 @@ export function makeQueryStore<T>(
     reportFault: (fault) => graphFault(state, fault),
   });
   const stale = queryIsStale(caller);
-  if (stale) void startQuery(runtime, caller, false, caller.abortSignal);
+  if (stale) void startQuery(runtime, caller, false, caller.abortSignal, runtime.failing);
   else armStoreTimer(runtime);
   touch(runtime);
   return queryStore;

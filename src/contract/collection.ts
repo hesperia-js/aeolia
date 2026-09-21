@@ -4,6 +4,7 @@ import { __internal as reactiveInternal } from "../reactive.ts";
 import { assertGraphOpen } from "./faults.ts";
 import { writeAllStatuses } from "./status.ts";
 import type { StoreRuntime, StreamSession } from "./runtime.ts";
+import { publishStreamEvent } from "./stream-events.ts";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -79,7 +80,7 @@ export function popCollectionCandidate(
 }
 
 export function isLive<T>(runtime: StoreRuntime<T>): boolean {
-  return runtime.liveReadableCount > 0;
+  return runtime.liveReadableCount > 0 || (runtime.stream?.listeners.size ?? 0) > 0;
 }
 
 function collectionCandidateEligible<T>(runtime: StoreRuntime<T>): boolean {
@@ -100,7 +101,7 @@ export function updateCollectionCandidate<T>(runtime: StoreRuntime<T>): void {
     if (index >= 0) removeCollectionCandidateAt(state, index);
     return;
   }
-  const deadline = runtime.lastInteraction + state.idleMs;
+  const deadline = (runtime.stream?.unobservedSince ?? runtime.lastInteraction) + state.idleMs;
   if (index < 0) {
     const candidate: CollectionCandidate = {
       runtime: runtime as StoreRuntime<unknown>,
@@ -158,6 +159,8 @@ export function endStream<T>(
 ): void {
   if (session.ended) return;
   session.ended = true;
+  publishStreamEvent(runtime, session, { kind: "close", failed: status === "failed", reason });
+  session.listeners.clear();
   if (runtime.stream === session) runtime.stream = undefined;
   runtime.graph.__runtime.activeControllers.delete(session.controller);
   session.controller.abort();
@@ -201,6 +204,7 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
   runtime.source = undefined;
   runtime.hasCommitted = false;
   runtime.failing = false;
+  runtime.recoveryDisarmed = false;
   runtime.invalidated = false;
   runtime.lastLandingAt = undefined;
   runtime.lastSettledAt = undefined;

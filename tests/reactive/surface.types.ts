@@ -1,4 +1,4 @@
-import { Signal } from "../../src/index.ts";
+import { Signal, afterPropagation, createObserver, withoutWrites } from "../../src/index.ts";
 
 function accepts<T>(_value: T): void {}
 
@@ -33,3 +33,19 @@ const sinks: (Signal<unknown> | Signal.subtle.Watcher)[] = Signal.subtle.introsp
 void pending;
 void sources;
 void sinks;
+
+const observer = createObserver({
+  notify(this: import("../../src/index.ts").Observer): void {
+    void this;
+  },
+});
+const tracked: number = observer.track(() => state.get());
+const invalidated: boolean = observer.check();
+const cancelAfterPropagation = afterPropagation(() => undefined);
+observer.dispose();
+cancelAfterPropagation();
+void tracked;
+void invalidated;
+withoutWrites(() => {
+  void state.get();
+});

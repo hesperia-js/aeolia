@@ -69,6 +69,34 @@ describe("mutation effects and failure routing", () => {
     graph.dispose();
   });
 
+  it("defaults an inputless affected query to invalidation when on and select are omitted", async () => {
+    let fetches = 0;
+    const query = createQuery({
+      name: "settings.get",
+      key: () => "settings",
+      fetch: async (_input: undefined) => {
+        fetches += 1;
+        return { theme: "light" };
+      },
+    });
+    const mutation = createMutation({
+      name: "settings.save",
+      affects: [affects(query, {})],
+      run: async (_input: undefined) => undefined,
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "operations", operations: { query, mutation } }),
+    });
+    const store = graph.api.query(undefined);
+    await store.ready;
+    expect(fetches).toBe(1);
+    await graph.api.mutation(undefined);
+    expect(store.status.get()).toBe("stale");
+    expect(store.value.get()).toEqual({ theme: "light" });
+    expect(fetches).toBe(1);
+    graph.dispose();
+  });
+
   it("removes predictions on mutation failure and routes prediction reads to the fault channel", async () => {
     const backend = testBackend();
     const query = userQuery(backend);

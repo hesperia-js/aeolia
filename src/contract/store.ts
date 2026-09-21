@@ -7,7 +7,7 @@ import { __internal as reactiveInternal, computed, signal, subscribe } from "../
 import { assertStoreOpen, graphFault } from "./faults.ts";
 import type { GraphRuntimeState, Prediction, StoreRuntime } from "./runtime.ts";
 import { configureDeclaredStore, issue, recordLanding } from "./store-state.ts";
-import { interact, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
+import { interact, isLive, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { armStoreTimer } from "./query-request.ts";
 import { runtimeByStore } from "./registry.ts";
 
@@ -50,6 +50,10 @@ export function observeStoreReadable<T>(
       runtime.liveReadableCount += live ? 1 : -1;
       if (runtime.liveReadableCount < 0) runtime.liveReadableCount = 0;
       if (observation.isValue === true) runtime.valueLive = live;
+      if (runtime.stream !== undefined) {
+        if (live) runtime.stream.unobservedSince = undefined;
+        else if (!isLive(runtime)) runtime.stream.unobservedSince = Date.now();
+      }
       if (live) {
         touch(runtime);
         if (observation.armsFreshness === true) armStoreTimer(runtime);
@@ -82,6 +86,7 @@ export function subscribeStore<T>(
 
 export function directWrite<T>(runtime: StoreRuntime<T>, value: T): void {
   assertStoreOpen(runtime);
+  reactiveInternal.assertWritesAllowed(runtime.committed);
   interact(runtime.graph.__runtime);
   issue(runtime);
   // Direct writes issue a generation but intentionally do not abort a request.
@@ -151,6 +156,7 @@ export function makeStore<T>(
     },
     update(next: (current: T | undefined) => T): void {
       assertStoreOpen(runtime);
+      reactiveInternal.assertWritesAllowed(runtime.committed);
       interact(state);
       directWrite(runtime, next(reactiveInternal.signalValue(runtime.committed)));
     },
@@ -187,6 +193,7 @@ export function makeStore<T>(
     snapshotSpecified: definition?.snapshot != null,
     hasCommitted: definition != null,
     failing: false,
+    recoveryDisarmed: false,
     invalidated: false,
     ...(definition === undefined ? {} : { lastLandingAt: Date.now() }),
     generation: 0,

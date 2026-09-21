@@ -8,6 +8,7 @@ import { configureKeyedValue, issue, recordLanding } from "./store-state.ts";
 import { getOrCreateStore, observeStoreReadable } from "./store.ts";
 import { endStream, setStreamStatus, touch } from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
+import { publishStreamEvent } from "./stream-events.ts";
 
 export function failStream<T>(
   runtime: StoreRuntime<T>,
@@ -42,6 +43,9 @@ export async function consumeStream<T>(
       } catch (error) {
         reportContinuationError(runtime.graph.__runtime, error);
       }
+      if (session.ended) return;
+      publishStreamEvent(runtime, session, { kind: "value", value: result.value });
+      if (session.ended) return;
       try {
         setStreamStatus(runtime, "live");
       } catch (error) {
@@ -63,7 +67,13 @@ export function openStream<T>(
   const state = runtime.graph.__runtime;
   const controller = new AbortController();
   const removeAbort = addSignalAbort(abortSignal, controller);
-  const session: StreamSession<T> = { controller, ended: false, emitted: false };
+  const session: StreamSession<T> = {
+    controller,
+    listeners: new Set(),
+    ended: false,
+    emitted: false,
+    unobservedSince: runtime.liveReadableCount === 0 ? Date.now() : undefined,
+  };
   runtime.stream = session;
   state.activeControllers.add(controller);
   runtime.failing = false;
@@ -90,7 +100,9 @@ export function openStream<T>(
       graph: state.graph.id,
       key,
       reportGap: () => {
-        if (session.ended || !session.emitted) return;
+        if (session.ended) return;
+        publishStreamEvent(runtime, session, { kind: "gap" });
+        if (!session.emitted) return;
         runtime.invalidated = true;
         try {
           writeAllStatuses(runtime);

@@ -3,12 +3,17 @@ import {
   initializeComputedNode,
   initializeSignalNode,
   initializeWatcher,
+  initializeObserver,
   nodeFor,
   readNode,
   writeNode,
   watcherGetPending,
   watcherUnwatch,
   watcherWatch,
+  observerCheck,
+  observerDispose,
+  observerTrack,
+  ensureWritesAllowed,
   withLifecycleErrors,
 } from "./engine.ts";
 import type {
@@ -17,6 +22,7 @@ import type {
   Signal,
   SignalOptions,
   WritableSignal,
+  Observer as ObserverShape,
 } from "./types.ts";
 /**
  * Writable state signal with synchronous propagation.
@@ -102,6 +108,7 @@ export class State<T> implements WritableSignal<T> {
     withLifecycleErrors(() => {
       const node = nodeFor(this);
       if (node.kind !== "signal") throw new TypeError("Expected a Signal.State");
+      ensureWritesAllowed(node);
       writeNode(node, next(node.value));
     });
   }
@@ -241,5 +248,35 @@ export class Watcher {
    */
   getPending(): Signal<unknown>[] {
     return watcherGetPending(this);
+  }
+}
+
+/**
+ * Framework-controlled dependency observer.
+ *
+ * Unlike a computed, an observer does not cache a value or run automatically.
+ * The framework calls {@link Observer.track} when it performs work, receives
+ * invalidation through its notification callback, and calls {@link Observer.check}
+ * from a post-propagation handoff before deciding whether to track again.
+ */
+export class Observer implements ObserverShape {
+  /** Create an observer with a notification-only invalidation callback. */
+  constructor(notify: (this: Observer) => void) {
+    initializeObserver(this, notify);
+  }
+
+  /** Evaluate work synchronously and replace this observer's dependencies. */
+  track<T>(run: () => T): T {
+    return observerTrack(this, run);
+  }
+
+  /** Check dependency freshness without evaluating tracked work. */
+  check(): boolean {
+    return observerCheck(this);
+  }
+
+  /** Dispose this observer and detach all currently tracked dependencies. */
+  dispose(): void {
+    observerDispose(this);
   }
 }

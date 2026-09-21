@@ -56,9 +56,11 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     "Signal",
     "adopt",
     "affects",
+    "afterPropagation",
     "computed",
     "createGraph",
     "createMutation",
+    "createObserver",
     "createQuery",
     "createStore",
     "createStream",
@@ -71,6 +73,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     "storeKey",
     "subscribe",
     "watch",
+    "withoutWrites",
   ]);
 
   const state = new publicApi.Signal.State(2);
@@ -103,11 +106,14 @@ test("the published entry point resolves to the built ESM artifact", async () =>
   const reactivePackage = await import(reactivePackageName);
   expect(Object.keys(reactivePackage).sort()).toEqual([
     "Signal",
+    "afterPropagation",
     "computed",
+    "createObserver",
     "readableBrand",
     "signal",
     "subscribe",
     "watch",
+    "withoutWrites",
   ]);
   expect(reactivePackage.Signal).toBe(publicApi.Signal);
   expect(reactivePackage.signal).toBe(publicApi.signal);

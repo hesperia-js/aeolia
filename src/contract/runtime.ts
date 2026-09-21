@@ -40,6 +40,8 @@ export interface QueryCaller<T> extends QuerySource<T> {
 export interface QueryRequest {
   readonly controller: AbortController;
   readonly generation: number;
+  /** Whether this request is the one automatic recovery allowed after a failure. */
+  readonly automaticRecovery: boolean;
   /** Successful predictions present when this request was issued. */
   readonly predictionIds: readonly number[];
   promise: Promise<void>;
@@ -51,10 +53,18 @@ export interface QueryRequest {
 
 export interface StreamSession<T> {
   readonly controller: AbortController;
+  readonly listeners: Set<(event: StreamEvent<T>) => void>;
   iterator?: AsyncIterator<T>;
+  /** Start of the current uninterrupted interval without live readables. */
+  unobservedSince?: number;
   ended: boolean;
   emitted: boolean;
 }
+
+export type StreamEvent<T> =
+  | { readonly kind: "value"; readonly value: T }
+  | { readonly kind: "gap" }
+  | { readonly kind: "close"; readonly failed: boolean; readonly reason?: unknown };
 
 export interface CollectionCandidate {
   readonly runtime: StoreRuntime<unknown>;
@@ -92,6 +102,8 @@ export interface StoreRuntime<T> {
   snapshotSpecified: boolean;
   hasCommitted: boolean;
   failing: boolean;
+  /** True after failed automatic recovery until explicit retry re-arms the query. */
+  recoveryDisarmed: boolean;
   invalidated: boolean;
   lastLandingAt?: number;
   lastSettledAt?: number;

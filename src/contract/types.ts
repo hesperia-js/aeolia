@@ -99,8 +99,13 @@ export interface QueryStore<T> extends Store<T> {
   /**
    * Starts a fresh request for this caller's input and key.
    *
-   * Revalidation is explicit: reading or watching a value does not start a
-   * request. A call may reactivate the stable shell of a store whose contents
+   * This is an explicit retry: it re-arms automatic recovery after a previous
+   * recovery exhausted its allowance. Starting the request clears the old error.
+   * The returned promise does not guarantee that the backend succeeded.
+   *
+   * Reads alone do not start requests. A value observer can schedule automatic
+   * refresh for invalidated data or an elapsed freshness window; this method
+   * requests a refresh regardless. A call may reactivate a store whose contents
    * were collected. When `options.abortSignal` is omitted, the signal from the
    * original member call is reused. The returned promise resolves after the
    * shared request is processed; backend rejection is exposed through `error`
@@ -390,33 +395,61 @@ export interface StreamDefinition<I, T, K extends string = string> extends Creat
  * the erased {@link AffectSpec} shape because the query value type is not
  * needed when the mutation is later resolved.
  */
-export interface Affected<I> extends AffectSpec<I, unknown, unknown> {
+export interface Affected<I> {
   /** Runtime marker identifying this value as a mutation effect. */
   readonly [affectedBrand]: true;
 
   /** Query whose keyed store is invalidated, revalidated, or predicted. */
   readonly query: QueryDefinition<any, any, any>;
+
+  /** Maps mutation input to the query input when the affected query needs one. */
+  readonly select: (input: I) => unknown;
+
+  /** Settled effect; omitted input specs are normalized to `"invalidate"`. */
+  readonly on: "invalidate" | "revalidate";
+
+  /** Optional optimistic value producer. */
+  readonly optimistic?: (current: unknown, input: I) => unknown;
 }
 
 /** Type-safe specification for an effect created by {@link affects}. */
-export interface AffectSpec<MI, QI, T> {
-  /** Maps mutation input to the affected query input. */
-  readonly select: (input: MI) => QI;
-
+export type AffectSpec<MI, QI, T> = {
   /**
    * Settled effect to apply after a successful mutation.
    *
-   * `invalidate` marks existing state stale without starting I/O;
-   * `revalidate` starts a fresh query for the selected key.
+   * `invalidate` marks an existing store stale and starts a fresh query if its
+   * value has a live observer. Observing only status, pending, or error does not
+   * trigger that refresh. `revalidate` starts a fresh query regardless of
+   * observers. Neither effect creates a missing store.
+   * If an invalidated value becomes observed later, it schedules a refresh
+   * without requiring `revalidateAfterMs`. The observer must still be present
+   * when that refresh dispatches. A fresh value or failed query is not retried
+   * merely because observers return; existing recovery limits still apply.
+   *
+   * Either refresh can run after repeated failures have stopped automatic
+   * refresh. A successful landing restores its timer; another failure leaves
+   * an exhausted query stopped.
+   * Superseding that recovery with a newer mutation does not grant extra
+   * automatic retries.
+   *
+   * @defaultValue `"invalidate"`
    */
-  readonly on: "invalidate" | "revalidate";
+  readonly on?: "invalidate" | "revalidate";
 
   /**
    * Optional optimistic value producer applied until the mutation fails or a
    * later accepted query landing reconciles its successful result.
    */
   readonly optimistic?: (current: T | undefined, input: MI) => T;
-}
+} & ([QI] extends [void]
+  ? {
+      /** Optional selector for a query with no input value. */
+      readonly select?: (input: MI) => QI;
+    }
+  : {
+      /** Maps mutation input to the affected query input. */
+      readonly select: (input: MI) => QI;
+    });
 
 /** Input used to declare an authoritative mutation and its query effects. */
 export interface CreateMutationInput<I, R> {
@@ -647,6 +680,12 @@ export interface GraphOptions<C extends Contract = Contract> {
    *
    * Must be finite and non-negative. Declared stores are retained regardless
    * of this value.
+   *
+   * An open stream measures this period from its final listener's departure,
+   * or from opening if it never had a listener. Emissions and untracked reads
+   * do not extend that deadline. A returning listener ends the unobserved
+   * period; its later departure starts a new one. Collection closes the
+   * source and ignores subsequent emissions even if cancellation is ignored.
    *
    * @defaultValue `300_000` (five minutes)
    */

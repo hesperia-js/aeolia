@@ -1,12 +1,15 @@
 import { storeKey } from "./identity.ts";
-import type { Graph, OpenOptions, StreamDefinition } from "./types.ts";
-import { registerProjection, reportGraphContinuationError } from "./registry.ts";
+import type { Graph, OpenOptions, StreamDefinition, StreamStore } from "./types.ts";
+import { registerProjection, reportGraphContinuationError, runtimeForStore } from "./registry.ts";
 import { Fault } from "../fault.ts";
 import { signal } from "../reactive.ts";
 import type { Readable } from "../reactive.ts";
+import { assertStoreOpen } from "./faults.ts";
+import { isLive, scheduleSweep, updateCollectionCandidate } from "./collection.ts";
+import type { StreamEvent } from "./runtime.ts";
 
 /**
- * Lifecycle state of an independent stream projection.
+ * Lifecycle state of a stream projection.
  *
  * A projection starts `open`, becomes `closed` on explicit close, normal
  * iterator completion, or graph disposal, and becomes `failed` when its
@@ -54,12 +57,12 @@ export type ReducePolicy<T, V> = {
 export type ProjectionPolicy<T, V> = AccumulatePolicy | ReducePolicy<T, V>;
 
 /**
- * A value maintained from one independently opened stream source.
+ * A value maintained from stream emissions.
  *
- * Each call to {@link project} opens its own source, even when another
- * projection or a keyed stream store uses the same stream definition. The
- * projection owns that source's abort signal and closes it when `close()` is
- * called or when the graph is disposed.
+ * The graph/definition overload of {@link project} opens an independent source.
+ * The StreamStore overload consumes future emissions from its existing shared
+ * session. Closing a shared projection releases only that projection's listener;
+ * the source remains subject to the graph's normal listener/collection lifetime.
  */
 export interface Projection<V> {
   /** The accumulated array or reduced value produced so far. */
@@ -72,7 +75,8 @@ export interface Projection<V> {
   readonly error: Readable<unknown>;
 
   /**
-   * Terminates the projection and aborts its source.
+   * Terminates the projection and releases its source listener.
+   * An independently opened source is also aborted.
    *
    * Closing is idempotent. It sets `status` to `"closed"`, does not create an
    * error, and ignores later source emissions. A projection that has already
@@ -83,8 +87,6 @@ export interface Projection<V> {
 
 interface ProjectionRuntime<T, V> {
   readonly graph: Graph;
-  readonly stream: StreamDefinition<any, T, any>;
-  readonly input: unknown;
   readonly valueCell: ReturnType<typeof signal<V>>;
   readonly statusCell: ReturnType<typeof signal<ProjectionStatus>>;
   readonly errorCell: ReturnType<typeof signal<unknown>>;
@@ -92,6 +94,7 @@ interface ProjectionRuntime<T, V> {
   readonly controller: AbortController;
   iterator?: AsyncIterator<T>;
   unregister?: () => void;
+  detach?: () => void;
   closed: boolean;
 }
 
@@ -117,6 +120,8 @@ function safeSet<T, V>(runtime: ProjectionRuntime<T, V>, set: () => void): void 
 function finish<T, V>(runtime: ProjectionRuntime<T, V>, failed: boolean, reason?: unknown): void {
   if (runtime.closed) return;
   runtime.closed = true;
+  runtime.detach?.();
+  runtime.detach = undefined;
   runtime.controller.abort();
   if (runtime.iterator != null && typeof runtime.iterator.return === "function") {
     try {
@@ -185,20 +190,16 @@ async function consume<T, V>(runtime: ProjectionRuntime<T, V>): Promise<void> {
   }
 }
 
-function makeProjection<T, V>(
+function initializeProjection<T, V>(
   graph: Graph,
-  stream: StreamDefinition<any, T, any>,
-  input: unknown,
   policy: ProjectionPolicy<T, V>,
-): Projection<V> {
+): { runtime: ProjectionRuntime<T, V>; projection: Projection<V> } {
   const valueCell = signal<V>(policy.kind === "reduce" ? policy.initial : ([] as unknown as V));
   const statusCell = signal<ProjectionStatus>("open");
   const errorCell = signal<unknown>(undefined);
   const controller = new AbortController();
   const runtime: ProjectionRuntime<T, V> = {
     graph,
-    stream,
-    input,
     valueCell,
     statusCell,
     errorCell,
@@ -216,6 +217,17 @@ function makeProjection<T, V>(
   });
 
   runtime.unregister = registerProjection(graph, close);
+  return { runtime, projection };
+}
+
+function makeProjection<T, V>(
+  graph: Graph,
+  stream: StreamDefinition<any, T, any>,
+  input: unknown,
+  policy: ProjectionPolicy<T, V>,
+): Projection<V> {
+  const { runtime, projection } = initializeProjection(graph, policy);
+  const controller = runtime.controller;
 
   let key: ReturnType<typeof storeKey>;
   try {
@@ -223,7 +235,7 @@ function makeProjection<T, V>(
   } catch (error) {
     // The key is a caller-side synchronous failure. Do not leave a graph
     // registration or an abort controller behind when it escapes.
-    runtime.unregister();
+    runtime.unregister?.();
     runtime.unregister = undefined;
     runtime.closed = true;
     controller.abort();
@@ -246,6 +258,40 @@ function makeProjection<T, V>(
     return projection;
   }
   void consume(runtime);
+  return projection;
+}
+
+function makeSharedProjection<T, V>(
+  source: StreamStore<T>,
+  policy: ProjectionPolicy<T, V>,
+): Projection<V> {
+  const store = runtimeForStore(source);
+  if (store === undefined || source.status !== store.streamStatus)
+    throw new TypeError("A shared projection requires an Aeolia StreamStore");
+  assertStoreOpen(store);
+  const { runtime, projection } = initializeProjection(store.graph, policy);
+  const session = store.stream;
+  if (session === undefined || session.ended) {
+    const failed = source.status.peek() === "failed";
+    finish(runtime, failed, failed ? source.error.peek() : undefined);
+    return projection;
+  }
+  const listener = (event: StreamEvent<unknown>): void => {
+    if (event.kind === "value") accept(runtime, event.value as T);
+    else if (event.kind === "gap")
+      fail(runtime, new Error("Aeolia projection stream reported a gap"));
+    else finish(runtime, event.failed, event.reason);
+  };
+  session.listeners.add(listener);
+  session.unobservedSince = undefined;
+  updateCollectionCandidate(store);
+  scheduleSweep(store.graph.__runtime);
+  runtime.detach = () => {
+    session.listeners.delete(listener);
+    if (store.stream === session && !isLive(store)) session.unobservedSince = Date.now();
+    updateCollectionCandidate(store);
+    scheduleSweep(store.graph.__runtime);
+  };
   return projection;
 }
 
@@ -304,12 +350,42 @@ export function project<I, T, V, K extends "reduce" | "accumulate">(
   input: I,
   policy: ProjectionPolicy<T, V> & { readonly kind: K },
 ): Projection<K extends "accumulate" ? readonly T[] : V>;
+/**
+ * Projects future emissions from an existing keyed stream session.
+ *
+ * Does not open a source or replay the store's retained value. Every subsequent
+ * source emission is consumed, including equal values suppressed by the store's
+ * equality rule. Direct store writes are not source emissions. Each projection
+ * has separate accumulation/reduction state and counts as a source listener until
+ * it closes or fails. Source gaps fail this projection without closing the shared
+ * source. Normal source completion closes it; source failure preserves the reason.
+ * A later source reopen does not reopen an already-terminal projection.
+ *
+ * @param source - StreamStore whose current session supplies emissions.
+ * @param policy - Bounded accumulation or reduction, with the same rules as the
+ * independent overload.
+ * @returns An eager projection with its own value and lifecycle readables.
+ * @throws TypeError if source is not an Aeolia StreamStore; Fault if its graph is
+ * disposed or the accumulation maximum is invalid.
+ */
+export function project<T, V, K extends "reduce" | "accumulate">(
+  source: StreamStore<T>,
+  policy: ProjectionPolicy<T, V> & { readonly kind: K },
+): Projection<K extends "accumulate" ? readonly T[] : V>;
 export function project<I, T, V>(
-  graph: Graph,
-  stream: StreamDefinition<I, T>,
-  input: I,
-  policy: ProjectionPolicy<T, V>,
+  graphOrSource: Graph | StreamStore<T>,
+  streamOrPolicy: StreamDefinition<I, T> | ProjectionPolicy<T, V>,
+  input?: I,
+  suppliedPolicy?: ProjectionPolicy<T, V>,
 ): Projection<V> {
+  const policy = suppliedPolicy ?? (streamOrPolicy as ProjectionPolicy<T, V>);
   if (policy.kind === "accumulate") validateMax(policy.max);
-  return makeProjection(graph, stream, input, policy);
+  if (suppliedPolicy === undefined)
+    return makeSharedProjection(graphOrSource as StreamStore<T>, policy);
+  return makeProjection(
+    graphOrSource as Graph,
+    streamOrPolicy as StreamDefinition<I, T>,
+    input,
+    policy,
+  );
 }

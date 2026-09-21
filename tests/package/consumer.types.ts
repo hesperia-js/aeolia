@@ -2,10 +2,12 @@
  * does not open a stream or make a request. */
 import {
   Signal,
+  afterPropagation,
   affects,
   createGraph,
   defineContract,
   createMutation,
+  createObserver,
   createQuery,
   createStore,
   createStream,
@@ -17,6 +19,8 @@ import {
   type CreateStreamInput,
   type DefineContractInput,
   type FetchOptions,
+  type Observer,
+  withoutWrites,
 } from "aeolia";
 import { testBackend } from "aeolia/testing";
 
@@ -47,6 +51,28 @@ const widenedQuery = createQuery({
   key: (input: string): string => input,
   fetch: backend.respond<string, number>("wide.get"),
 });
+// @ts-expect-error A required input still needs an explicit selector.
+const requiredInputEffect = affects(widenedQuery, {});
+const optionalInputQuery = createQuery({
+  name: "optional.get",
+  key: (input: string | undefined): string => input ?? "none",
+  fetch: backend.respond<string | undefined, number>("optional.get"),
+});
+// @ts-expect-error An optional input still needs a selector; only a void query may omit it.
+const optionalInputEffect = affects(optionalInputQuery, {});
+const unknownInputQuery = createQuery({
+  name: "unknown.get",
+  key: (input: unknown): string => String(input),
+  fetch: backend.respond<unknown, number>("unknown.get"),
+});
+// @ts-expect-error An unknown input still needs an explicit selector.
+const unknownInputEffect = affects(unknownInputQuery, {});
+const inputlessQuery = createQuery<void, number, string>({
+  name: "inputless.get",
+  key: () => "inputless",
+  fetch: async () => 1,
+});
+const inputlessEffect = affects(inputlessQuery, {});
 const contract = defineContract({
   namespace: "types",
   operations: { store, query, mutation, stream },
@@ -80,6 +106,19 @@ function typecheckOnly(): void {
   const watcher: Signal.subtle.Watcher = new Signal.subtle.Watcher(() => {});
   watcher.watch(readable);
   watcher.unwatch(readable);
+  let controlled!: Observer;
+  controlled = createObserver({
+    notify() {
+      afterPropagation(() => {
+        if (controlled.check()) controlled.track(() => readable.get());
+      });
+    },
+  });
+  controlled.track(() => readable.get());
+  controlled.dispose();
+  withoutWrites(() => {
+    void readable.get();
+  });
   const storeInput: CreateStoreInput<number, "draft"> = store;
   const queryInput: CreateQueryInput<{ readonly id: string }, { readonly id: string }, string> =
     query;
@@ -163,4 +202,8 @@ function typecheckOnly(): void {
 }
 
 void collidingContract;
+void optionalInputEffect;
+void inputlessEffect;
+void requiredInputEffect;
+void unknownInputEffect;
 void typecheckOnly;

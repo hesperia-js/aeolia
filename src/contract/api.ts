@@ -117,13 +117,17 @@ export function createStream<I, T, K extends string>(
  */
 export function affects<MI, QI, T>(
   query: QueryDefinition<QI, T>,
+  spec: AffectSpec<MI, NoInfer<QI>, T>,
+): Affected<MI>;
+export function affects<MI, QI, T>(
+  query: QueryDefinition<QI, T>,
   spec: AffectSpec<MI, QI, T>,
 ): Affected<MI> {
   const result: Affected<MI> = {
     [affectedBrand]: true,
     query,
-    select: spec.select,
-    on: spec.on,
+    select: spec.select ?? (() => undefined),
+    on: spec.on ?? "invalidate",
     ...(spec.optimistic === undefined
       ? {}
       : { optimistic: spec.optimistic as (current: unknown, input: MI) => unknown }),

@@ -63,10 +63,21 @@ export type {
 } from "./contract/index.ts";
 export { adopt, AEOLIA_TAGGED_ENCODING, snapshot } from "./realm.ts";
 export type { AdoptionReport, EncodingId, Snapshot, SnapshotEntry } from "./realm.ts";
-export { Signal, readableBrand, computed, signal, watch } from "./reactive.ts";
+export {
+  Signal,
+  afterPropagation,
+  createObserver,
+  readableBrand,
+  computed,
+  signal,
+  watch,
+  withoutWrites,
+} from "./reactive.ts";
 export type {
   Computed,
   ComputedOptions,
+  Observer,
+  ObserverOptions,
   Readable,
   SignalOptions,
   WritableSignal,
