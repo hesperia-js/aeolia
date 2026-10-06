@@ -40,9 +40,11 @@ export class State<T> implements WritableSignal<T> {
    *
    * Equality and lifecycle callbacks receive this signal as their `this`
    * value. Construction does not notify observers or evaluate any computed.
+   * Invalid options throw `TypeError` during construction.
    *
    * @param initial - Value returned by reads before the first write.
    * @param options - Equality, label, and liveness options.
+   * @throws {TypeError} If `options` is not a valid signal options object.
    */
   constructor(initial: T, options: SignalOptions<T> = {}) {
     initializeSignalNode(this, initial, options);
@@ -137,6 +139,7 @@ export class Computed<T = unknown> implements ComputedShape<T> {
    * @param compute - Synchronous function that derives the value. Its `this`
    * value is this computed instance.
    * @param options - Equality, label, and liveness options.
+   * @throws {TypeError} If `compute` is not callable or `options` is invalid.
    */
   constructor(compute: (this: ComputedShape<T>) => T, options: ComputedOptions<T> = {}) {
     initializeComputedNode(this, compute, options);

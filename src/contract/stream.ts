@@ -1,4 +1,5 @@
 import type { StreamDefinition, StreamStore, ValueOptions } from "./types.ts";
+import { isValueOptions } from "./types.ts";
 import { __internal as reactiveInternal, computed } from "../reactive.ts";
 import { addSignalAbort } from "../utils.ts";
 import type { StreamSession, StoreRuntime, GraphRuntimeState } from "./runtime.ts";
@@ -10,6 +11,14 @@ import { endStream, setStreamStatus, touch } from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
 import { publishStreamEvent } from "./stream-events.ts";
 
+function sameSessionEpoch<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
+  return session.resetEpoch === runtime.graph.__runtime.resetEpoch;
+}
+
+function isCurrentSession<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
+  return !session.ended && runtime.stream === session && sameSessionEpoch(runtime, session);
+}
+
 export function failStream<T>(
   runtime: StoreRuntime<T>,
   session: StreamSession<T>,
@@ -18,7 +27,7 @@ export function failStream<T>(
   try {
     endStream(runtime, session, "failed", reason);
   } catch (error) {
-    reportContinuationError(runtime.graph.__runtime, error);
+    if (sameSessionEpoch(runtime, session)) reportContinuationError(runtime.graph.__runtime, error);
   }
 }
 
@@ -31,7 +40,7 @@ export async function consumeStream<T>(
   try {
     while (!session.ended) {
       const result = await iterator.next();
-      if (session.ended) return;
+      if (!isCurrentSession(runtime, session)) return;
       if (result.done) {
         endStream(runtime, session, "closed");
         return;
@@ -39,21 +48,23 @@ export async function consumeStream<T>(
       issue(runtime);
       session.emitted = true;
       try {
-        recordLanding(runtime, result.value);
+        reactiveInternal.batch(() => recordLanding(runtime, result.value));
       } catch (error) {
-        reportContinuationError(runtime.graph.__runtime, error);
+        if (isCurrentSession(runtime, session))
+          reportContinuationError(runtime.graph.__runtime, error);
       }
-      if (session.ended) return;
+      if (!isCurrentSession(runtime, session)) return;
       publishStreamEvent(runtime, session, { kind: "value", value: result.value });
-      if (session.ended) return;
+      if (!isCurrentSession(runtime, session)) return;
       try {
         setStreamStatus(runtime, "live");
       } catch (error) {
-        reportContinuationError(runtime.graph.__runtime, error);
+        if (isCurrentSession(runtime, session))
+          reportContinuationError(runtime.graph.__runtime, error);
       }
     }
   } catch (error) {
-    if (!session.ended) failStream(runtime, session, error);
+    if (isCurrentSession(runtime, session)) failStream(runtime, session, error);
   }
 }
 
@@ -69,6 +80,7 @@ export function openStream<T>(
   const removeAbort = addSignalAbort(abortSignal, controller);
   const session: StreamSession<T> = {
     controller,
+    resetEpoch: state.resetEpoch,
     listeners: new Set(),
     ended: false,
     emitted: false,
@@ -76,16 +88,26 @@ export function openStream<T>(
   };
   runtime.stream = session;
   state.activeControllers.add(controller);
-  runtime.failing = false;
-  runtime.invalidated = false;
-  runtime.errorCell.set(undefined);
-  setStreamStatus(runtime, "opening");
+  try {
+    reactiveInternal.batch(() => {
+      runtime.failing = false;
+      runtime.invalidated = false;
+      runtime.errorCell.set(undefined);
+      setStreamStatus(runtime, "opening");
+    });
+  } catch (error) {
+    if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+  }
+  if (!isCurrentSession(runtime, session)) {
+    removeAbort();
+    return;
+  }
   const closeOnAbort = (): void => {
     if (session.ended) return;
     try {
       endStream(runtime, session, "closed");
     } catch (error) {
-      reportContinuationError(state, error);
+      if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
     }
   };
   if (controller.signal.aborted) {
@@ -100,24 +122,50 @@ export function openStream<T>(
       graph: state.graph.id,
       key,
       reportGap: () => {
-        if (session.ended) return;
+        if (!isCurrentSession(runtime, session)) return;
         publishStreamEvent(runtime, session, { kind: "gap" });
+        if (!isCurrentSession(runtime, session)) return;
         if (!session.emitted) return;
         runtime.invalidated = true;
         try {
-          writeAllStatuses(runtime);
-          setStreamStatus(runtime, "stale");
+          reactiveInternal.batch(() => {
+            writeAllStatuses(runtime);
+            setStreamStatus(runtime, "stale");
+          });
         } catch (error) {
-          reportContinuationError(state, error);
+          if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
         }
       },
     });
-    session.iterator = iterable[Symbol.asyncIterator]();
   } catch (error) {
     removeAbort();
     failStream(runtime, session, error);
     return;
   }
+  if (!isCurrentSession(runtime, session)) {
+    removeAbort();
+    return;
+  }
+  let iterator: AsyncIterator<T>;
+  try {
+    iterator = iterable[Symbol.asyncIterator]();
+  } catch (error) {
+    removeAbort();
+    failStream(runtime, session, error);
+    return;
+  }
+  if (!isCurrentSession(runtime, session)) {
+    if (typeof iterator.return === "function") {
+      try {
+        void Promise.resolve(iterator.return()).catch(() => undefined);
+      } catch {
+        /* A reset owns the current session now. */
+      }
+    }
+    removeAbort();
+    return;
+  }
+  session.iterator = iterator;
   controller.signal.addEventListener("abort", closeOnAbort, { once: true });
   void consumeStream(runtime, session)
     .finally(() => {
@@ -125,7 +173,9 @@ export function openStream<T>(
       removeAbort();
       state.activeControllers.delete(controller);
     })
-    .catch((error) => reportContinuationError(state, error));
+    .catch((error) => {
+      if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+    });
 }
 
 export function streamMember<T>(
@@ -135,12 +185,19 @@ export function streamMember<T>(
   options: ValueOptions<T> | undefined,
 ): StreamStore<T> {
   assertGraphOpen(state);
+  if (options !== undefined && !isValueOptions(options))
+    throw new TypeError("Invalid stream options.");
   const key = storeKey(stream.key(input));
   const runtime = getOrCreateStore(state, key) as StoreRuntime<T>;
   configureKeyedValue(runtime, stream, options);
 
   const active = runtime.stream;
   if (active === undefined) {
+    runtime.streamSource = {
+      stream,
+      input,
+      ...(options?.abortSignal === undefined ? {} : { abortSignal: options.abortSignal }),
+    };
     openStream(runtime, stream, input, key, options?.abortSignal);
   }
   const status = runtime.streamStatus;

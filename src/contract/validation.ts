@@ -1,22 +1,13 @@
 import { Fault } from "../fault.ts";
-import type {
-  OperationDefinition,
-  OperationTree,
-  MutationDefinition,
-  QueryDefinition,
-  StoreDefinition,
-} from "./types.ts";
+import type { Contract, OperationTree, MutationDefinition, QueryDefinition } from "./types.ts";
+import { isOperationDefinition, isStoreDefinition } from "./types.ts";
+import { isObject } from "../utils.ts";
 
-function isOperation(value: unknown): value is OperationDefinition {
-  if (value === null || typeof value !== "object") return false;
-  const kind = (value as { kind?: unknown }).kind;
-  return kind === "query" || kind === "mutation" || kind === "stream";
-}
-
-function isStoreDefinition(value: unknown): value is StoreDefinition<unknown> {
-  return (
-    value !== null && typeof value === "object" && (value as { kind?: unknown }).kind === "store"
-  );
+export function validateContract(contract: Contract): void {
+  if (!isObject(contract) || typeof contract.namespace !== "string")
+    throw new TypeError("A contract must have a string namespace and an operation tree.");
+  const walk = validateContractTree(contract.operations);
+  validateAffectedQueries(walk);
 }
 
 interface ContractWalk {
@@ -45,21 +36,21 @@ export function validateContractTree(tree: OperationTree): ContractWalk {
   const mutations: MutationDefinition<any, any>[] = [];
 
   const visit = (node: unknown): void => {
-    if (node === null || typeof node !== "object") return;
-    const objectNode = node as object;
+    if (!isObject(node) || typeof node === "function" || Array.isArray(node))
+      throw new TypeError("A contract operation tree must contain declarations or nested objects.");
+    const objectNode = node;
     if (active.has(objectNode)) {
       throw contractTreeFault("cycle");
     }
     if (seen.has(objectNode)) {
-      const name =
-        isOperation(node) || isStoreDefinition(node) ? (node as { name: string }).name : undefined;
+      const name = isOperationDefinition(node) || isStoreDefinition(node) ? node.name : undefined;
       throw contractTreeFault("alias", name);
     }
     seen.add(objectNode);
     active.add(objectNode);
 
     try {
-      if (isOperation(node)) {
+      if (isOperationDefinition(node)) {
         if (operationNames.has(node.name)) {
           throw new Fault("contract", [node.name]);
         }

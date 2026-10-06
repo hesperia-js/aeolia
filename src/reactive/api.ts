@@ -308,6 +308,7 @@ type SignalOptionsShape<T> = SignalOptions<T>;
  * @param initial - Initial value returned by the signal.
  * @param options - Equality, label, and liveness options.
  * @returns A writable signal with the supplied initial value.
+ * @throws {TypeError} If `options` is not a valid signal options object.
  *
  * @example
  * ```ts
@@ -334,6 +335,7 @@ export function signal<T>(initial: T, options: SignalOptions<T> = {}): WritableS
  * become dependencies; `peek()` calls do not.
  * @param options - Equality, label, and liveness options.
  * @returns A lazy computed signal.
+ * @throws {TypeError} If `compute` is not callable or `options` is invalid.
  */
 export function computed<T>(
   compute: (this: Signal.Computed<T>) => T,

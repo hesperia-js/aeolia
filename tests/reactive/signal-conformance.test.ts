@@ -11,6 +11,27 @@ function thrownBy(run: () => unknown): unknown {
 }
 
 describe("canonical Signals surface", () => {
+  describe("constructor inputs", () => {
+    it("rejects malformed Signal options before creating a signal", () => {
+      const invalidOptions = [
+        null,
+        1,
+        { equals: true },
+        { label: 1 },
+        { [Signal.subtle.watched]: true },
+        { [Signal.subtle.unwatched]: true },
+      ];
+
+      for (const options of invalidOptions) {
+        expect(() => new Signal.State(0, options as never)).toThrow(TypeError);
+      }
+    });
+
+    it("rejects a non-function Computed callback at construction", () => {
+      expect(() => new Signal.Computed(1 as never)).toThrow(TypeError);
+    });
+  });
+
   describe("classes, receivers, and subclassing", () => {
     it("exposes State, Computed, and Watcher as constructible classes", () => {
       const state = new Signal.State(1);

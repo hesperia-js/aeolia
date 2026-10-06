@@ -49,6 +49,12 @@ reads again after propagation to deliver changed values. Without a value
 subscriber, a live Computed can remain invalid until the next read. Listener
 order is not a public contract.
 
+State and Computed construction checks option values at runtime. `equals` and
+the `watched` and `unwatched` lifecycle callbacks must be functions, and
+`label` must be a string. Computed construction also requires a function
+callback. Invalid options or a non-function callback throw `TypeError` before
+the signal is added to the reactive graph.
+
 Use `subscribe(readable, observer)` to receive values. It delivers the current
 value immediately, including `undefined`, and respects the source's equality
 policy (`Object.is` by default). A computed whose result remains equal does

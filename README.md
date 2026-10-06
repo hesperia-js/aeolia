@@ -49,6 +49,9 @@ The query call starts a fetch when needed. `ready` waits for committed data
 without starting another request. Subscribing to the store delivers values once
 data exists, then reports changes; it does not emit an empty placeholder.
 
+For reset behavior, including query refreshes, mutation cancellation, and
+projection lifecycles, see [Managed state](docs/managed-state.md#resetting-graph-state).
+
 For signals alone:
 
 ```ts

@@ -1,5 +1,19 @@
 export function isObject(value: unknown): value is object {
-  return (typeof value === "object" && value !== null) || typeof value === "function";
+  return (typeof value === "object" && value != null) || typeof value === "function";
+}
+
+/** Checks the cross-runtime cancellation interface without relying on its constructor. */
+export function isAbortSignal(value: unknown): value is AbortSignal {
+  if (!isObject(value)) return false;
+  const signal = value as Partial<AbortSignal>;
+  return (
+    typeof signal.aborted === "boolean" &&
+    (signal.onabort === null || typeof signal.onabort === "function") &&
+    typeof signal.addEventListener === "function" &&
+    typeof signal.removeEventListener === "function" &&
+    typeof signal.dispatchEvent === "function" &&
+    typeof signal.throwIfAborted === "function"
+  );
 }
 
 export function isPromiseLike(value: unknown): value is PromiseLike<unknown> {

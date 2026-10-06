@@ -11,6 +11,7 @@ import type {
   Signal,
   LifecycleCallback,
 } from "./types.ts";
+import { isSignalOptions } from "./types.ts";
 import type { Watcher } from "./classes.ts";
 import type { Observer } from "./types.ts";
 
@@ -891,6 +892,8 @@ function initializeNodeBase<T, K extends Node<T>["kind"]>(
   kind: K,
   options: SignalOptions<T>,
 ): NodeBase<T> & { readonly kind: K } {
+  if (!isSignalOptions(options)) throw new TypeError("Signal options are invalid");
+
   return {
     kind,
     name: options.label ?? `#${anonymousReadableId++}`,
@@ -929,6 +932,8 @@ export function initializeComputedNode<T>(
   compute: (this: Computed<T>) => T,
   options: ComputedOptions<T>,
 ): ComputedNode<T> {
+  if (typeof compute !== "function") throw new TypeError("Computed callback must be a function");
+
   const node: ComputedNode<T> = {
     ...initializeNodeBase(api, "computed", options),
     compute,

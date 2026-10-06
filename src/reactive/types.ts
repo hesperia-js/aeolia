@@ -1,4 +1,5 @@
 import { readableBrand, unwatched, watched } from "./symbols.ts";
+import { isObject } from "../utils.ts";
 
 /**
  * Minimal read-only surface shared by Aeolia state and computed signals.
@@ -53,6 +54,28 @@ export interface SignalOptions<T> {
 
   /** Run after this signal loses its last live descendant. */
   readonly [unwatched]?: LifecycleCallback<T>;
+}
+
+/**
+ * Check whether a value contains valid signal options.
+ *
+ * The check validates the declared option fields. It cannot validate the
+ * types of values passed through `equals` or the behavior of callbacks.
+ *
+ * @param value - Value to check.
+ * @returns `true` when the value is a non-array object whose declared fields
+ * are absent or have their required runtime types.
+ */
+export function isSignalOptions(value: unknown): value is SignalOptions<unknown> {
+  if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
+
+  const options = value as Record<PropertyKey, unknown>;
+  return (
+    (options.equals === undefined || typeof options.equals === "function") &&
+    (options.label === undefined || typeof options.label === "string") &&
+    (options[watched] === undefined || typeof options[watched] === "function") &&
+    (options[unwatched] === undefined || typeof options[unwatched] === "function")
+  );
 }
 
 /**

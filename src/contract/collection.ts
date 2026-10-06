@@ -1,7 +1,7 @@
 import type { CollectionCandidate, GraphRuntimeState } from "./runtime.ts";
 import type { Contract, StreamStatus } from "./types.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
-import { assertGraphOpen } from "./faults.ts";
+import { assertGraphOpen, reportContinuationError } from "./faults.ts";
 import { writeAllStatuses } from "./status.ts";
 import type { StoreRuntime, StreamSession } from "./runtime.ts";
 import { publishStreamEvent } from "./stream-events.ts";
@@ -80,7 +80,11 @@ export function popCollectionCandidate(
 }
 
 export function isLive<T>(runtime: StoreRuntime<T>): boolean {
-  return runtime.liveReadableCount > 0 || (runtime.stream?.listeners.size ?? 0) > 0;
+  return (
+    runtime.liveReadableCount > 0 ||
+    runtime.readyWaiterCount > 0 ||
+    (runtime.stream?.listeners.size ?? 0) > 0
+  );
 }
 
 function collectionCandidateEligible<T>(runtime: StoreRuntime<T>): boolean {
@@ -158,11 +162,14 @@ export function endStream<T>(
   reason?: unknown,
 ): void {
   if (session.ended) return;
+  const state = runtime.graph.__runtime;
+  const current = runtime.stream === session && session.resetEpoch === state.resetEpoch;
   session.ended = true;
-  publishStreamEvent(runtime, session, { kind: "close", failed: status === "failed", reason });
+  if (current)
+    publishStreamEvent(runtime, session, { kind: "close", failed: status === "failed", reason });
   session.listeners.clear();
   if (runtime.stream === session) runtime.stream = undefined;
-  runtime.graph.__runtime.activeControllers.delete(session.controller);
+  state.activeControllers.delete(session.controller);
   session.controller.abort();
   const iterator = session.iterator;
   if (iterator != null && typeof iterator.return === "function") {
@@ -172,17 +179,26 @@ export function endStream<T>(
       /* closing is best effort; the source is already terminal */
     }
   }
-  if (status === "failed") {
-    runtime.failing = true;
-    runtime.invalidated = true;
-    runtime.errorCell.set(reason);
-    writeAllStatuses(runtime);
-  } else if (status === "empty") {
-    runtime.failing = false;
-    runtime.invalidated = false;
-    runtime.errorCell.set(undefined);
+  if (!current || state.resetEpoch !== session.resetEpoch) return;
+  try {
+    reactiveInternal.batch(() => {
+      if (state.resetEpoch !== session.resetEpoch) return;
+      if (status === "failed") {
+        runtime.failing = true;
+        runtime.invalidated = true;
+        runtime.errorCell.set(reason);
+        writeAllStatuses(runtime);
+      } else if (status === "empty") {
+        runtime.failing = false;
+        runtime.invalidated = false;
+        runtime.errorCell.set(undefined);
+      }
+      setStreamStatus(runtime, status);
+    });
+  } catch (error) {
+    if (state.resetEpoch === session.resetEpoch) reportContinuationError(state, error);
   }
-  setStreamStatus(runtime, status);
+  if (state.resetEpoch !== session.resetEpoch) return;
   scheduleSweep(runtime.graph.__runtime);
 }
 
@@ -202,6 +218,9 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
     runtime.timer = undefined;
   }
   runtime.source = undefined;
+  runtime.streamSource = undefined;
+  runtime.onReadableActivation = undefined;
+  runtime.refreshOnActivation = false;
   runtime.hasCommitted = false;
   runtime.failing = false;
   runtime.recoveryDisarmed = false;

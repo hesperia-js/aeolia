@@ -258,6 +258,98 @@ describe("stream stores", () => {
     graph.dispose();
   });
 
+  it("keeps a normal owner abort quiet when the pending iterator read rejects", async () => {
+    const opener = new AbortController();
+    const faults: unknown[] = [];
+    let rejectNext!: (reason: unknown) => void;
+    const stream = createStream({
+      name: "owner-abort-pending-next",
+      key: () => "owner-abort-pending-next/one",
+      open: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            new Promise<IteratorResult<number>>((_resolve, reject) => {
+              rejectNext = reject;
+            }),
+          return: async () => ({ done: true, value: undefined }),
+        }),
+      }),
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "owner-abort-pending-next", operations: { stream } }),
+      onUnobservedFault: (error) => faults.push(error),
+    });
+    const api = graph.api as unknown as {
+      readonly stream: (input: void, options?: ValueOptions<number>) => StreamStore<number>;
+    };
+    const store = api.stream(undefined, { abortSignal: opener.signal });
+    const stop = watch(store.status, () => undefined);
+
+    opener.abort();
+    rejectNext(new DOMException("The stream owner aborted.", "AbortError"));
+    await flush();
+
+    expect(store.status.get()).toBe("closed");
+    expect(faults).toEqual([]);
+    stop();
+    graph.dispose();
+  });
+
+  it("keeps the opener signal across reset and never revives an aborted owner", async () => {
+    const backend = testBackend();
+    const source = backend.stream<void, number>("reset-owner");
+    const signals: AbortSignal[] = [];
+    const stream = createStream({
+      name: "reset-owner",
+      key: () => "reset-owner/one",
+      open: (input: void, options) => {
+        signals.push(options.abortSignal);
+        return source(input, options);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "reset-owner", operations: { stream } }),
+    });
+    const api = graph.api as unknown as {
+      readonly stream: (input: void, options?: ValueOptions<number>) => StreamStore<number>;
+    };
+    const owner = new AbortController();
+    const store = api.stream(undefined, { abortSignal: owner.signal });
+    const stop = watch(store.status, () => undefined);
+    const reset = graph.reset();
+    expect(backend.calls).toHaveLength(2);
+    expect(signals).toHaveLength(2);
+    expect(backend.calls[0]!.aborted).toBe(true);
+    expect(backend.calls[1]!.aborted).toBe(false);
+    owner.abort();
+    expect(backend.calls[1]!.aborted).toBe(true);
+    await expect(reset).resolves.toBeUndefined();
+    expect(store.status.get()).toBe("closed");
+    stop();
+    graph.dispose();
+
+    const preAbortedBackend = testBackend();
+    const preAbortedStream = numberStream(preAbortedBackend, "reset-pre-aborted-owner");
+    const secondGraph = createGraph({
+      contract: defineContract({
+        namespace: "reset-pre-aborted-owner",
+        operations: { stream: preAbortedStream },
+      }),
+    });
+    const secondApi = secondGraph.api as unknown as {
+      readonly stream: (input: void, options?: ValueOptions<number>) => StreamStore<number>;
+    };
+    const preAbortedOwner = new AbortController();
+    preAbortedOwner.abort();
+    const closed = secondApi.stream(undefined, { abortSignal: preAbortedOwner.signal });
+    const stopClosed = watch(closed.status, () => undefined);
+    await expect(secondGraph.reset()).resolves.toBeUndefined();
+    expect(preAbortedBackend.calls).toHaveLength(0);
+    expect(closed.status.get()).toBe("closed");
+    stopClosed();
+    secondGraph.dispose();
+  });
+
   it("increments the keyed store generation for every stream emission", async () => {
     const backend = testBackend();
     const stream = numberStream(backend, "zero-max");

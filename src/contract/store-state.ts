@@ -26,6 +26,7 @@ export function recordLanding<T>(
   runtime.lastLandingAt = Date.now();
   runtime.failing = false;
   runtime.invalidated = false;
+  runtime.refreshOnActivation = false;
   runtime.dropped = false;
   const errors: unknown[] = [];
   try {
@@ -133,13 +134,23 @@ export function configureKeyedValue<T>(
   if (initialStated && runtime.initialSpecified && !Object.is(runtime.initial, initial))
     throw optionConflict(runtime as StoreRuntime<unknown>, "initial");
   if (initialStated && !runtime.initialSpecified) {
+    const state = runtime.graph.__runtime;
+    const resetRequest = runtime.activeRequest;
+    const reseedAfterReset =
+      state.resetEpoch > 0 &&
+      (runtime.hasCommitted ||
+        (resetRequest !== undefined &&
+          !resetRequest.settled &&
+          resetRequest.resetEpoch === state.resetEpoch));
+    if (reseedAfterReset) throw optionConflict(runtime as StoreRuntime<unknown>, "initial");
     runtime.initial = initial;
     runtime.initialSpecified = true;
-    if (!runtime.hasCommitted && runtime.generation === 0) {
+    if (!runtime.hasCommitted && (runtime.generation === 0 || state.resetEpoch > 0)) {
       runtime.lastLandingAt = Date.now();
       runtime.committed.set(initial);
       runtime.hasCommitted = true;
       runtime.presence.set(true);
+      runtime.refreshOnActivation = false;
     }
   }
   if (equalsStated && runtime.equalsSpecified && runtime.equals !== (equals ?? Object.is))
@@ -165,27 +176,33 @@ export function preparePrediction<T>(
   runtime: StoreRuntime<T>,
   predictor: (current: T | undefined, input: unknown) => T,
   input: unknown,
+  isCurrent: () => boolean = () => true,
 ): Prediction<T> | undefined {
   try {
     const current = runtime.value.peek();
+    if (!isCurrent()) return undefined;
     reactiveInternal.withPredictionReadRefusal(() => predictor(current, input));
   } catch (error) {
+    if (!isCurrent()) return undefined;
     graphFault(
       runtime.graph.__runtime,
       error instanceof Fault && error.kind === "prediction" ? error : predictionFault(runtime),
     );
     return undefined;
   }
+  if (!isCurrent()) return undefined;
   const prediction: Prediction<T> = {
     id: runtime.graph.__runtime.nextPredictionId++,
     succeeded: false,
     dead: false,
     reported: false,
     apply(value: T | undefined): T | undefined {
-      if (prediction.dead) return value;
+      if (prediction.dead || !isCurrent()) return value;
+      let next: T;
       try {
-        return reactiveInternal.withPredictionReadRefusal(() => predictor(value, input));
+        next = reactiveInternal.withPredictionReadRefusal(() => predictor(value, input));
       } catch (error) {
+        if (!isCurrent() || prediction.dead) return value;
         prediction.dead = true;
         if (!prediction.reported) {
           prediction.reported = true;
@@ -198,6 +215,7 @@ export function preparePrediction<T>(
         }
         return value;
       }
+      return isCurrent() && !prediction.dead ? next : value;
     },
   };
   return prediction;

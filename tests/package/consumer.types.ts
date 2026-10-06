@@ -11,6 +11,7 @@ import {
   createQuery,
   createStore,
   createStream,
+  queryOptions,
   subscribe,
   type AffectSpec,
   type CreateMutationInput,
@@ -72,10 +73,33 @@ const inputlessQuery = createQuery<void, number, string>({
   key: () => "inputless",
   fetch: async () => 1,
 });
+const inferredInputlessQuery = createQuery({
+  name: "inferred-inputless.get",
+  key: () => "inferred-inputless",
+  fetch: async () => 2,
+});
+const optionalObjectQuery = createQuery({
+  name: "optional-object.get",
+  key: (input?: { readonly id: string }) => `optional-object/${input?.id ?? "none"}`,
+  fetch: async (input?: { readonly id: string }) => input?.id.length ?? 0,
+});
+const inferredInputlessMutation = createMutation({
+  name: "inferred-inputless.save",
+  affects: [],
+  run: async () => "saved",
+});
 const inputlessEffect = affects(inputlessQuery, {});
 const contract = defineContract({
   namespace: "types",
-  operations: { store, query, mutation, stream },
+  operations: {
+    store,
+    query,
+    mutation,
+    stream,
+    inferredInputlessQuery,
+    optionalObjectQuery,
+    inferredInputlessMutation,
+  },
 });
 const widenedContract = defineContract({
   namespace: "types-wide",
@@ -131,8 +155,29 @@ function typecheckOnly(): void {
   const graph = createGraph({ contract });
   const declared = graph.api.store();
   const queried = graph.api.query({ id: "1" });
+  graph.api.query({ id: "2" }, undefined);
   const changed = graph.api.mutation({ id: "1" });
   const streamed = graph.api.stream({ id: "1" });
+  const inferredQuery = graph.api.inferredInputlessQuery();
+  graph.api.inferredInputlessQuery(queryOptions({}));
+  graph.api.inferredInputlessQuery(queryOptions({ initial: 2 }));
+  graph.api.inferredInputlessQuery(queryOptions({ initial: 2 }), { revalidateAfterMs: 20 });
+  const readonlyQueryOptions = queryOptions({ initial: 2 });
+  // @ts-expect-error Branded options are a readonly shallow copy.
+  readonlyQueryOptions.initial = 3;
+  // @ts-expect-error The branded option retains the query's number value type.
+  graph.api.inferredInputlessQuery(queryOptions({ initial: "wrong" }));
+  const inferredMutation = graph.api.inferredInputlessMutation();
+  graph.api.inferredInputlessMutation(queryOptions({}));
+  graph.api.inferredInputlessMutation(queryOptions({}), {
+    abortSignal: new AbortController().signal,
+  });
+  graph.api.optionalObjectQuery(undefined);
+  graph.api.optionalObjectQuery({ id: "1" });
+  // @ts-expect-error An optional object callback remains an input-bearing query.
+  graph.api.optionalObjectQuery();
+  // @ts-expect-error A branded options object is not an optional object input.
+  graph.api.optionalObjectQuery(queryOptions({}));
   const addressed = graph.at("items/1");
   const unknown = graph.at("not-declared");
 
@@ -152,6 +197,8 @@ function typecheckOnly(): void {
 
   void declared.value.get();
   void queried.status.get();
+  void inferredQuery.value.get();
+  void inferredMutation;
   const ready: Promise<{ readonly id: string }> = queried.ready;
   void ready;
   const stopValues = subscribe(queried.value, (value) => {

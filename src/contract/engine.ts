@@ -14,10 +14,21 @@ import type {
   StreamDefinition,
   ValueOptions,
 } from "./types.ts";
+import {
+  hasMutationOptionFields,
+  hasStoreOptionFields,
+  isMutationOptions,
+  isStoreOptions,
+  isCancellationOptions,
+  isStoreDefinition,
+  isOperationDefinition,
+} from "./types.ts";
+import { validateContract } from "./validation.ts";
+import { isObject } from "../utils.ts";
 import { storeKey } from "./identity.ts";
 import { Fault, __registerFaultChannel, __unregisterFaultChannel } from "../fault.ts";
 import type { Unsubscribe } from "../fault.ts";
-import { __internal as reactiveInternal } from "../reactive.ts";
+import { __internal as reactiveInternal, computed, signal } from "../reactive.ts";
 import {
   allocateGraphId,
   graphRuntimeByGraph,
@@ -26,13 +37,7 @@ import {
   runtimeForStore,
 } from "./registry.ts";
 import type { GraphRuntime, GraphRuntimeState, RealmStoreState, StoreRuntime } from "./runtime.ts";
-import {
-  collectDeclaredStores,
-  finiteBound,
-  graphIdleMs,
-  isOperation,
-  isStore,
-} from "./runtime-validation.ts";
+import { collectDeclaredStores, finiteBound, graphIdleMs } from "./runtime-validation.ts";
 import { assertGraphOpen, reportContinuationError } from "./faults.ts";
 import { collectExpired, touch } from "./collection.ts";
 import { getOrCreateStore } from "./store.ts";
@@ -40,8 +45,10 @@ import { makeQueryStore } from "./query.ts";
 import { runMutation } from "./mutation.ts";
 import { streamMember } from "./stream.ts";
 import { armStoreTimer } from "./query-request.ts";
+import { hasQueryOptionsBrand } from "./query-options.ts";
 import { issue } from "./store-state.ts";
 import { writeAllStatuses } from "./status.ts";
+import { resetGraph } from "./reset.ts";
 
 /** @internal Default keyed-store retention period, in milliseconds. */
 export const DEFAULT_IDLE_MS = 300_000;
@@ -97,15 +104,31 @@ function adoptRealmEntry(
 function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: OperationTree): unknown {
   const api: Record<string, unknown> = {};
   for (const [property, value] of Object.entries(tree)) {
-    if (isStore(value)) {
+    if (isStoreDefinition(value)) {
       api[property] = () => getOrCreateStore(state, storeKey(value.name), value).store;
-    } else if (isOperation(value)) {
+    } else if (isOperationDefinition(value)) {
       if (value.kind === "query")
-        api[property] = (input: unknown, options?: StoreOptions<unknown>) =>
-          makeQueryStore(state, value as QueryDefinition<unknown, unknown, any>, input, options);
+        api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) => {
+          const [input, options] = args;
+          const call = normalizeQueryCall(input, options, args.length > 1);
+          return makeQueryStore(
+            state,
+            value as QueryDefinition<unknown, unknown, any>,
+            call.input,
+            call.options,
+          );
+        };
       else if (value.kind === "mutation")
-        api[property] = (input: unknown, options?: MutationOptions) =>
-          runMutation(state, value as MutationDefinition<unknown, unknown>, input, options);
+        api[property] = (...args: [input?: unknown, options?: MutationOptions]) => {
+          const [input, options] = args;
+          const call = normalizeMutationCall(input, options, args.length > 1);
+          return runMutation(
+            state,
+            value as MutationDefinition<unknown, unknown>,
+            call.input,
+            call.options,
+          );
+        };
       else
         api[property] = (input: unknown, options?: ValueOptions<unknown>) =>
           streamMember(state, value as StreamDefinition<unknown, unknown, any>, input, options);
@@ -115,17 +138,74 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
   return Object.freeze(api);
 }
 
+function normalizeQueryCall(
+  input: unknown,
+  options: StoreOptions<unknown> | undefined,
+  hasSecondArgument: boolean,
+): {
+  readonly input: unknown;
+  readonly options?: StoreOptions<unknown>;
+} {
+  let callInput = input;
+  let callOptions: unknown = options;
+  if (hasQueryOptionsBrand(input)) {
+    if (
+      options !== undefined &&
+      (!isObject(options) || typeof options === "function" || Array.isArray(options))
+    )
+      throw new TypeError("Invalid query options.");
+    callInput = undefined;
+    callOptions = { ...input, ...options };
+  } else if (!hasSecondArgument && hasStoreOptionFields(input)) {
+    callInput = undefined;
+    callOptions = input;
+  }
+  if (callOptions === undefined) return { input: callInput };
+  if (!isStoreOptions(callOptions)) throw new TypeError("Invalid query options.");
+  return { input: callInput, options: callOptions };
+}
+
+function normalizeMutationCall(
+  input: unknown,
+  options: MutationOptions | undefined,
+  hasSecondArgument: boolean,
+): {
+  readonly input: unknown;
+  readonly options?: MutationOptions;
+} {
+  let callInput = input;
+  let callOptions: unknown = options;
+  if (hasQueryOptionsBrand(input)) {
+    if (
+      options !== undefined &&
+      (!isObject(options) || typeof options === "function" || Array.isArray(options))
+    )
+      throw new TypeError("Invalid mutation options.");
+    callInput = undefined;
+    callOptions = { ...input, ...options };
+  } else if (!hasSecondArgument && hasMutationOptionFields(input)) {
+    callInput = undefined;
+    callOptions = input;
+  }
+  if (callOptions === undefined) return { input: callInput };
+  if (!isMutationOptions(callOptions)) throw new TypeError("Invalid mutation options.");
+  return { input: callInput, options: callOptions };
+}
+
 function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
   if (state.disposed) return;
   state.disposed = true;
+  state.resetOperation?.reject(new Fault("disposed", []));
+  state.resetOperation?.abort(new Fault("disposed", []));
+  state.resetOperation = undefined;
   state.stopAbort?.();
   state.stopAbort = undefined;
   if (state.collectionTimer != null) clearTimeout(state.collectionTimer);
   state.collectionTimer = undefined;
   state.collectionHeap.length = 0;
-  for (const close of Array.from(state.projections)) {
+  for (const projection of Array.from(state.projections)) {
     try {
-      close();
+      projection.dispose();
     } catch (error) {
       reportContinuationError(state, error);
     }
@@ -173,11 +253,16 @@ function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
  * @param options - Contract, lifetime signal, and resource bounds for the graph.
  * @returns A graph whose typed API is derived from `options.contract`.
  * @throws A {@link Fault} If a numeric resource bound is invalid.
+ * @throws TypeError if the contract, cancellation signal, or diagnostic callback is malformed.
  */
 export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph<C> {
-  const idleMs = graphIdleMs(options.idleMs ?? DEFAULT_IDLE_MS);
+  if (!isCancellationOptions(options)) throw new TypeError("Invalid graph cancellation options.");
+  if (options.onUnobservedFault !== undefined && typeof options.onUnobservedFault !== "function")
+    throw new TypeError("Graph onUnobservedFault must be a function.");
+  validateContract(options.contract);
+  const idleMs = graphIdleMs(options.idleMs === undefined ? DEFAULT_IDLE_MS : options.idleMs);
   const maxPredictions = finiteBound(
-    options.maxPredictions ?? DEFAULT_MAX_PREDICTIONS,
+    options.maxPredictions === undefined ? DEFAULT_MAX_PREDICTIONS : options.maxPredictions,
     "maxPredictions",
   );
   const id = allocateGraphId();
@@ -198,6 +283,8 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     collectionHeap: [],
     sweepScheduled: false,
     nextPredictionId: 0,
+    resetEpoch: 0,
+    resetVersion: signal(0),
     disposed: false,
   };
   collectDeclaredStores(options.contract.operations, state.declaredStores);
@@ -223,6 +310,8 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     __runtime: state,
     id,
     api: buildApi(state, options.contract.operations) as ContractApi<C>,
+    resetVersion: computed(() => state.resetVersion.get(), { label: `graph:${id}:reset-version` }),
+    reset: () => resetGraph(state),
     store: graphStore,
     at: graphAt,
     dispose: () => disposeGraph(state),

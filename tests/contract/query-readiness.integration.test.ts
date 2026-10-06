@@ -67,6 +67,75 @@ describe("QueryStore.ready", () => {
     graph.dispose();
   });
 
+  it("does not fetch after reset just because ready is waiting", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("reset-ready");
+    backend.resolve(backend.calls[0]!, 7);
+    await flush();
+    await expect(store.ready).resolves.toBe(7);
+
+    await expect(graph.reset()).resolves.toBeUndefined();
+    const ready = store.ready;
+    expect(backend.calls).toHaveLength(1);
+
+    const revalidation = store.revalidate();
+    expect(backend.calls).toHaveLength(2);
+    backend.resolve(backend.calls[1]!, 9);
+    await revalidation;
+    await expect(ready).resolves.toBe(9);
+    graph.dispose();
+  });
+
+  for (const outcome of ["ready", "failed"] as const) {
+    it(`releases its liveness after an immediate ${outcome} result`, async () => {
+      const backend = testBackend();
+      const graph = graphFor(backend);
+      const store = graph.api.query(
+        `settled-${outcome}`,
+        outcome === "ready" ? { initial: 7 } : {},
+      );
+
+      if (outcome === "ready") await expect(store.ready).resolves.toBe(7);
+      else {
+        const failure = new Error("offline");
+        backend.reject(backend.calls[0]!, failure);
+        await flush();
+        await expect(store.ready).rejects.toBe(failure);
+      }
+
+      await expect(graph.reset()).resolves.toBeUndefined();
+      expect(backend.calls).toHaveLength(outcome === "ready" ? 0 : 1);
+      graph.dispose();
+    });
+  }
+
+  for (const readable of ["status", "pending"] as const) {
+    it(`allows public ${readable} observation to reactivate after ready waits`, async () => {
+      const backend = testBackend();
+      const graph = graphFor(backend);
+      const store = graph.api.query(`reset-ready-${readable}`);
+      backend.resolve(backend.calls[0]!, 7);
+      await flush();
+      await expect(store.ready).resolves.toBe(7);
+
+      await expect(graph.reset()).resolves.toBeUndefined();
+      const ready = store.ready;
+      expect(backend.calls).toHaveLength(1);
+
+      const stop =
+        readable === "status"
+          ? subscribe(store.status, () => undefined)
+          : subscribe(store.pending, () => undefined);
+      expect(backend.calls).toHaveLength(2);
+      backend.resolve(backend.calls[1]!, 9);
+      await expect(ready).resolves.toBe(9);
+
+      stop();
+      graph.dispose();
+    });
+  }
+
   it("rejects a pending wait on failure when no committed value exists", async () => {
     const backend = testBackend();
     const graph = graphFor(backend);
@@ -304,6 +373,19 @@ describe("QueryStore.ready", () => {
     });
     const store = graph.api.query("pre-aborted", { abortSignal: controller.signal });
     await expect(store.ready).rejects.toMatchObject({ name: "AbortError" });
+    expect(backend.calls).toHaveLength(1);
+    expect(backend.calls[0]!.aborted).toBe(true);
+
+    let revalidationSettled = false;
+    const revalidation = store.revalidate().then(() => {
+      revalidationSettled = true;
+    });
+    expect(backend.calls).toHaveLength(2);
+    await Promise.resolve();
+    expect(revalidationSettled).toBe(false);
+    backend.resolve(backend.calls[1]!, 17);
+    await revalidation;
+    expect(revalidationSettled).toBe(true);
     graph.dispose();
   });
 
@@ -535,6 +617,36 @@ describe("QueryStore.ready", () => {
 
     jest.advanceTimersByTime(20);
     expect(backend.calls).toHaveLength(3);
+    stop();
+    graph.dispose();
+  });
+
+  it("reports a status subscriber setup error when that subscriber resets the graph", async () => {
+    const backend = testBackend();
+    const faults: unknown[] = [];
+    const graph = createGraph({
+      contract: defineContract({ namespace: "query-ready", operations: { query: query(backend) } }),
+      onUnobservedFault: (error) => faults.push(error),
+    });
+    const store = graph.api.query("reset-setup-error", { initial: 1 });
+    const subscriberError = new Error("status subscriber failed");
+    let reset: Promise<void> | undefined;
+    let armed = true;
+    const stop = subscribe(store.status, (status) => {
+      if (!armed || status !== "revalidating") return;
+      armed = false;
+      reset = graph.reset();
+      throw subscriberError;
+    });
+
+    await store.revalidate();
+    expect(reset).toBeDefined();
+    expect(backend.calls).toHaveLength(1);
+    backend.resolve(backend.calls[0]!, 2);
+    await expect(reset!).resolves.toBeUndefined();
+    expect(faults).toHaveLength(1);
+    expect(faults[0]).toBe(subscriberError);
+
     stop();
     graph.dispose();
   });

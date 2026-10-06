@@ -1,10 +1,16 @@
-import type { QueryCaller, QueryRequest, QuerySource, StoreRuntime } from "./runtime.ts";
+import type {
+  QueryCaller,
+  QueryOutcome,
+  QueryRequest,
+  QuerySource,
+  StoreRuntime,
+} from "./runtime.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
 import { addSignalAbort } from "../utils.ts";
 import { Fault } from "../fault.ts";
 import { assertStoreOpen, reportContinuationError } from "./faults.ts";
 import {
-  currentRequest,
+  isCurrentRequest,
   createCaller,
   asWindow,
   writeAllStatuses,
@@ -24,9 +30,21 @@ export function finishRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest
   runtime.graph.__runtime.activeControllers.delete(request.controller);
   runtime.requests.delete(request);
   updateCollectionCandidate(runtime);
-  const current = !request.superseded && request.generation === runtime.generation;
+  const current =
+    !request.superseded &&
+    request.generation === runtime.generation &&
+    request.resetEpoch === runtime.graph.__runtime.resetEpoch;
   if (current) runtime.lastSettledAt = Date.now();
   return current;
+}
+
+function reportRequestOutcome(
+  request: QueryRequest,
+  outcome: { readonly ok: true } | { readonly ok: false; readonly error: unknown },
+): void {
+  if (request.outcomeReported) return;
+  request.outcomeReported = true;
+  request.resolveOutcome(outcome);
 }
 
 export function settleQuerySuccess<T>(
@@ -34,6 +52,8 @@ export function settleQuerySuccess<T>(
   request: QueryRequest,
   value: T,
 ): void {
+  reportRequestOutcome(request, { ok: true });
+  const state = runtime.graph.__runtime;
   const current = finishRequest(runtime, request);
   const wasActive = runtime.activeRequest === request;
   if (wasActive) runtime.activeRequest = undefined;
@@ -48,9 +68,17 @@ export function settleQuerySuccess<T>(
       recordLanding(runtime, value, request.generation);
     });
   } catch (error) {
-    reportContinuationError(runtime.graph.__runtime, error);
+    if (!runtime.disposed && request.resetEpoch === state.resetEpoch)
+      reportContinuationError(state, error);
   }
-  armStoreTimer(runtime);
+  if (!runtime.disposed && request.resetEpoch === state.resetEpoch) {
+    try {
+      armStoreTimer(runtime);
+    } catch (error) {
+      if (!runtime.disposed && request.resetEpoch === state.resetEpoch)
+        reportContinuationError(state, error);
+    }
+  }
 }
 
 export function settleQueryFailure<T>(
@@ -58,6 +86,8 @@ export function settleQueryFailure<T>(
   request: QueryRequest,
   reason: unknown,
 ): void {
+  reportRequestOutcome(request, { ok: false, error: reason });
+  const state = runtime.graph.__runtime;
   const current = finishRequest(runtime, request);
   const wasActive = runtime.activeRequest === request;
   if (wasActive) runtime.activeRequest = undefined;
@@ -67,20 +97,31 @@ export function settleQueryFailure<T>(
   }
   runtime.recoveryDisarmed = request.automaticRecovery;
   try {
-    runtime.failing = true;
-    runtime.invalidated = true;
-    runtime.errorCell.set(reason);
-    touch(runtime);
-    writeAllStatuses(runtime);
+    reactiveInternal.batch(() => {
+      runtime.failing = true;
+      runtime.invalidated = true;
+      runtime.errorCell.set(reason);
+      touch(runtime);
+      writeAllStatuses(runtime);
+    });
   } catch (error) {
-    reportContinuationError(runtime.graph.__runtime, error);
+    if (!runtime.disposed && request.resetEpoch === state.resetEpoch)
+      reportContinuationError(state, error);
   }
+  if (runtime.disposed || request.resetEpoch !== state.resetEpoch) return;
   if (request.automaticRecovery)
     reportContinuationError(
-      runtime.graph.__runtime,
+      state,
       new Fault("contract", [runtime.key as string, "automatic query recovery exhausted"]),
     );
-  armStoreTimer(runtime);
+  if (!runtime.disposed && request.resetEpoch === state.resetEpoch) {
+    try {
+      armStoreTimer(runtime);
+    } catch (error) {
+      if (!runtime.disposed && request.resetEpoch === state.resetEpoch)
+        reportContinuationError(state, error);
+    }
+  }
 }
 
 export function startQuery<T>(
@@ -90,21 +131,40 @@ export function startQuery<T>(
   abortSignal?: AbortSignal,
   automaticRecovery = false,
 ): Promise<void> {
+  return (
+    startQueryRequest(runtime, caller, force, abortSignal, automaticRecovery)?.promise ??
+    Promise.resolve()
+  );
+}
+
+export function startQueryRequest<T>(
+  runtime: StoreRuntime<T>,
+  caller: QueryCaller<T>,
+  force: boolean,
+  abortSignal?: AbortSignal,
+  automaticRecovery = false,
+): QueryRequest | undefined {
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
   const state = runtime.graph.__runtime;
+  const resetEpoch = state.resetEpoch;
   interact(state);
   if (!force) {
-    const existing = currentRequest(runtime);
-    if (existing != null) return existing.promise;
+    const existing = isCurrentRequest(runtime);
+    if (existing != null) {
+      runtime.refreshOnActivation = false;
+      return existing;
+    }
   }
-  if (!force && runtime.recoveryDisarmed) return Promise.resolve();
+  if (!force && runtime.recoveryDisarmed) return undefined;
+  runtime.refreshOnActivation = false;
   if (force) {
     runtime.recoveryDisarmed = false;
   }
   if (runtime.activeRequest != null && !runtime.activeRequest.settled) {
     runtime.activeRequest.superseded = true;
     runtime.activeRequest.controller.abort();
+    if (state.resetEpoch !== resetEpoch || state.disposed) return undefined;
   }
   if (runtime.timer != null) {
     clearTimeout(runtime.timer);
@@ -114,15 +174,23 @@ export function startQuery<T>(
   const removeCallerAbort = addSignalAbort(abortSignal, controller);
   const generation = issue(runtime);
   const source: QuerySource<T> = { query: caller.query, input: caller.input };
+  let resolveOutcome!: QueryRequest["resolveOutcome"];
+  const outcome = new Promise<QueryOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
   const request: QueryRequest = {
     controller,
     generation,
+    resetEpoch,
     automaticRecovery,
-    predictionIds: runtime.predictionStack
-      .peek()
+    predictionIds: reactiveInternal
+      .signalValue(runtime.predictionStack)
       .filter((prediction) => prediction.succeeded && !prediction.dead)
       .map((prediction) => prediction.id),
     promise: Promise.resolve(),
+    outcome,
+    resolveOutcome,
+    outcomeReported: false,
     removeCallerAbort,
     settled: false,
     superseded: false,
@@ -130,6 +198,17 @@ export function startQuery<T>(
   runtime.source = source;
   runtime.requests.add(request);
   updateCollectionCandidate(runtime);
+  const predecessor = runtime.activeRequest;
+  if (
+    state.resetOperation?.epoch === resetEpoch &&
+    predecessor !== undefined &&
+    !predecessor.settled &&
+    !predecessor.outcomeReported &&
+    predecessor.resetEpoch === resetEpoch
+  ) {
+    predecessor.outcomeReported = true;
+    void outcome.then((result) => predecessor.resolveOutcome(result));
+  }
   runtime.activeRequest = request;
   state.activeControllers.add(controller);
   let setupError: unknown;
@@ -145,12 +224,17 @@ export function startQuery<T>(
     setupError = error;
     setupFailed = true;
   }
+  if (state.resetEpoch !== resetEpoch || state.disposed) {
+    if (setupFailed) reportContinuationError(state, setupError);
+    return request;
+  }
   const onRequestAbort = (): void => {
     if (
       !request.superseded &&
       !request.settled &&
       runtime.activeRequest === request &&
       request.generation === runtime.generation &&
+      request.resetEpoch === state.resetEpoch &&
       !runtime.disposed
     )
       settleQueryFailure(runtime, request, controller.signal.reason);
@@ -158,6 +242,7 @@ export function startQuery<T>(
   controller.signal.addEventListener("abort", onRequestAbort, { once: true });
   request.removeRequestAbort = () => controller.signal.removeEventListener("abort", onRequestAbort);
   if (controller.signal.aborted) onRequestAbort();
+  if (request.resetEpoch !== state.resetEpoch || runtime.disposed) return request;
   let result: Promise<T>;
   try {
     const options = {
@@ -178,7 +263,7 @@ export function startQuery<T>(
     },
   );
   if (setupFailed) throw setupError;
-  return request.promise;
+  return request;
 }
 
 export function callerForSource<T>(
@@ -206,7 +291,7 @@ export function armStoreTimer<T>(runtime: StoreRuntime<T>): void {
     runtime.timer = undefined;
   }
   if (runtime.recoveryDisarmed) return;
-  if (runtime.dropped || currentRequest(runtime) != null) return;
+  if (runtime.dropped || isCurrentRequest(runtime) != null) return;
   const base = Math.max(runtime.lastLandingAt ?? 0, runtime.lastSettledAt ?? 0);
   if (base === 0 && runtime.lastLandingAt === undefined && runtime.lastSettledAt === undefined)
     return;

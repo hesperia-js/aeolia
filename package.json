@@ -1,6 +1,6 @@
 {
   "name": "aeolia",
-  "version": "0.0.0",
+  "version": "1.0.0-alpha.1",
   "description": "A framework-agnostic reactive state layer built on signals",
   "keywords": [
     "javascript",
@@ -62,8 +62,8 @@
   "dependencies": {},
   "devDependencies": {
     "@types/bun": "1.4.2",
-    "oxfmt": "0.71.0",
-    "oxlint": "1.86.0",
+    "oxfmt": "0.72.0",
+    "oxlint": "1.87.0",
     "typescript": "7.0.2"
   },
   "packageManager": "bun@1.4.2"

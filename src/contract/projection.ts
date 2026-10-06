@@ -1,12 +1,37 @@
 import { storeKey } from "./identity.ts";
 import type { Graph, OpenOptions, StreamDefinition, StreamStore } from "./types.ts";
-import { registerProjection, reportGraphContinuationError, runtimeForStore } from "./registry.ts";
+import {
+  graphRuntimeByGraph,
+  registerProjection,
+  reportGraphContinuationError,
+  runtimeForStore,
+} from "./registry.ts";
 import { Fault } from "../fault.ts";
+import { isObject } from "../utils.ts";
 import { signal } from "../reactive.ts";
 import type { Readable } from "../reactive.ts";
 import { assertStoreOpen } from "./faults.ts";
 import { isLive, scheduleSweep, updateCollectionCandidate } from "./collection.ts";
-import type { StreamEvent } from "./runtime.ts";
+import type { GraphProjection, GraphRuntimeState, StreamEvent, StoreRuntime } from "./runtime.ts";
+
+const projectionInitialByValueCell = new WeakMap<object, unknown>();
+
+interface TerminalProjectionCleanup {
+  remainingReadables: number;
+  readonly state: WeakRef<GraphRuntimeState<any>>;
+  readonly projection: WeakRef<GraphProjection>;
+}
+
+const terminalProjectionReadableFinalizer = new FinalizationRegistry<TerminalProjectionCleanup>(
+  (cleanup) => {
+    cleanup.remainingReadables -= 1;
+    if (cleanup.remainingReadables === 0) {
+      const state = cleanup.state.deref();
+      const projection = cleanup.projection.deref();
+      if (state !== undefined && projection !== undefined) state.projections.delete(projection);
+    }
+  },
+);
 
 /**
  * Lifecycle state of a stream projection.
@@ -56,6 +81,22 @@ export type ReducePolicy<T, V> = {
 /** The accumulation or reduction policy used by {@link project}. */
 export type ProjectionPolicy<T, V> = AccumulatePolicy | ReducePolicy<T, V>;
 
+/** Validates policy fields without executing the reducer or inspecting its data. */
+function isProjectionPolicy(value: unknown): value is ProjectionPolicy<unknown, unknown> {
+  if (!isObject(value) || !("kind" in value)) return false;
+  if (value.kind === "reduce")
+    return "initial" in value && "step" in value && typeof value.step === "function";
+  if (value.kind !== "accumulate") return false;
+  return (
+    "max" in value &&
+    typeof value.max === "number" &&
+    (!("onOverflow" in value) ||
+      value.onOverflow === undefined ||
+      value.onOverflow === "fail" ||
+      value.onOverflow === "drop-oldest")
+  );
+}
+
 /**
  * A value maintained from stream emissions.
  *
@@ -91,10 +132,12 @@ interface ProjectionRuntime<T, V> {
   readonly statusCell: ReturnType<typeof signal<ProjectionStatus>>;
   readonly errorCell: ReturnType<typeof signal<unknown>>;
   readonly policy: ProjectionPolicy<T, V>;
-  readonly controller: AbortController;
+  controller: AbortController;
   iterator?: AsyncIterator<T>;
   unregister?: () => void;
   detach?: () => void;
+  restartSource?: () => void;
+  generation: number;
   closed: boolean;
 }
 
@@ -117,9 +160,7 @@ function safeSet<T, V>(runtime: ProjectionRuntime<T, V>, set: () => void): void 
   }
 }
 
-function finish<T, V>(runtime: ProjectionRuntime<T, V>, failed: boolean, reason?: unknown): void {
-  if (runtime.closed) return;
-  runtime.closed = true;
+function stopSource<T, V>(runtime: ProjectionRuntime<T, V>): void {
   runtime.detach?.();
   runtime.detach = undefined;
   runtime.controller.abort();
@@ -127,35 +168,168 @@ function finish<T, V>(runtime: ProjectionRuntime<T, V>, failed: boolean, reason?
     try {
       void Promise.resolve(runtime.iterator.return()).catch(() => undefined);
     } catch {
-      // Closing is idempotent and the stream's own close error is not a new
-      // projection failure once the projection has already terminated.
+      // A source's close error does not replace its current lifecycle result.
     }
   }
-  if (failed) {
-    if (reason != null) safeSet(runtime, () => runtime.errorCell.set(reason));
-    safeSet(runtime, () => runtime.statusCell.set("failed"));
-  } else {
-    safeSet(runtime, () => runtime.statusCell.set("closed"));
+  runtime.iterator = undefined;
+}
+
+function registerTerminalReset<V>(
+  graph: Graph,
+  terminalStatus: ProjectionStatus,
+  valueCell: WeakRef<ReturnType<typeof signal<V>>>,
+  statusCell: WeakRef<ReturnType<typeof signal<ProjectionStatus>>>,
+  errorCell: WeakRef<ReturnType<typeof signal<unknown>>>,
+): void {
+  const state = graphRuntimeByGraph.get(graph as object);
+  if (state === undefined || state.disposed) return;
+
+  let unregister: (() => void) | undefined;
+  const finalizerToken = {};
+  let active = true;
+  const reset = (): void => {
+    if (!active) return;
+    active = false;
+    terminalProjectionReadableFinalizer.unregister(finalizerToken);
+    unregister?.();
+    unregister = undefined;
+
+    const value = valueCell.deref();
+    const status = statusCell.deref();
+    const error = errorCell.deref();
+    const initial =
+      value !== undefined && projectionInitialByValueCell.has(value)
+        ? projectionInitialByValueCell.get(value)
+        : ([] as unknown as V);
+    if (value !== undefined) projectionInitialByValueCell.delete(value);
+
+    if (status !== undefined) {
+      try {
+        status.set(terminalStatus);
+      } catch (reason) {
+        reportGraphContinuationError(graph, reason);
+      }
+    }
+    if (value !== undefined) {
+      try {
+        value.set(initial as V);
+      } catch (reason) {
+        reportGraphContinuationError(graph, reason);
+      }
+    }
+    if (error !== undefined) {
+      try {
+        error.set(undefined);
+      } catch (reason) {
+        reportGraphContinuationError(graph, reason);
+      }
+    }
+  };
+  const projection: GraphProjection = {
+    reset: () => {
+      reset();
+      return undefined;
+    },
+    restart: () => undefined,
+    dispose: () => undefined,
+  };
+  unregister = registerProjection(graph, projection);
+  const cleanup: TerminalProjectionCleanup = {
+    remainingReadables: 0,
+    state: new WeakRef(state),
+    projection: new WeakRef(projection),
+  };
+  for (const readable of [valueCell, statusCell, errorCell]) {
+    const cell = readable.deref();
+    if (cell === undefined) continue;
+    cleanup.remainingReadables += 1;
+    terminalProjectionReadableFinalizer.register(cell, cleanup, finalizerToken);
   }
+}
+
+function finish<T, V>(runtime: ProjectionRuntime<T, V>, failed: boolean, reason?: unknown): void {
+  if (runtime.closed) return;
+  runtime.closed = true;
+  const resetVersion = graphRuntimeByGraph.get(runtime.graph as object)?.resetVersion.peek() ?? 0;
   runtime.unregister?.();
   runtime.unregister = undefined;
+  const terminalStatus = failed ? "failed" : "closed";
+  registerTerminalReset(
+    runtime.graph,
+    terminalStatus,
+    new WeakRef(runtime.valueCell),
+    new WeakRef(runtime.statusCell),
+    new WeakRef(runtime.errorCell),
+  );
+  stopSource(runtime);
+  if ((graphRuntimeByGraph.get(runtime.graph as object)?.resetVersion.peek() ?? 0) !== resetVersion)
+    return;
+  if (failed) {
+    if (reason != null) safeSet(runtime, () => runtime.errorCell.set(reason));
+    if (
+      (graphRuntimeByGraph.get(runtime.graph as object)?.resetVersion.peek() ?? 0) !== resetVersion
+    )
+      return;
+  }
+  safeSet(runtime, () => runtime.statusCell.set(terminalStatus));
+}
+
+function prepareReset<T, V>(runtime: ProjectionRuntime<T, V>): (() => void) | undefined {
+  if (runtime.closed) return undefined;
+  const controller = runtime.controller;
+  const iterator = runtime.iterator;
+  runtime.detach?.();
+  runtime.detach = undefined;
+  runtime.iterator = undefined;
+  runtime.generation += 1;
+  runtime.controller = new AbortController();
+  const initial = runtime.policy.kind === "reduce" ? runtime.policy.initial : ([] as unknown as V);
+  safeSet(runtime, () => {
+    runtime.valueCell.set(initial);
+    runtime.errorCell.set(undefined);
+    runtime.statusCell.set("open");
+  });
+  return () => {
+    controller.abort();
+    if (iterator != null && typeof iterator.return === "function") {
+      try {
+        void Promise.resolve(iterator.return()).catch(() => undefined);
+      } catch {
+        // Reset already retired this source session.
+      }
+    }
+  };
 }
 
 function fail<T, V>(runtime: ProjectionRuntime<T, V>, reason: unknown): void {
   finish(runtime, true, reason);
 }
 
-function accept<T, V>(runtime: ProjectionRuntime<T, V>, item: T): void {
-  if (runtime.closed) return;
+function isCurrentGeneration<T, V>(
+  runtime: ProjectionRuntime<T, V>,
+  controller: AbortController,
+  generation: number,
+): boolean {
+  return !runtime.closed && runtime.controller === controller && runtime.generation === generation;
+}
+
+function accept<T, V>(
+  runtime: ProjectionRuntime<T, V>,
+  item: T,
+  controller: AbortController,
+  generation: number,
+): void {
+  if (!isCurrentGeneration(runtime, controller, generation)) return;
   const policy = runtime.policy;
   if (policy.kind === "reduce") {
     let next: V;
     try {
       next = policy.step(runtime.valueCell.peek(), item);
     } catch (error) {
-      fail(runtime, error);
+      if (isCurrentGeneration(runtime, controller, generation)) fail(runtime, error);
       return;
     }
+    if (!isCurrentGeneration(runtime, controller, generation)) return;
     safeSet(runtime, () => runtime.valueCell.set(next));
     return;
   }
@@ -172,21 +346,31 @@ function accept<T, V>(runtime: ProjectionRuntime<T, V>, item: T): void {
   safeSet(runtime, () => runtime.valueCell.set([...current, item] as unknown as V));
 }
 
-async function consume<T, V>(runtime: ProjectionRuntime<T, V>): Promise<void> {
+async function consume<T, V>(
+  runtime: ProjectionRuntime<T, V>,
+  controller: AbortController,
+  generation: number,
+): Promise<void> {
   const iterator = runtime.iterator;
   if (iterator === undefined) return;
   try {
-    while (!runtime.closed) {
+    while (
+      !runtime.closed &&
+      runtime.controller === controller &&
+      runtime.generation === generation
+    ) {
       const result = await iterator.next();
-      if (runtime.closed) return;
+      if (runtime.closed || runtime.controller !== controller || runtime.generation !== generation)
+        return;
       if (result.done) {
         finish(runtime, false);
         return;
       }
-      accept(runtime, result.value);
+      accept(runtime, result.value, controller, generation);
     }
   } catch (error) {
-    if (!runtime.closed) fail(runtime, error);
+    if (!runtime.closed && runtime.controller === controller && runtime.generation === generation)
+      fail(runtime, error);
   }
 }
 
@@ -205,8 +389,10 @@ function initializeProjection<T, V>(
     errorCell,
     policy,
     controller,
+    generation: 0,
     closed: false,
   };
+  if (policy.kind === "reduce") projectionInitialByValueCell.set(valueCell, policy.initial);
 
   const close = (): void => finish(runtime, false);
   const projection: Projection<V> = Object.freeze({
@@ -216,7 +402,13 @@ function initializeProjection<T, V>(
     close,
   });
 
-  runtime.unregister = registerProjection(graph, close);
+  runtime.unregister = registerProjection(graph, {
+    reset: () => prepareReset(runtime),
+    restart: () => {
+      if (!runtime.closed) runtime.restartSource?.();
+    },
+    dispose: close,
+  });
   return { runtime, projection };
 }
 
@@ -227,57 +419,101 @@ function makeProjection<T, V>(
   policy: ProjectionPolicy<T, V>,
 ): Projection<V> {
   const { runtime, projection } = initializeProjection(graph, policy);
-  const controller = runtime.controller;
+  runtime.restartSource = () => openIndependent(runtime, graph, stream, input);
+  openIndependent(runtime, graph, stream, input, true);
+  return projection;
+}
 
+function openIndependent<T, V>(
+  runtime: ProjectionRuntime<T, V>,
+  graph: Graph,
+  stream: StreamDefinition<any, T, any>,
+  input: unknown,
+  propagateKeyError = false,
+): void {
+  const controller = runtime.controller;
+  const generation = runtime.generation;
   let key: ReturnType<typeof storeKey>;
   try {
     key = storeKey(stream.key(input));
   } catch (error) {
-    // The key is a caller-side synchronous failure. Do not leave a graph
-    // registration or an abort controller behind when it escapes.
-    runtime.unregister?.();
-    runtime.unregister = undefined;
-    runtime.closed = true;
-    controller.abort();
-    throw error;
+    if (runtime.controller !== controller || runtime.generation !== generation) return;
+    if (propagateKeyError) {
+      runtime.unregister?.();
+      runtime.unregister = undefined;
+      runtime.closed = true;
+      controller.abort();
+      throw error;
+    }
+    fail(runtime, error);
+    return;
   }
+  if (!isCurrentGeneration(runtime, controller, generation)) return;
   const options: OpenOptions = {
     abortSignal: controller.signal,
     graph: graph.id,
     key,
     reportGap: () => {
-      if (!runtime.closed) fail(runtime, new Error("Aeolia projection stream reported a gap"));
+      if (!runtime.closed && runtime.controller === controller && runtime.generation === generation)
+        fail(runtime, new Error("Aeolia projection stream reported a gap"));
     },
   };
   let iterable: AsyncIterable<T>;
   try {
     iterable = stream.open(input, options);
-    runtime.iterator = iterable[Symbol.asyncIterator]();
+    const iterator = iterable[Symbol.asyncIterator]();
+    if (runtime.closed || runtime.controller !== controller || runtime.generation !== generation) {
+      if (typeof iterator.return === "function")
+        void Promise.resolve(iterator.return()).catch(() => undefined);
+      return;
+    }
+    runtime.iterator = iterator;
   } catch (error) {
+    if (runtime.controller !== controller || runtime.generation !== generation) return;
     fail(runtime, error);
-    return projection;
+    return;
   }
-  void consume(runtime);
-  return projection;
+  void consume(runtime, controller, generation);
 }
 
 function makeSharedProjection<T, V>(
   source: StreamStore<T>,
   policy: ProjectionPolicy<T, V>,
 ): Projection<V> {
-  const store = runtimeForStore(source);
+  const store = runtimeForStore(source) as StoreRuntime<T> | undefined;
   if (store === undefined || source.status !== store.streamStatus)
     throw new TypeError("A shared projection requires an Aeolia StreamStore");
   assertStoreOpen(store);
   const { runtime, projection } = initializeProjection(store.graph, policy);
+  runtime.restartSource = () => attachSharedProjection(runtime, store, source);
+  attachSharedProjection(runtime, store, source);
+  return projection;
+}
+
+function attachSharedProjection<T, V>(
+  runtime: ProjectionRuntime<T, V>,
+  store: StoreRuntime<T>,
+  source: StreamStore<T>,
+): void {
+  if (runtime.closed || runtime.detach !== undefined) return;
   const session = store.stream;
   if (session === undefined || session.ended) {
     const failed = source.status.peek() === "failed";
     finish(runtime, failed, failed ? source.error.peek() : undefined);
-    return projection;
+    return;
   }
+  const controller = runtime.controller;
+  const generation = runtime.generation;
   const listener = (event: StreamEvent<unknown>): void => {
-    if (event.kind === "value") accept(runtime, event.value as T);
+    if (
+      runtime.closed ||
+      runtime.controller !== controller ||
+      runtime.generation !== generation ||
+      store.stream !== session ||
+      session.resetEpoch !== store.graph.__runtime.resetEpoch
+    )
+      return;
+    if (event.kind === "value") accept(runtime, event.value as T, controller, generation);
     else if (event.kind === "gap")
       fail(runtime, new Error("Aeolia projection stream reported a gap"));
     else finish(runtime, event.failed, event.reason);
@@ -292,7 +528,6 @@ function makeSharedProjection<T, V>(
     updateCollectionCandidate(store);
     scheduleSweep(store.graph.__runtime);
   };
-  return projection;
 }
 
 /**
@@ -319,6 +554,7 @@ function makeSharedProjection<T, V>(
  * not a finite positive integer, or kind `disposed` when the graph is closed.
  * The stream key's synchronous error is rethrown. Errors from opening or
  * consuming the source are represented by a failed projection instead.
+ * @throws TypeError if the policy fields or reducer type are malformed.
  *
  * @example
  * ```ts
@@ -365,8 +601,8 @@ export function project<I, T, V, K extends "reduce" | "accumulate">(
  * @param policy - Bounded accumulation or reduction, with the same rules as the
  * independent overload.
  * @returns An eager projection with its own value and lifecycle readables.
- * @throws TypeError if source is not an Aeolia StreamStore; Fault if its graph is
- * disposed or the accumulation maximum is invalid.
+ * @throws TypeError if source is not an Aeolia StreamStore or the policy is malformed.
+ * @throws Fault if its graph is disposed or the accumulation maximum is invalid.
  */
 export function project<T, V, K extends "reduce" | "accumulate">(
   source: StreamStore<T>,
@@ -379,6 +615,7 @@ export function project<I, T, V>(
   suppliedPolicy?: ProjectionPolicy<T, V>,
 ): Projection<V> {
   const policy = suppliedPolicy ?? (streamOrPolicy as ProjectionPolicy<T, V>);
+  if (!isProjectionPolicy(policy)) throw new TypeError("Invalid projection policy.");
   if (policy.kind === "accumulate") validateMax(policy.max);
   if (suppliedPolicy === undefined)
     return makeSharedProjection(graphOrSource as StreamStore<T>, policy);

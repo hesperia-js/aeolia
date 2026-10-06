@@ -2,6 +2,13 @@ import { Fault } from "../fault.ts";
 import type { Contract } from "./types.ts";
 import type { GraphRuntimeState, StoreRuntime } from "./runtime.ts";
 
+export class AbortError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AbortError";
+  }
+}
+
 export function reportUnobserved(state: GraphRuntimeState<any>, error: unknown): void {
   if (state.onUnobservedFault === undefined) return;
   try {

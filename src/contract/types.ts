@@ -1,6 +1,9 @@
 import type { Readable } from "../reactive.ts";
+import { isAbortSignal, isObject } from "../utils.ts";
 import type { GraphId, StoreKey, StoreStatus, StreamStatus } from "./identity.ts";
-import type { affectedBrand } from "./symbols.ts";
+import { isStoreKey } from "./identity.ts";
+import { affectedBrand } from "./symbols.ts";
+import type { queryOptionsBrand } from "./symbols.ts";
 export type { Readable } from "../reactive.ts";
 export type { Generation, GraphId, StoreKey, StoreStatus, StreamStatus } from "./identity.ts";
 
@@ -117,6 +120,7 @@ export interface QueryStore<T> extends Store<T> {
    * @throws A {@link Fault} If the graph or store has been disposed.
    * Synchronous status or propagation failures may also be rethrown while the
    * request is being started.
+   * @throws TypeError if the cancellation options are malformed.
    */
   revalidate(options?: { readonly abortSignal?: AbortSignal }): Promise<void>;
 }
@@ -174,6 +178,16 @@ export interface CreateStoreInput<T, N extends string> {
   readonly snapshot?: boolean;
 }
 
+/** Checks declaration fields without evaluating equality or initial data. */
+export function isCreateStoreInput(value: unknown): value is CreateStoreInput<unknown, string> {
+  return (
+    isNamedDeclaration(value) &&
+    isStoreKey(value.name) &&
+    "initial" in value &&
+    matchesOptions(value, valueSemanticsChecks)
+  );
+}
+
 /**
  * An immutable declaration of a writable store.
  *
@@ -185,12 +199,18 @@ export interface StoreDefinition<T, N extends string = string> extends CreateSto
   readonly kind: "store";
 }
 
+export function isStoreDefinition(value: unknown): value is StoreDefinition<unknown> {
+  return isCreateStoreInput(value) && "kind" in value && value.kind === "store";
+}
+
 /**
  * Value identity, snapshot, and cancellation options for one query or stream
  * member call.
  *
  * The first explicit value configuration for a key becomes that store's
  * configuration. Later calls for the same key must not contradict it.
+ * Malformed option types throw TypeError synchronously before resolving the
+ * key or creating a store. Initial data is not checked against the erased T.
  */
 export interface ValueOptions<T> {
   /**
@@ -227,6 +247,69 @@ export interface ValueOptions<T> {
   readonly snapshot?: boolean;
 }
 
+type OptionChecks = readonly (readonly [string, (value: unknown) => boolean])[];
+
+function matchesOptions(value: unknown, checks: OptionChecks): boolean {
+  if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
+  return checks.every(([field, check]) => {
+    const option: unknown = Reflect.get(value, field);
+    return option === undefined || check(option);
+  });
+}
+
+function hasOptionFields(value: unknown, checks: OptionChecks): boolean {
+  return (
+    isObject(value) &&
+    typeof value !== "function" &&
+    !Array.isArray(value) &&
+    checks.some(([field]) => Object.hasOwn(value, field))
+  );
+}
+
+const valueOptionValidators = {
+  abortSignal: isAbortSignal,
+  initial: (_value: unknown) => true,
+  equals: (value: unknown) => typeof value === "function",
+  snapshot: (value: unknown) => typeof value === "boolean",
+} satisfies Record<keyof ValueOptions<unknown>, (value: unknown) => boolean>;
+const valueOptionChecks = Object.entries(valueOptionValidators);
+const valueSemanticsChecks = Object.entries({
+  equals: valueOptionValidators.equals,
+  snapshot: valueOptionValidators.snapshot,
+} satisfies Record<
+  keyof Pick<ValueOptions<unknown>, "equals" | "snapshot">,
+  (value: unknown) => boolean
+>);
+
+function isNamedDeclaration(value: unknown): value is { readonly name: string } {
+  return (
+    isObject(value) &&
+    typeof value !== "function" &&
+    !Array.isArray(value) &&
+    "name" in value &&
+    typeof value.name === "string"
+  );
+}
+
+/** Validates value options; the caller's arbitrary initial data remains unknown. */
+export function isValueOptions(value: unknown): value is ValueOptions<unknown> {
+  return matchesOptions(value, valueOptionChecks);
+}
+
+/** Validates the cancellation-only options accepted by explicit revalidation. */
+export function isCancellationOptions(
+  value: unknown,
+): value is Pick<ValueOptions<unknown>, "abortSignal"> {
+  return (
+    isObject(value) &&
+    typeof value !== "function" &&
+    !Array.isArray(value) &&
+    (!("abortSignal" in value) ||
+      value.abortSignal === undefined ||
+      isAbortSignal(value.abortSignal))
+  );
+}
+
 /** Options for one query caller, extending keyed value configuration. */
 export interface StoreOptions<T> extends ValueOptions<T> {
   /**
@@ -240,6 +323,21 @@ export interface StoreOptions<T> extends ValueOptions<T> {
    * @defaultValue The query definition's window, or an infinite window when both are omitted.
    */
   readonly revalidateAfterMs?: number;
+}
+
+const storeOptionChecks = Object.entries({
+  ...valueOptionValidators,
+  revalidateAfterMs: (value: unknown) => typeof value === "number",
+} satisfies Record<keyof StoreOptions<unknown>, (value: unknown) => boolean>);
+
+/** Validates query option types; effective freshness bounds are checked when used. */
+export function isStoreOptions(value: unknown): value is StoreOptions<unknown> {
+  return matchesOptions(value, storeOptionChecks);
+}
+
+/** Recognizes the options-only call form, including malformed option values. */
+export function hasStoreOptionFields(value: unknown): boolean {
+  return hasOptionFields(value, storeOptionChecks);
 }
 
 /** Context supplied to a query, mutation, or stream callback. */
@@ -310,6 +408,22 @@ export interface CreateQueryInput<I, T, K extends string> {
   readonly equals?: (a: NoInfer<T>, b: NoInfer<T>) => boolean;
 }
 
+export function isCreateQueryInput(
+  value: unknown,
+): value is CreateQueryInput<unknown, unknown, string> {
+  return (
+    isNamedDeclaration(value) &&
+    "key" in value &&
+    typeof value.key === "function" &&
+    "fetch" in value &&
+    typeof value.fetch === "function" &&
+    (!("revalidateAfterMs" in value) ||
+      value.revalidateAfterMs === undefined ||
+      typeof value.revalidateAfterMs === "number") &&
+    matchesOptions(value, valueSemanticsChecks)
+  );
+}
+
 /**
  * An immutable declaration of a query operation.
  *
@@ -323,6 +437,10 @@ export interface QueryDefinition<I, T, K extends string = string> extends Create
 > {
   /** Discriminator identifying this declaration as a query. */
   readonly kind: "query";
+}
+
+export function isQueryDefinition(value: unknown): value is QueryDefinition<unknown, unknown> {
+  return isCreateQueryInput(value) && "kind" in value && value.kind === "query";
 }
 
 /** Context supplied to a stream-opening callback. */
@@ -370,6 +488,19 @@ export interface CreateStreamInput<I, T, K extends string> {
   readonly equals?: (a: NoInfer<T>, b: NoInfer<T>) => boolean;
 }
 
+export function isCreateStreamInput(
+  value: unknown,
+): value is CreateStreamInput<unknown, unknown, string> {
+  return (
+    isNamedDeclaration(value) &&
+    "key" in value &&
+    typeof value.key === "function" &&
+    "open" in value &&
+    typeof value.open === "function" &&
+    matchesOptions(value, valueSemanticsChecks)
+  );
+}
+
 /**
  * An immutable declaration of a stream operation.
  *
@@ -384,6 +515,10 @@ export interface StreamDefinition<I, T, K extends string = string> extends Creat
 > {
   /** Discriminator identifying this declaration as a stream. */
   readonly kind: "stream";
+}
+
+export function isStreamDefinition(value: unknown): value is StreamDefinition<unknown, unknown> {
+  return isCreateStreamInput(value) && "kind" in value && value.kind === "stream";
 }
 
 /**
@@ -410,6 +545,23 @@ export interface Affected<I> {
 
   /** Optional optimistic value producer. */
   readonly optimistic?: (current: unknown, input: I) => unknown;
+}
+
+export function isAffected(value: unknown): value is Affected<unknown> {
+  return (
+    isObject(value) &&
+    affectedBrand in value &&
+    value[affectedBrand] === true &&
+    "query" in value &&
+    isQueryDefinition(value.query) &&
+    "select" in value &&
+    typeof value.select === "function" &&
+    "on" in value &&
+    (value.on === "invalidate" || value.on === "revalidate") &&
+    (!("optimistic" in value) ||
+      value.optimistic === undefined ||
+      typeof value.optimistic === "function")
+  );
 }
 
 /** Type-safe specification for an effect created by {@link affects}. */
@@ -451,6 +603,23 @@ export type AffectSpec<MI, QI, T> = {
       readonly select: (input: MI) => QI;
     });
 
+/** Checks the optional selector form; its input type is only known to TypeScript. */
+export function isAffectSpec(value: unknown): value is AffectSpec<unknown, void, unknown> {
+  return (
+    isObject(value) &&
+    typeof value !== "function" &&
+    !Array.isArray(value) &&
+    (!("on" in value) ||
+      value.on === undefined ||
+      value.on === "invalidate" ||
+      value.on === "revalidate") &&
+    (!("select" in value) || value.select === undefined || typeof value.select === "function") &&
+    (!("optimistic" in value) ||
+      value.optimistic === undefined ||
+      typeof value.optimistic === "function")
+  );
+}
+
 /** Input used to declare an authoritative mutation and its query effects. */
 export interface CreateMutationInput<I, R> {
   /** Human-readable operation name used in diagnostics and test records. */
@@ -473,13 +642,38 @@ export interface CreateMutationInput<I, R> {
   readonly affects: readonly Affected<I>[];
 }
 
+export function isCreateMutationInput(
+  value: unknown,
+): value is CreateMutationInput<unknown, unknown> {
+  if (
+    !isNamedDeclaration(value) ||
+    !("run" in value) ||
+    typeof value.run !== "function" ||
+    !("affects" in value) ||
+    !Array.isArray(value.affects)
+  )
+    return false;
+  for (const effect of value.affects) if (!isAffected(effect)) return false;
+  return true;
+}
+
 /** An immutable declaration of a mutation operation. */
 export interface MutationDefinition<I, R> extends CreateMutationInput<I, R> {
   /** Discriminator identifying this declaration as a mutation. */
   readonly kind: "mutation";
 }
 
-/** Options for one mutation invocation. */
+export function isMutationDefinition(
+  value: unknown,
+): value is MutationDefinition<unknown, unknown> {
+  return isCreateMutationInput(value) && "kind" in value && value.kind === "mutation";
+}
+
+/**
+ * Options for one mutation invocation.
+ * Malformed signals, maps, keys, or producer types throw TypeError before
+ * resolving effects or starting the mutation callback.
+ */
 export interface MutationOptions {
   /** Caller-owned signal that cancels the mutation callback. */
   readonly abortSignal?: AbortSignal;
@@ -500,11 +694,68 @@ export interface MutationOptions {
   readonly optimistic?: ReadonlyMap<StoreKey, (current: unknown, input: unknown) => unknown>;
 }
 
+function isOptimisticMap(value: unknown): value is NonNullable<MutationOptions["optimistic"]> {
+  if (!isObject(value)) return false;
+  const map = value as Partial<ReadonlyMap<unknown, unknown>>;
+  if (
+    typeof map.size !== "number" ||
+    !Number.isInteger(map.size) ||
+    map.size < 0 ||
+    typeof map.get !== "function" ||
+    typeof map.has !== "function" ||
+    typeof map.forEach !== "function" ||
+    typeof map.entries !== "function" ||
+    typeof map.keys !== "function" ||
+    typeof map.values !== "function" ||
+    typeof map[Symbol.iterator] !== "function"
+  )
+    return false;
+  for (const entry of value as Iterable<unknown>) {
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      !isStoreKey(entry[0]) ||
+      typeof entry[1] !== "function"
+    )
+      return false;
+  }
+  return true;
+}
+
+const mutationOptionChecks = Object.entries({
+  abortSignal: isAbortSignal,
+  optimistic: isOptimisticMap,
+} satisfies Record<keyof MutationOptions, (value: unknown) => boolean>);
+
+/** Validates mutation options and every supplied optimistic producer. */
+export function isMutationOptions(value: unknown): value is MutationOptions {
+  return matchesOptions(value, mutationOptionChecks);
+}
+
+/** Recognizes the options-only call form, including malformed option values. */
+export function hasMutationOptionFields(value: unknown): boolean {
+  return hasOptionFields(value, mutationOptionChecks);
+}
+
 /** Any executable query, mutation, or stream declaration. */
 export type OperationDefinition =
   | QueryDefinition<any, any, any>
   | MutationDefinition<any, any>
   | StreamDefinition<any, any, any>;
+
+export function isOperationDefinition(value: unknown): value is OperationDefinition {
+  if (!isObject(value) || !("kind" in value)) return false;
+  switch (value.kind) {
+    case "query":
+      return isQueryDefinition(value);
+    case "mutation":
+      return isMutationDefinition(value);
+    case "stream":
+      return isStreamDefinition(value);
+    default:
+      return false;
+  }
+}
 
 /**
  * A nested, named operation and store declaration tree.
@@ -536,17 +787,47 @@ export interface DefineContractInput<T extends OperationTree> {
  */
 export interface Contract<T extends OperationTree = OperationTree> extends DefineContractInput<T> {}
 
+type BrandedOperationOptions<Options extends object> = Options & {
+  readonly [queryOptionsBrand]: true;
+};
+
 /**
  * Maps one declaration or nested declaration tree to its graph API member.
  *
  * Queries and streams become keyed store factories, mutations become promise
- * factories, and declared stores become zero-argument store factories.
+ * factories, and declared stores become zero-argument store factories. For an
+ * inputless query or mutation, a branded options object may be passed first;
+ * an optional second options object overrides matching branded fields.
  */
 export type MemberOf<D> =
   D extends QueryDefinition<infer I, infer T, any>
-    ? (input: I, options?: StoreOptions<T>) => QueryStore<T>
+    ? ((input: I, options?: StoreOptions<T>) => QueryStore<T>) &
+        ([I] extends [void | undefined]
+          ? (() => QueryStore<T>) &
+              ((
+                options: StoreOptions<T> | BrandedOperationOptions<StoreOptions<T>>,
+              ) => QueryStore<T>)
+          : {}) &
+        ([I] extends [void | undefined]
+          ? (
+              options: BrandedOperationOptions<StoreOptions<T>>,
+              overrides?: StoreOptions<T>,
+            ) => QueryStore<T>
+          : {})
     : D extends MutationDefinition<infer I, infer R>
-      ? (input: I, options?: MutationOptions) => Promise<R>
+      ? ((input: I, options?: MutationOptions) => Promise<R>) &
+          ([I] extends [void | undefined]
+            ? (() => Promise<R>) &
+                ((
+                  options: MutationOptions | BrandedOperationOptions<MutationOptions>,
+                ) => Promise<R>)
+            : {}) &
+          ([I] extends [void | undefined]
+            ? (
+                options: BrandedOperationOptions<MutationOptions>,
+                overrides?: MutationOptions,
+              ) => Promise<R>
+            : {})
       : D extends StreamDefinition<infer I, infer T, any>
         ? (input: I, options?: ValueOptions<T>) => StreamStore<T>
         : D extends StoreDefinition<infer T, any>
@@ -722,6 +1003,15 @@ export interface Graph<C extends Contract = Contract> {
   /** Opaque unique identity for this graph and its callback context. */
   readonly id: GraphId;
 
+  /**
+   * Monotonic identity for the graph's current state epoch.
+   *
+   * The value starts at `0` and changes synchronously whenever {@link reset}
+   * begins. Observe it to discard owner-bound work from an earlier graph
+   * identity. The readable object itself cannot be written through this API.
+   */
+  readonly resetVersion: Readable<number>;
+
   /** The frozen API generated recursively from the graph's contract. */
   readonly api: ContractApi<C>;
 
@@ -735,7 +1025,8 @@ export interface Graph<C extends Contract = Contract> {
    *
    * @param definition - A store definition from this graph's contract.
    * @returns The graph-owned store for the declaration's key.
-   * @throws A {@link Fault} If the graph has been disposed.
+   * @throws A {@link Fault} If the graph has been disposed or writes are
+   * restricted by the current reactive scope.
    * @throws A {@link TypeError} If `definition.name` is empty.
    */
   store<T, N extends string>(
@@ -757,6 +1048,38 @@ export interface Graph<C extends Contract = Contract> {
    * @throws A {@link Fault} If the graph has been disposed.
    */
   at<K extends string>(key: K): StoreAt<C, K>;
+
+  /**
+   * Resets graph-owned state while preserving the graph, API, and store shells.
+   *
+   * Declared stores return to their configured initial values.
+   * Keyed query and stream contents, query initial configuration, errors, predictions,
+   * freshness timestamps, and timers are cleared.
+   *
+   * Open projections reset their accumulated value and restart. Completed, failed,
+   * or closed projections keep their terminal status and do not restart. Their
+   * value returns to an empty accumulation or the reduction's initial value,
+   * and their error is cleared.
+   *
+   * Streams with live readers restart with the opener's abort signal unless that signal
+   * has already been aborted.
+   *
+   * Queries with any live readable are refreshed and this promise waits for every
+   * required refresh outcome.
+   *
+   * An in-flight mutation receives an abort signal, but reset does not wait for its
+   * callback; late results remain available from the returned promise while old-epoch
+   * effects are ignored.
+   *
+   * A failed query refresh rejects with its original reason, or an `AggregateError`
+   * when several refreshes fail. Starting another reset supersedes this one
+   * and rejects its promise with an `Error` subclass named `"AbortError"`.
+   *
+   * @returns A promise that settles after all required fresh query outcomes.
+   * @throws A {@link Fault} If the graph has been disposed or writes are
+   * restricted by the current reactive scope.
+   */
+  reset(): Promise<void>;
 
   /**
    * Permanently disposes the graph.

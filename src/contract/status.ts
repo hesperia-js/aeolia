@@ -5,9 +5,14 @@ import { __internal as reactiveInternal, computed, signal } from "../reactive.ts
 import type { QueryCaller, QueryRequest, StoreRuntime } from "./runtime.ts";
 import { finiteNonNegative } from "./runtime-validation.ts";
 
-export function currentRequest<T>(runtime: StoreRuntime<T>): QueryRequest | undefined {
+export function isCurrentRequest<T>(runtime: StoreRuntime<T>): QueryRequest | undefined {
   for (const request of runtime.requests) {
-    if (!request.settled && !request.superseded && request.generation === runtime.generation)
+    if (
+      !request.settled &&
+      !request.superseded &&
+      request.generation === runtime.generation &&
+      request.resetEpoch === runtime.graph.__runtime.resetEpoch
+    )
       return request;
   }
   return undefined;
@@ -27,7 +32,7 @@ export function statusFor<T>(
 ): StoreStatus {
   const runtime = caller.runtime;
   assertStoreOpen(runtime);
-  const current = currentRequest(runtime);
+  const current = isCurrentRequest(runtime);
   if (current != null) return runtime.hasCommitted ? "revalidating" : "fetching";
   if (!runtime.hasCommitted && runtime.failing) return "failed";
   if (!runtime.hasCommitted) return "empty";

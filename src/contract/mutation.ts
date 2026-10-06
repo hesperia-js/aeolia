@@ -4,7 +4,7 @@ import { __internal as reactiveInternal } from "../reactive.ts";
 import { addSignalAbort } from "../utils.ts";
 import { storeKey } from "./identity.ts";
 import type { GraphRuntimeState, Prediction, StoreRuntime } from "./runtime.ts";
-import { assertGraphOpen, graphFault, reportContinuationError } from "./faults.ts";
+import { AbortError, assertGraphOpen, graphFault, reportContinuationError } from "./faults.ts";
 import { callerForSource, startQuery, invalidateStore } from "./query-request.ts";
 import {
   markPredictionSucceeded,
@@ -20,11 +20,17 @@ export interface MutationTarget {
   readonly runtime?: StoreRuntime<unknown>;
 }
 
-export function resolveMutationTarget(
+function isCurrentMutationEpoch(state: GraphRuntimeState<any>, resetEpoch: number): boolean {
+  return !state.disposed && state.resetEpoch === resetEpoch;
+}
+
+function resolveMutationTarget(
   state: GraphRuntimeState<any>,
   affected: Affected<any>,
   input: unknown,
-): MutationTarget {
+  resetEpoch = state.resetEpoch,
+): MutationTarget | undefined {
+  if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const queryInput = affected.select(input);
   const key = storeKey(affected.query.key(queryInput));
   const runtime = state.stores.get(String(key));
@@ -36,16 +42,21 @@ export function resolveMutationTarget(
   };
 }
 
-export function applyMutationEffects(
+function applyMutationEffects(
   state: GraphRuntimeState<any>,
   definition: MutationDefinition<any, any>,
   input: unknown,
+  resetEpoch = state.resetEpoch,
 ): void {
   for (const affected of definition.affects) {
+    if (!isCurrentMutationEpoch(state, resetEpoch)) return;
     let target: MutationTarget;
     try {
-      target = resolveMutationTarget(state, affected, input);
+      const resolved = resolveMutationTarget(state, affected, input, resetEpoch);
+      if (resolved === undefined) return;
+      target = resolved;
     } catch {
+      if (!isCurrentMutationEpoch(state, resetEpoch)) return;
       graphFault(state, new Fault("contract", [affected.query.name]));
       continue;
     }
@@ -76,9 +87,14 @@ export function runMutation<I, R>(
   options: MutationOptions | undefined,
 ): Promise<R> {
   assertGraphOpen(state);
-  const targets = definition.affects.map((affected) =>
-    resolveMutationTarget(state, affected, input),
-  );
+  const resetEpoch = state.resetEpoch;
+  const targets: MutationTarget[] = [];
+  for (const affected of definition.affects) {
+    const target = resolveMutationTarget(state, affected, input, resetEpoch);
+    if (target === undefined)
+      return Promise.reject(new AbortError("The mutation was superseded by a graph reset."));
+    targets.push(target);
+  }
   const prepared: Array<{
     readonly runtime: StoreRuntime<unknown>;
     readonly prediction: Prediction<unknown>;
@@ -91,16 +107,26 @@ export function runMutation<I, R>(
     const predictor = (options?.optimistic?.get(target.key) ?? declared) as
       | ((current: unknown, input: unknown) => unknown)
       | undefined;
+    if (!isCurrentMutationEpoch(state, resetEpoch))
+      return Promise.reject(new AbortError("The mutation was superseded by a graph reset."));
     if (predictor === undefined) continue;
-    const prediction = preparePrediction(target.runtime, predictor, input);
+    const prediction = preparePrediction(target.runtime, predictor, input, () =>
+      isCurrentMutationEpoch(state, resetEpoch),
+    );
+    if (!isCurrentMutationEpoch(state, resetEpoch))
+      return Promise.reject(new AbortError("The mutation was superseded by a graph reset."));
     if (prediction != null) prepared.push({ runtime: target.runtime, prediction });
   }
   const predictions: Array<{ readonly runtime: StoreRuntime<unknown>; readonly id: number }> = [];
   reactiveInternal.batch(() => {
-    for (const job of prepared)
+    for (const job of prepared) {
       if (pushPrediction(job.runtime, job.prediction))
         predictions.push({ runtime: job.runtime, id: job.prediction.id });
+      else if (!isCurrentMutationEpoch(state, resetEpoch)) return;
+    }
   });
+  if (!isCurrentMutationEpoch(state, resetEpoch))
+    return Promise.reject(new AbortError("The mutation was superseded by a graph reset."));
 
   const controller = new AbortController();
   const removeAbort = addSignalAbort(options?.abortSignal, controller);
@@ -117,26 +143,34 @@ export function runMutation<I, R>(
     (result) => {
       removeAbort();
       state.activeControllers.delete(controller);
-      try {
-        reactiveInternal.batch(() => {
-          for (const prediction of predictions)
-            markPredictionSucceeded(prediction.runtime, prediction.id);
-          if (!state.disposed) applyMutationEffects(state, definition, input);
-        });
-      } catch (error) {
-        reportContinuationError(state, error);
+      if (isCurrentMutationEpoch(state, resetEpoch)) {
+        try {
+          reactiveInternal.batch(() => {
+            for (const prediction of predictions) {
+              markPredictionSucceeded(prediction.runtime, prediction.id);
+            }
+            applyMutationEffects(state, definition, input, resetEpoch);
+          });
+        } catch (error) {
+          if (isCurrentMutationEpoch(state, resetEpoch)) reportContinuationError(state, error);
+        }
       }
       return result;
     },
     (error) => {
       removeAbort();
       state.activeControllers.delete(controller);
-      try {
-        reactiveInternal.batch(() => {
-          for (const prediction of predictions) removePrediction(prediction.runtime, prediction.id);
-        });
-      } catch (cleanupError) {
-        reportContinuationError(state, cleanupError);
+      if (isCurrentMutationEpoch(state, resetEpoch)) {
+        try {
+          reactiveInternal.batch(() => {
+            for (const prediction of predictions) {
+              removePrediction(prediction.runtime, prediction.id);
+            }
+          });
+        } catch (cleanupError) {
+          if (isCurrentMutationEpoch(state, resetEpoch))
+            reportContinuationError(state, cleanupError);
+        }
       }
       return Promise.reject(error);
     },

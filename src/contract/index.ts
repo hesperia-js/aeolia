@@ -9,6 +9,7 @@ export {
   storeKey,
 } from "./api.ts";
 export { project } from "./projection.ts";
+export { queryOptions } from "./query-options.ts";
 export type {
   AccumulatePolicy,
   Projection,

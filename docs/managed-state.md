@@ -1,12 +1,11 @@
 # Managed state
 
-The [query recovery invariant](query-recovery-invariant.md) limits automatic
-recovery after failures. One failed recovery disarms automatic revalidation;
-successful recovery or explicit retry re-arms it.
+After a query failure, Aeolia allows one automatic recovery attempt. If that
+recovery also fails, automatic recovery is disarmed. A successful recovery or
+explicit `revalidate()` re-arms it.
 
 Query member calls share that automatic recovery allowance. After it is exhausted,
 opening another view of the same failed query does not dispatch another request.
-An explicit `revalidate()` starts a fresh attempt and re-arms recovery.
 
 Aeolia maps operation definitions to managed reactive state:
 
@@ -21,6 +20,35 @@ Aeolia maps operation definitions to managed reactive state:
 
 Aeolia performs no I/O. Query, mutation, and stream definitions supply the
 callbacks; a graph invokes them and manages their state.
+
+## Runtime input checks
+
+Aeolia checks declaration callbacks, mutation effect settings, query and stream
+options, mutation options, graph cancellation options, and projection policies
+at their entry points. Malformed fields throw `TypeError` synchronously, before
+the call creates managed state or starts backend work. For example, `snapshot`
+must be a boolean, equality and effect callbacks must be functions, and each
+optimistic map entry must pair a non-empty store key with a producer function.
+Store keys must be non-empty strings; Aeolia preserves their exact spelling.
+
+Use `queryOptions({...})` for options passed as the first argument. It brands a
+shallow-frozen copy; the operation validates the final options after applying
+any second-argument overrides. An empty options object and explicitly
+`undefined` optional fields are valid. Additional properties are ignored.
+Cancellation signals and read-only maps are checked by their interfaces, so
+they do not need to share the current runtime's constructors.
+
+Invalid numeric bounds still throw a `contract` `Fault`: freshness windows
+must be finite and non-negative, and projection limits must be positive
+integers. A rejected freshness window does not configure the store. A
+missing graph bound uses its default; `null` is not a missing bound.
+
+These checks do not infer application data types or run callbacks to discover
+their return types. Validate external payloads in your backend callbacks before
+returning them to Aeolia. Callback failures continue through the operation's
+existing error handling.
+
+## Declaring operations
 
 ```ts
 import { affects, createGraph, defineContract, createMutation, createQuery } from "aeolia";
@@ -144,6 +172,46 @@ Effects targeting a query with `void` or `undefined` input may omit `select`;
 the runtime targets that query's key directly. Queries with any other input,
 including `unknown` or a union that includes `undefined`, require `select` so
 the affected key is explicit.
+
+## Resetting graph state
+
+`graph.reset()` starts a new state epoch while preserving the graph, API, store
+shells, and readable identities. It restores declared stores to their initial
+values. It clears keyed query and stream values, errors, optimistic predictions,
+freshness timestamps, and timers. Keyed query initial configuration is cleared
+with the value.
+
+An explicit `initial` option can seed a keyed query again after reset while its
+state is empty and idle. That seed may differ from the pre-reset seed. Aeolia
+throws a contract `Fault` if a reset-owned query request is pending or fresh
+data has already committed; this error leaves the request and its reset in
+progress. The next successful reset clears the new seed configuration too.
+
+Reset snapshots queries with any live readable, including status-only and
+pending readers, then starts a fresh request for each. Its promise waits for
+every required query outcome. Successful refreshes remain committed if another
+refresh fails. One failure rejects with its original reason; multiple failures
+reject with an `AggregateError`. Queries that become live after the snapshot do
+not join that reset's wait. Reset aborts work from the previous epoch, so late
+query results and mutation effects from that work cannot change the new state.
+
+An in-flight mutation receives an abort signal when reset starts. Reset does
+not wait for mutation callbacks. A callback that settles later still settles
+its returned promise with its own result or error, while its old predictions
+and settled effects remain ignored. A mutation that had already settled keeps
+its result.
+
+Live stream stores restart after reset with the signal supplied by the opener.
+If that owner signal has already been aborted, the stream remains closed and
+does not reopen. Reset does not wait for stream emissions or completion. Open
+projections clear their value and error, then restart. A completed, failed, or
+closed projection keeps its terminal status; reset clears its value and error
+without reopening it.
+
+Starting another reset rejects the earlier reset promise with an `AbortError`.
+`graph.resetVersion` changes synchronously when each reset starts. Calling
+`reset()` after graph disposal, or from a write-restricted reactive scope,
+throws a `Fault` synchronously.
 
 `snapshot(graph)` serializes selected committed values, not executable graph
 machinery. Reconstruction therefore means creating another graph with the same

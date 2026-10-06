@@ -8,6 +8,11 @@
  */
 export type StoreKey = string & { readonly __storeKey: unique symbol };
 
+/** Checks the non-empty string identity without normalizing it. */
+export function isStoreKey(value: unknown): value is StoreKey {
+  return typeof value === "string" && value.length > 0;
+}
+
 /**
  * The opaque identifier of the graph that owns a callback invocation.
  *
@@ -31,13 +36,13 @@ export type Generation = number & { readonly __generation: unique symbol };
  *
  * @param value - The exact key to use for a graph store.
  * @returns The branded form of `value`; the string is not normalized.
- * @throws A {@link TypeError} If `value` is empty.
+ * @throws A {@link TypeError} If `value` is not a non-empty string.
  */
 export function storeKey(value: string): StoreKey {
-  if (value.length === 0) {
-    throw new TypeError("StoreKey cannot be empty");
+  if (!isStoreKey(value)) {
+    throw new TypeError("StoreKey must be a non-empty string");
   }
-  return value as StoreKey;
+  return value;
 }
 
 /**

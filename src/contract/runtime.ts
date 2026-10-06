@@ -7,6 +7,7 @@ import type {
   StoreDefinition,
   StoreKey,
   StoreStatus,
+  StreamDefinition,
   StreamStatus,
 } from "./types.ts";
 import type { Fault, Unsubscribe } from "../fault.ts";
@@ -40,25 +41,53 @@ export interface QueryCaller<T> extends QuerySource<T> {
 export interface QueryRequest {
   readonly controller: AbortController;
   readonly generation: number;
+  /** Reset identity under which this request was issued. */
+  readonly resetEpoch: number;
   /** Whether this request is the one automatic recovery allowed after a failure. */
   readonly automaticRecovery: boolean;
   /** Successful predictions present when this request was issued. */
   readonly predictionIds: readonly number[];
   promise: Promise<void>;
+  outcome: Promise<QueryOutcome>;
+  resolveOutcome: (outcome: QueryOutcome) => void;
+  outcomeReported: boolean;
   removeCallerAbort: () => void;
   removeRequestAbort?: () => void;
   settled: boolean;
   superseded: boolean;
 }
 
+export type QueryOutcome = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
+
 export interface StreamSession<T> {
   readonly controller: AbortController;
+  /** Reset identity under which this session was opened. */
+  readonly resetEpoch: number;
   readonly listeners: Set<(event: StreamEvent<T>) => void>;
   iterator?: AsyncIterator<T>;
   /** Start of the current uninterrupted interval without live readables. */
   unobservedSince?: number;
   ended: boolean;
   emitted: boolean;
+}
+
+export interface StreamSource<T> {
+  readonly stream: StreamDefinition<unknown, T, any>;
+  readonly input: unknown;
+  readonly abortSignal?: AbortSignal;
+}
+
+export interface GraphResetOperation {
+  readonly epoch: number;
+  readonly signal: AbortSignal;
+  readonly reject: (reason: unknown) => void;
+  readonly abort: (reason: unknown) => void;
+}
+
+export interface GraphProjection {
+  readonly reset: () => (() => void) | undefined;
+  readonly restart: () => void;
+  readonly dispose: () => void;
 }
 
 export type StreamEvent<T> =
@@ -89,6 +118,9 @@ export interface StoreRuntime<T> {
   readonly livenessStops: Unsubscribe[];
   readonly readStops: Unsubscribe[];
   source?: QuerySource<T>;
+  streamSource?: StreamSource<T>;
+  onReadableActivation?: () => void;
+  refreshOnActivation: boolean;
   activeRequest?: QueryRequest;
   stream?: StreamSession<T>;
   timer?: TimerHandle;
@@ -110,6 +142,7 @@ export interface StoreRuntime<T> {
   generation: number;
   lastInteraction: number;
   liveReadableCount: number;
+  readyWaiterCount: number;
   valueLive: boolean;
   collectionIndex: number;
   dropped: boolean;
@@ -130,12 +163,15 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly declaredStores: Map<string, StoreDefinition<unknown>>;
   readonly faultObservers: Set<(fault: Fault) => void>;
   readonly activeControllers: Set<AbortController>;
-  readonly projections: Set<() => void>;
+  readonly projections: Set<GraphProjection>;
   readonly collectionHeap: CollectionCandidate[];
   stopAbort?: Unsubscribe;
   collectionTimer?: TimerHandle;
   sweepScheduled: boolean;
   nextPredictionId: number;
+  resetEpoch: number;
+  readonly resetVersion: WritableSignal<number>;
+  resetOperation?: GraphResetOperation;
   disposed: boolean;
 }
 

@@ -38,6 +38,11 @@ Internal modules import dependencies directly, not through their own barrel.
 Keep runtime imports acyclic. A new source file does not automatically need
 a public export or package subpath.
 
+Keep runtime code independent of browser globals. The existing
+`AbortController`/`AbortSignal` cancellation contract is supported across runtimes.
+Use the internal `AbortError` class for cancellation errors; it extends JavaScript
+`Error`.
+
 ## Tests
 
 Prefer integration tests of public behavior and complete application workflows.
@@ -71,6 +76,12 @@ equality, failure, and cleanup. Keep examples small and type-correct.
 Keep the README introductory. Put user-facing behavioral detail in `docs/`
 and contributor guidance here. Prefer concrete prose and useful variable names.
 Comments should explain a non-obvious constraint, not repeat the next line.
+
+Keep repository documentation usable from this checkout alone. Repository docs
+cover setup, usage, API, contribution, testing, and legal terms. Keep architecture,
+RFCs, decisions, research, milestone plans, and design handoffs outside this
+repository; explain current user-facing behavior here instead of linking to private
+planning records.
 
 Before handing over a change, run formatting, lint, typecheck, and the full test
 suite. After public API or TSDoc changes, inspect the emitted declarations too.

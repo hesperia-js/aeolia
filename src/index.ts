@@ -6,6 +6,7 @@ export {
   createQuery,
   createStore,
   createStream,
+  queryOptions,
   project,
   storeKey,
 } from "./contract/index.ts";

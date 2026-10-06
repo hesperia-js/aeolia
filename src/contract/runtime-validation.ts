@@ -1,4 +1,5 @@
-import type { OperationDefinition, OperationTree, StoreDefinition } from "./types.ts";
+import type { OperationTree, StoreDefinition } from "./types.ts";
+import { isOperationDefinition, isStoreDefinition } from "./types.ts";
 import { Fault } from "../fault.ts";
 
 export function finiteNonNegative(value: number, option: string): number {
@@ -18,25 +19,13 @@ export function graphIdleMs(value: number): number {
   return value;
 }
 
-export function isOperation(value: unknown): value is OperationDefinition {
-  if (value === null || typeof value !== "object") return false;
-  const kind = (value as { kind?: unknown }).kind;
-  return kind === "query" || kind === "mutation" || kind === "stream";
-}
-
-export function isStore(value: unknown): value is StoreDefinition<unknown> {
-  return (
-    value !== null && typeof value === "object" && (value as { kind?: unknown }).kind === "store"
-  );
-}
-
 export function collectDeclaredStores(
   tree: OperationTree,
   into: Map<string, StoreDefinition<unknown>>,
 ): void {
   for (const value of Object.values(tree)) {
-    if (isStore(value)) into.set(value.name, value);
-    else if (!isOperation(value) && value !== null && typeof value === "object")
+    if (isStoreDefinition(value)) into.set(value.name, value);
+    else if (!isOperationDefinition(value) && value !== null && typeof value === "object")
       collectDeclaredStores(value as OperationTree, into);
   }
 }

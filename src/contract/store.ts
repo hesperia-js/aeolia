@@ -56,6 +56,7 @@ export function observeStoreReadable<T>(
       }
       if (live) {
         touch(runtime);
+        runtime.onReadableActivation?.();
         if (observation.armsFreshness === true) armStoreTimer(runtime);
       }
       updateCollectionCandidate(runtime);
@@ -196,10 +197,12 @@ export function makeStore<T>(
     recoveryDisarmed: false,
     invalidated: false,
     ...(definition === undefined ? {} : { lastLandingAt: Date.now() }),
+    refreshOnActivation: false,
     generation: 0,
     lastInteraction: Date.now(),
     collectionIndex: -1,
     liveReadableCount: 0,
+    readyWaiterCount: 0,
     valueLive: false,
     dropped: false,
     disposed: false,

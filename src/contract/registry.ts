@@ -2,7 +2,7 @@ import type { GraphId } from "./identity.ts";
 import type { Graph } from "./types.ts";
 import type { Unsubscribe } from "../fault.ts";
 import { assertGraphOpen, reportContinuationError } from "./faults.ts";
-import type { GraphRuntimeState, StoreRuntime } from "./runtime.ts";
+import type { GraphProjection, GraphRuntimeState, StoreRuntime } from "./runtime.ts";
 
 let nextGraphId = 0;
 
@@ -16,16 +16,16 @@ export const runtimeByStore = new WeakMap<object, StoreRuntime<unknown>>();
 /** Runtime lookup for graph objects used by internal adapters. */
 export const graphRuntimeByGraph = new WeakMap<object, GraphRuntimeState<any>>();
 
-export function registerProjection(graph: Graph, close: () => void): Unsubscribe {
+export function registerProjection(graph: Graph, projection: GraphProjection): Unsubscribe {
   const state = graphRuntimeByGraph.get(graph as object);
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
-  state.projections.add(close);
+  state.projections.add(projection);
   let active = true;
   return () => {
     if (!active) return;
     active = false;
-    state.projections.delete(close);
+    state.projections.delete(projection);
   };
 }
 
