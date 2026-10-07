@@ -21,7 +21,12 @@
     "url": "https://github.com/hesperia-js/aeolia.git"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "COPYING",
+    "LICENSE-COMMERCIAL.md"
   ],
   "type": "module",
   "sideEffects": false,
@@ -50,8 +55,10 @@
     }
   },
   "scripts": {
-    "build": "bunx tsc -p tsconfig.build.json",
+    "build": "bun build.ts",
     "test": "bun run build && bun test tests",
+    "test:package": "bun run build && bun test tests/package && bun run tests/package/run.ts",
+    "prepublishOnly": "bun run test:package",
     "typecheck": "bunx tsc --noEmit -p tsconfig.json",
     "check": "bun run typecheck && bun run test",
     "fmt": "oxfmt",
@@ -64,7 +71,21 @@
     "@types/bun": "1.4.2",
     "oxfmt": "0.72.0",
     "oxlint": "1.87.0",
+    "playwright": "1.63.0",
+    "tsdown": "0.23.0",
     "typescript": "7.0.2"
+  },
+  "peerDependencies": {
+    "@types/bun": "^1.4",
+    "typescript": ">=6.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@types/bun": {
+      "optional": true
+    },
+    "typescript": {
+      "optional": true
+    }
   },
   "packageManager": "bun@1.4.2"
 }

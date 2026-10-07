@@ -3,13 +3,16 @@ import { expect, test } from "bun:test";
 interface PackageManifest {
   readonly name: string;
   readonly dependencies?: Readonly<Record<string, string>>;
-  readonly exports?: {
-    readonly "."?: {
-      readonly types?: string;
-      readonly import?: string;
-      readonly default?: string;
-    };
-  };
+  readonly exports?: Readonly<
+    Record<
+      string,
+      {
+        readonly types?: string;
+        readonly import?: string;
+        readonly default?: string;
+      }
+    >
+  >;
 }
 
 test("the published entry point resolves to the built ESM artifact", async () => {
@@ -26,26 +29,11 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     default: "./dist/index.js",
   });
 
-  for (const moduleName of [
-    "index",
-    "reactive",
-    "fault",
-    "contract/index",
-    "contract/api",
-    "contract/engine",
-    "contract/query",
-    "contract/mutation",
-    "contract/stream",
-    "contract/projection",
-    "realm",
-    "testing",
-  ] as const) {
-    expect(await Bun.file(new URL(`../../dist/${moduleName}.js`, import.meta.url)).exists()).toBe(
-      true,
-    );
-    expect(await Bun.file(new URL(`../../dist/${moduleName}.d.ts`, import.meta.url)).exists()).toBe(
-      true,
-    );
+  for (const entry of Object.values(manifest.exports ?? {})) {
+    for (const path of [entry.import, entry.types]) {
+      expect(path).toBeDefined();
+      expect(await Bun.file(new URL(`../../${path}`, import.meta.url)).exists()).toBe(true);
+    }
   }
 
   const packageName = manifest.name;
@@ -103,7 +91,6 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     for (const name of names) expect(subsystem[name]).toBe(publicApi[name]);
   }
 
-  const reactiveModule = await import(new URL("../../dist/reactive.js", import.meta.url).href);
   const reactivePackageName = `${packageName}/reactive`;
   const reactivePackage = await import(reactivePackageName);
   expect(Object.keys(reactivePackage).sort()).toEqual([
@@ -121,13 +108,11 @@ test("the published entry point resolves to the built ESM artifact", async () =>
   expect(reactivePackage.signal).toBe(publicApi.signal);
   expect(reactivePackage.subscribe).not.toBe(publicApi.subscribe);
   expect(reactivePackage.readableBrand).toBe(publicApi.readableBrand);
-  expect(reactiveModule.Signal).toBe(publicApi.Signal);
-  expect(reactiveModule.readableBrand).toBe(publicApi.readableBrand);
-  const factoryState = reactiveModule.signal(3);
+  const factoryState = reactivePackage.signal(3);
   expect(publicApi.Signal.isState(factoryState)).toBe(true);
   const mixed = new publicApi.Signal.Computed(() => factoryState.get() + state.get());
   let notifications = 0;
-  const stop = reactiveModule.watch(mixed, () => {
+  const stop = reactivePackage.watch(mixed, () => {
     notifications += 1;
   });
   factoryState.set(4);
@@ -141,4 +126,12 @@ test("the published entry point resolves to the built ESM artifact", async () =>
   state.set(3);
   expect(values).toEqual([6, 7]);
   stopValues();
+});
+
+test("bundled public functions and classes retain their runtime names", async () => {
+  const packageName = "aeolia";
+  const publicApi = await import(packageName);
+  for (const name of ["signal", "computed", "Fault", "createGraph", "createQuery"]) {
+    expect(publicApi[name].name).toBe(name);
+  }
 });

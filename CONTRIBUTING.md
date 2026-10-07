@@ -2,7 +2,7 @@
 
 ## Getting started
 
-Use Bun to install dependencies and run the development tools:
+Install dependencies and run the checks with Bun:
 
 ```sh
 bun install
@@ -13,80 +13,83 @@ bun run lint
 bun run fmt:check
 ```
 
-Build before typechecking: the consumer-type fixtures resolve the package's
-emitted declarations in `dist/`. The current `check` script does not perform
-that initial build before its typecheck step.
+Build before typechecking: consumer-type fixtures use the declarations in
+`dist/`. `bun run check` does not build before its typecheck step.
 
-Use `bun run fmt -- <paths>` to format the files you change. Keep unrelated
-work intact, including the manual profiling script.
+Format changed files with `bun run fmt -- <paths>`.
+
+### Package build
+
+`build.ts` uses tsdown to clean `dist/` and bundle the four public entry points
+as platform-neutral ES modules with shared chunks. It minifies whitespace and
+syntax, preserves runtime names, and includes TypeScript sources in source maps.
+
+TypeScript emits declarations separately to preserve namespace types. A `.d.ts`
+file may have no matching `.js` when its implementation is bundled into a chunk.
+
+Before publishing, run `bun run test:package`. It builds and installs the package
+archive into a temporary consumer, checks its declarations, and runs a shared
+workflow in Bun, Node, and Chromium. It also checks source-map error locations.
+The `prepublishOnly` hook runs it when publishing the checkout through npm or Bun.
+See [package test setup](tests/README.md#distributed-package) for prerequisites.
 
 ## Where code belongs
 
 - `src/reactive/` owns signals, dependency tracking, and notification delivery.
-- `src/contract/` maps operation definitions to managed stores. `api.ts`
-  contains definition factories; query, mutation, stream, and projection modules
-  own their execution. `engine.ts` creates instances and coordinates disposal.
-- `query-request.ts` keeps request settlement and freshness timers together.
-  `store-state.ts` owns shared value transitions and prediction bookkeeping;
-  `store.ts` constructs the store objects.
+- `src/contract/` owns managed stores. `api.ts` defines operations, and the query,
+  mutation, stream, and projection modules execute them. `engine.ts` creates
+  instances and coordinates disposal.
+- Within `src/contract/`, `query-request.ts` owns request settlement and freshness
+  timers, `store-state.ts` owns value transitions and predictions, and `store.ts`
+  constructs stores.
 - `src/realm.ts` handles snapshots and adoption.
 - `src/testing.ts` provides the controlled backend fixture.
 - `src/utils.ts` holds reusable helpers that do not depend on either subsystem.
 
-Each subsystem exposes its supported surface through an explicit `index.ts`.
-Internal modules import dependencies directly, not through their own barrel.
-Keep runtime imports acyclic. A new source file does not automatically need
-a public export or package subpath.
+Expose each subsystem through `index.ts`. Internal modules import dependencies
+directly. Avoid circular runtime imports and unnecessary public exports or
+package subpaths.
 
-Keep runtime code independent of browser globals. The existing
-`AbortController`/`AbortSignal` cancellation contract is supported across runtimes.
-Use the internal `AbortError` class for cancellation errors; it extends JavaScript
-`Error`.
+Keep runtime code independent of browser globals. Use the existing
+`AbortController` and `AbortSignal` cancellation contract across runtimes, and
+the internal `AbortError` class for cancellation errors.
 
 ## Tests
 
-Prefer integration tests of public behavior and complete application workflows.
-For a bug fix, write the smallest scenario that would have caught the bug.
-Check the wrong result, not just whether the code ran.
+Prefer integration tests of public behavior and application workflows. For bug
+fixes, use the smallest scenario that exposes the wrong result.
 
-Keep lifecycle distinctions intact when consolidating tests: a live store is
-not equivalent to an unobserved one, and a warmed computed is not equivalent to
-one that has never been read. Use strict equality for emitted-value sequences
-where absence and a real `undefined` must be distinguished.
+When consolidating tests, preserve cases for observed and unobserved stores,
+and computed signals before and after their first read. Use strict equality
+when emitted sequences must distinguish absence from `undefined`.
 
 Use fake time for freshness and collection, not synchronous signal propagation.
-Prefer observable completion over sleeps or guessed microtask counts. Keep
-the manual profiling script outside the deterministic suite.
+Wait for observable completion instead of sleeps or guessed microtask counts.
+Keep manual profiling outside the deterministic suite.
 
 Aim for complete meaningful coverage, with a 90% minimum unless a lower result
-has an explicit, reviewed justification. Bun currently reports line and function
-coverage; branch coverage is not measured. Percentages do not replace behavioral
-assertions.
+has a reviewed justification. Bun reports line and function coverage, not branches.
 
-See [test ownership and commands](tests/README.md). Run focused tests while
-working, then the complete suite. Consumer-type fixtures and package-artifact
-tests must continue to check the emitted public package, not only source imports.
+Run focused tests while working. Package tests and consumer-type fixtures must
+check the emitted public package. See [test ownership and commands](tests/README.md).
 
 ## Documentation and review
 
-Document public functions, types, options, callbacks, and lifecycle behavior
-with TSDoc. Explain what the signature cannot: ownership, timing, cancellation,
-equality, failure, and cleanup. Keep examples small and type-correct.
+Document public functions, types, options, callbacks, and lifecycles with TSDoc.
+Explain ownership, timing, cancellation, equality, failure, and cleanup. Keep
+examples small and type-correct.
 
 Keep the README introductory. Put user-facing behavioral detail in `docs/`
-and contributor guidance here. Prefer concrete prose and useful variable names.
-Comments should explain a non-obvious constraint, not repeat the next line.
+and contributor guidance here. Comments explain non-obvious constraints.
 
-Keep repository documentation usable from this checkout alone. Repository docs
-cover setup, usage, API, contribution, testing, and legal terms. Keep architecture,
-RFCs, decisions, research, milestone plans, and design handoffs outside this
-repository; explain current user-facing behavior here instead of linking to private
-planning records.
+Repository docs must work from the checkout alone and cover setup, usage, APIs,
+contribution, testing, and legal terms. Keep architecture, RFCs, decisions,
+research, milestone plans, and handoffs outside the repository. Do not link to
+private planning records.
 
 Before handing over a change, run formatting, lint, typecheck, and the full test
 suite. After public API or TSDoc changes, inspect the emitted declarations too.
-State any checks that failed or could not run; do not describe a partial check
-as a clean result.
+Report failed or skipped checks.
 
 Automated contributors must also follow [AGENTS.md](AGENTS.md).
 
