@@ -9,6 +9,13 @@ to `main`, and on manual dispatch. It checks formatting, lint, the build, and
 types. Builds precede type checks because consumer fixtures use the generated
 declarations. Behavioral tests run on Windows and Linux.
 
+For a PR whose source branch belongs to this repository, verification first
+checks the [branch naming convention](../CONTRIBUTING.md#issues-and-pull-requests).
+Only `feature/<name>`, `fix/<name>`, and `release/<VERSION>` are accepted. A release
+branch must name a supported version that matches `package.json`. Fork branch
+names are exempt, and a fork's `release/*` branch does not trigger release-version
+checks or publication.
+
 After the first successful workflow run, add the **Required** check from the `CI`
 workflow to the repository's Required Checks ruleset. Keep that ruleset's bypass
 list empty. This check fails if any verification job fails, is cancelled, or is
@@ -17,6 +24,13 @@ exceptions. Target both `main` and `release/*` in each ruleset.
 
 All applicable PRs produce a check result. The workflow does not use path filters
 that could leave a required result pending. Test selection happens inside the run.
+
+This CI check blocks merging after a PR is opened; it does not prevent branch
+creation. To reject other prefixes when branches are created on GitHub, create
+a separate branch ruleset targeting all branches, exclude `main`, `feature/**/*`,
+`fix/**/*`, and `release/**/*`, and enable **Restrict creations** with no bypass
+actors. The CI check still validates the release version. See
+[GitHub's ruleset guide](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
 
 ## Test selection
 
@@ -75,8 +89,8 @@ first publication within two days; configure the publisher when a release is rea
 
 ## Make a release
 
-1. Create `release/<version>` from `main` and open its release PR back to `main`.
-2. Set `package.json` to the version you intend to publish. Do not add a `v` prefix.
+1. Create `release/<VERSION>` from `main` and open its release PR back to `main`.
+2. Set `package.json` to the same version as the branch name. Do not add a `v` prefix.
    The version must be newer than the version on the PR base and unpublished on npm.
 3. During stabilization, pause unrelated merges into `main`. Submit release fixes
    as PRs into the release branch. Those fix PRs use affected-test selection.

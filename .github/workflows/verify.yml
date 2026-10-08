@@ -40,6 +40,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup
+      - name: Check repository branch name
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          AEOLIA_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          bun -e '
+            import assert from "node:assert/strict";
+            import { releaseVersion } from "./scripts/ci/check-release.ts";
+            const branch = process.env.AEOLIA_HEAD_BRANCH;
+            assert.ok(
+              /^(feature|fix)\/.+$/.test(branch) || branch.startsWith("release/"),
+              "Use feature/<name>, fix/<name>, or release/<VERSION> for repository branches",
+            );
+            if (branch.startsWith("release/")) {
+              const { version } = releaseVersion(branch.slice("release/".length));
+              assert.equal(version, (await Bun.file("package.json").json()).version,
+                "The release branch version must match package.json");
+            }
+          '
       - name: Find changed paths
         id: paths
         if: ${{ !inputs.full && inputs.base != '' && inputs.head != '' }}
