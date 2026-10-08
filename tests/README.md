@@ -44,8 +44,14 @@ system dependencies. The command can run inside a container, but does not create
 
 `test:package` builds Aeolia, runs the existing export and runtime-name checks,
 packs an archive, and installs it in a fresh directory under the operating system's
-temporary directory. The consumer has no workspace links and its only dependency
-is the archive. Installation disables lifecycle scripts and uses offline mode.
+temporary directory. To check an archive that has already been built, run
+`bun run tests/package/run.ts <archive.tgz>`. The runner resolves and copies that
+archive before changing into the temporary consumer; it does not rebuild or
+repack the supplied file. With no archive argument, it keeps the local behavior
+of packing the current checkout. In either mode, the installed package name and
+version must match the checkout manifest. The consumer has no workspace links
+and its only dependency is the archive. Installation disables lifecycle scripts
+and uses offline mode.
 
 The check copies the existing consumer type fixtures into that directory and
 checks them with declaration checking enabled and no ambient package types.

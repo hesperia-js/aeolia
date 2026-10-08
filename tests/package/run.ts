@@ -8,6 +8,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,8 +16,26 @@ import { join, resolve, sep } from "node:path";
 import { chromium } from "playwright";
 
 const root = resolve(import.meta.dir, "../..");
+const archiveArguments = Bun.argv.slice(2);
+
+if (archiveArguments.length > 1 || archiveArguments[0]?.startsWith("-"))
+  throw new Error("Usage: bun run tests/package/run.ts [archive.tgz]");
+
+const archiveArgument = archiveArguments[0];
+let suppliedArchive: string | undefined;
+if (archiveArgument !== undefined) {
+  try {
+    suppliedArchive = await realpath(resolve(process.cwd(), archiveArgument));
+    if (!(await stat(suppliedArchive)).isFile()) throw new Error("Path is not a regular file");
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cannot read package archive "${archiveArgument}": ${reason}`);
+  }
+}
 const temporary = await mkdtemp(join(tmpdir(), "aeolia-package-"));
 const consumer = join(temporary, "consumer");
+const archive = join(temporary, "aeolia.tgz");
+const sourceManifest = await Bun.file(join(root, "package.json")).json();
 
 async function run(args: string[], cwd: string, expectedExit = 0): Promise<string> {
   const child = Bun.spawn(args, { cwd, stdout: "pipe", stderr: "pipe", timeout: 120_000 });
@@ -31,7 +50,9 @@ async function run(args: string[], cwd: string, expectedExit = 0): Promise<strin
 
 try {
   await mkdir(consumer);
-  await run([process.execPath, "pm", "pack", "--filename", join(temporary, "aeolia.tgz")], root);
+  if (suppliedArchive === undefined)
+    await run([process.execPath, "pm", "pack", "--filename", archive], root);
+  else await copyFile(suppliedArchive, archive);
   await writeFile(
     join(consumer, "package.json"),
     JSON.stringify({
@@ -42,6 +63,17 @@ try {
   );
   await run([process.execPath, "install", "--ignore-scripts", "--offline"], consumer);
   const installed = join(consumer, "node_modules", "aeolia");
+  const manifest = await Bun.file(join(installed, "package.json")).json();
+  assert.equal(
+    manifest.name,
+    sourceManifest.name,
+    "Archive package name does not match this checkout",
+  );
+  assert.equal(
+    manifest.version,
+    sourceManifest.version,
+    "Archive package version does not match this checkout",
+  );
   assert.equal(
     (await lstat(installed)).isSymbolicLink(),
     false,
@@ -100,7 +132,6 @@ try {
   );
   console.log("PASS packed source map: real exception maps to its original TypeScript line");
 
-  const manifest = await Bun.file(join(installed, "package.json")).json();
   const imports = Object.fromEntries(
     Object.entries(manifest.exports as Record<string, { import: string }>).map(
       ([subpath, entry]) => [

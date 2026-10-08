@@ -1,0 +1,194 @@
+name: Verify
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      base:
+        type: string
+        default: ""
+      head:
+        type: string
+        default: ""
+      full:
+        type: boolean
+        default: false
+      release-pr:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  checks:
+    name: Format, lint, build and types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      package: ${{ steps.selection.outputs.package }}
+      full: ${{ steps.selection.outputs.full }}
+      reactive: ${{ steps.paths.outputs.reactive }}
+      contract: ${{ steps.paths.outputs.contract }}
+      realm: ${{ steps.paths.outputs.realm }}
+      testing: ${{ steps.paths.outputs.testing }}
+      application: ${{ steps.paths.outputs.application }}
+      ci: ${{ steps.paths.outputs.ci }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Check repository branch name
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          AEOLIA_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          bun -e '
+            import assert from "node:assert/strict";
+            import { releaseVersion } from "./scripts/ci/check-release.ts";
+            const branch = process.env.AEOLIA_HEAD_BRANCH;
+            assert.ok(
+              /^(feature|fix)\/.+$/.test(branch) || branch.startsWith("release/"),
+              "Use feature/<name>, fix/<name>, or release/<VERSION> for repository branches",
+            );
+            if (branch.startsWith("release/")) {
+              const { version } = releaseVersion(branch.slice("release/".length));
+              assert.equal(version, (await Bun.file("package.json").json()).version,
+                "The release branch version must match package.json");
+            }
+          '
+      - name: Find changed paths
+        id: paths
+        if: ${{ !inputs.full && inputs.base != '' && inputs.head != '' }}
+        continue-on-error: true
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          token: ""
+          base: ${{ inputs.base }}
+          ref: ${{ inputs.head }}
+          filters: .github/filters.yml
+          predicate-quantifier: some-with-excludes
+      - name: Resolve verification scope
+        id: selection
+        env:
+          FULL: ${{ inputs.full || steps.paths.outcome != 'success' || steps.paths.outputs.all_count == '' || steps.paths.outputs.all_count == '0' || steps.paths.outputs.full != 'false' }}
+          PACKAGE: ${{ steps.paths.outputs.package == 'true' }}
+        shell: bash
+        run: |
+          if [ "$FULL" = true ]; then PACKAGE=true; fi
+          printf 'full=%s\npackage=%s\n' "$FULL" "$PACKAGE" >> "$GITHUB_OUTPUT"
+      - name: Check format
+        run: bun run fmt:check
+      - name: Check lint
+        run: bun run lint
+      - name: Build
+        run: bun run build
+      - name: Check types
+        run: bun run typecheck
+      - name: Check release version
+        if: inputs.release-pr
+        env:
+          AEOLIA_RELEASE_BASE: ${{ inputs.base }}
+        run: bun scripts/ci/check-release.ts
+      - name: Check built exports
+        if: steps.selection.outputs.package == 'true'
+        run: bun test tests/package
+      - name: Pack candidate
+        if: steps.selection.outputs.package == 'true'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/aeolia-package"
+          bun pm pack --filename "$RUNNER_TEMP/aeolia-package/aeolia.tgz"
+      - name: Save candidate
+        if: steps.selection.outputs.package == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: aeolia-package
+          path: ${{ runner.temp }}/aeolia-package/aeolia.tgz
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 14
+  tests:
+    name: Tests (${{ matrix.os }})
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Run full behavioral suite
+        if: needs.checks.outputs.full == 'true'
+        run: bun test tests/reactive tests/contract tests/realm tests/testing tests/application tests/ci --coverage --coverage-reporter=lcov --coverage-reporter=text
+      - name: Require 90% line and function coverage
+        if: needs.checks.outputs.full == 'true'
+        run: bun scripts/ci/coverage.ts
+      - name: Test reactive behavior
+        if: needs.checks.outputs.full == 'false' && needs.checks.outputs.reactive == 'true'
+        run: bun test tests/reactive
+      - name: Test contract behavior
+        if: needs.checks.outputs.full == 'false' && needs.checks.outputs.contract == 'true'
+        run: bun test tests/contract
+      - name: Test realm behavior
+        if: needs.checks.outputs.full == 'false' && needs.checks.outputs.realm == 'true'
+        run: bun test tests/realm
+      - name: Test testing helpers
+        if: needs.checks.outputs.full == 'false' && needs.checks.outputs.testing == 'true'
+        run: bun test tests/testing
+      - name: Test application behavior
+        if: needs.checks.outputs.full == 'false' && needs.checks.outputs.application == 'true'
+        run: bun test tests/application
+      - name: Test CI policies
+        if: needs.checks.outputs.full == 'false' && needs.checks.outputs.ci == 'true'
+        run: bun test tests/ci
+      - name: Download candidate
+        if: needs.checks.outputs.package == 'true'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: aeolia-package
+          path: ${{ runner.temp }}/aeolia-package
+      - name: Install Chromium
+        if: needs.checks.outputs.package == 'true'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            bunx --no-install playwright install --with-deps chromium
+          else
+            bunx --no-install playwright install chromium
+          fi
+      - name: Test installed candidate
+        if: needs.checks.outputs.package == 'true'
+        env:
+          AEOLIA_ARCHIVE: ${{ runner.temp }}/aeolia-package/aeolia.tgz
+        shell: bash
+        run: bun tests/package/run.ts "$AEOLIA_ARCHIVE"
+      - name: Save coverage
+        if: always() && needs.checks.outputs.full == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage/
+          overwrite: true
+          if-no-files-found: warn
+          retention-days: 14
+  result:
+    name: Verification result
+    if: always()
+    needs: [checks, tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require checks and both test jobs
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          TESTS: ${{ needs.tests.result }}
+        run: test "$CHECKS" = success && test "$TESTS" = success

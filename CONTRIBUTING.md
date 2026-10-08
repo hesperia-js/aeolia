@@ -1,5 +1,34 @@
 # Contributing
 
+## Issues and pull requests
+
+Use [GitHub Issues](https://github.com/hesperia-js/aeolia/issues) to track bugs and
+proposed changes. Search existing issues before opening one. For a bug, include
+the Aeolia version, runtime, a minimal reproduction, and the expected and actual
+behavior. Discuss changes to public behavior before implementing them.
+
+Keep branches short-lived and use these names for branches in this repository:
+
+| Branch              | Purpose               | Example                   |
+| ------------------- | --------------------- | ------------------------- |
+| `feature/<name>`    | New features          | `feature/query-snapshots` |
+| `fix/<name>`        | Fixes and hotfixes    | `fix/reset-cancellation`  |
+| `release/<VERSION>` | Release stabilization | `release/1.0.0-alpha.2`   |
+
+The version in a release branch name must match `package.json`, without a `v`
+prefix. See [the release guide](docs/ci.md#make-a-release) for supported versions
+and publishing steps. `main` remains the integration branch.
+
+Open feature and fix PRs against `main`. During release stabilization, open
+release-fix PRs from `fix/<name>` against the relevant `release/<VERSION>` branch.
+CI rejects PRs from incorrectly named branches in this repository. Fork branch
+names are exempt, although using the same convention is welcome.
+
+Use the PR template to explain the change, link its issue when one exists, and
+report verification results. Use `Closes #123` only when the PR resolves that
+issue. Follow [the AI contribution policy](AI_POLICY.md) and record the
+[contributor agreement acceptance](#recording-cla-acceptance) before merge.
+
 ## Getting started
 
 Install dependencies and run the checks with Bun:
@@ -17,6 +46,8 @@ Build before typechecking: consumer-type fixtures use the declarations in
 `dist/`. `bun run check` does not build before its typecheck step.
 
 Format changed files with `bun run fmt -- <paths>`.
+
+For required GitHub checks and npm releases, see [CI and npm releases](docs/ci.md).
 
 ### Package build
 

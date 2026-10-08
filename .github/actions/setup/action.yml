@@ -1,0 +1,19 @@
+name: Set up Aeolia tools
+description: Install the pinned runtimes and locked development dependencies.
+inputs:
+  install:
+    description: Install development dependencies.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      with:
+        node-version: "24.20.0"
+        package-manager-cache: false
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      with:
+        bun-version-file: package.json
+    - if: inputs.install == 'true'
+      shell: bash
+      run: bun install --frozen-lockfile
