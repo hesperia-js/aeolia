@@ -1,0 +1,76 @@
+name: Release
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+permissions:
+  contents: read
+concurrency:
+  group: aeolia-npm-release
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'release/')
+    uses: ./.github/workflows/verify.yml
+    with:
+      ref: ${{ github.event.pull_request.merge_commit_sha }}
+      full: true
+  publish:
+    name: Tag and publish verified archive
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          install: "false"
+      - name: Set up trusted publishing client
+        run: npm install --global npm@11.19.0 --ignore-scripts
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: aeolia-package
+          path: ${{ runner.temp }}/aeolia-package
+      - name: Check version and publication retry
+        id: release
+        env:
+          AEOLIA_ARCHIVE: ${{ runner.temp }}/aeolia-package/aeolia.tgz
+        run: bun scripts/ci/check-release.ts
+      - name: Tag the verified merge commit
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          PUBLISHED: ${{ steps.release.outputs.published }}
+          COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const ref = `tags/v${process.env.VERSION}`;
+            let existing;
+            try {
+              existing = (await github.rest.git.getRef({ owner, repo, ref })).data.object;
+            } catch (error) {
+              if (error.status !== 404 || process.env.PUBLISHED === 'true') throw error;
+              await github.rest.git.createRef({ owner, repo, ref: `refs/${ref}`, sha: process.env.COMMIT });
+              return;
+            }
+            while (existing.type === 'tag') {
+              existing = (await github.rest.git.getTag({ owner, repo, tag_sha: existing.sha })).data.object;
+            }
+            if (existing.type !== 'commit' || existing.sha !== process.env.COMMIT) {
+              throw new Error('Existing release tag points to a different commit');
+            }
+      - name: Publish the tested archive
+        if: steps.release.outputs.published == 'false'
+        env:
+          ARCHIVE: ${{ runner.temp }}/aeolia-package/aeolia.tgz
+          CHANNEL: ${{ steps.release.outputs.channel }}
+        run: npm publish "$ARCHIVE" --access public --tag "$CHANNEL" --ignore-scripts --registry https://registry.npmjs.org

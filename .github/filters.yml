@@ -1,0 +1,36 @@
+all:
+  - "**"
+
+# Everything outside these owned paths requires full source coverage.
+full:
+  - "**"
+  - "!docs/**"
+  - "!{AGENTS.md,CLAUDE.md,AI_POLICY.md,CODE-OF-CONDUCT.md}"
+  - "!{README.md,CONTRIBUTING.md,LICENSE,COPYING,LICENSE-COMMERCIAL.md}"
+  - "!src/contract/**"
+  - "!src/realm.ts"
+  - "!tests/{reactive,contract,realm,testing,application,ci,package}/**"
+
+reactive:
+  - "tests/reactive/**"
+contract:
+  - "src/contract/**"
+  - "src/realm.ts"
+  - "tests/contract/**"
+realm:
+  - "src/contract/**"
+  - "src/realm.ts"
+  - "tests/realm/**"
+testing:
+  - "src/contract/**"
+  - "tests/testing/**"
+application:
+  - "src/{contract/**,realm.ts}"
+  - "tests/{reactive,contract,realm,testing,application,ci,package}/**"
+ci:
+  - "src/{contract/**,realm.ts}"
+  - "tests/{reactive,contract,realm,testing,application,ci,package}/**"
+package:
+  - "src/**"
+  - "tests/package/**"
+  - "{README.md,CONTRIBUTING.md,LICENSE,COPYING,LICENSE-COMMERCIAL.md}"

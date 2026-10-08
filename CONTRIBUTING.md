@@ -18,6 +18,8 @@ Build before typechecking: consumer-type fixtures use the declarations in
 
 Format changed files with `bun run fmt -- <paths>`.
 
+For required GitHub checks and npm releases, see [CI and npm releases](docs/ci.md).
+
 ### Package build
 
 `build.ts` uses tsdown to clean `dist/` and bundle the four public entry points

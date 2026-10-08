@@ -1,0 +1,33 @@
+name: CI
+on:
+  pull_request:
+    branches: [main, "release/*"]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+    with:
+      ref: ${{ github.sha }}
+      base: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+      head: ${{ github.event.pull_request.head.sha || github.sha }}
+      full: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.base_ref == 'main' && startsWith(github.head_ref, 'release/')) }}
+      release-pr: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && startsWith(github.head_ref, 'release/') }}
+  required:
+    name: Required
+    if: always()
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every verification job to succeed
+        env:
+          RESULT: ${{ needs.verify.result }}
+        run: test "$RESULT" = success
