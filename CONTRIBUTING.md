@@ -47,6 +47,11 @@ Build before typechecking: consumer-type fixtures use the declarations in
 
 Format changed files with `bun run fmt -- <paths>`.
 
+Before adding a dependency, review its maintenance, evidence of substantial
+adoption, and transitive dependency count and risk. Treat download counts as one
+signal, not a guarantee of quality or maintenance; use judgment rather than a
+numeric cutoff.
+
 For required GitHub checks and npm releases, see [CI and npm releases](docs/ci.md).
 
 ### Package build
