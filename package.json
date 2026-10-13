@@ -1,6 +1,6 @@
 {
   "name": "aeolia",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0-alpha.1-build101320260219",
   "description": "A framework-agnostic reactive state layer built on signals",
   "keywords": [
     "javascript",
