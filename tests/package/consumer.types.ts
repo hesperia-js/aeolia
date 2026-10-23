@@ -38,6 +38,11 @@ import {
   type DefineContractInput,
   type FetchOptions,
   type Graph,
+  type MemberOf,
+  type KeyedStores,
+  type StoreNames,
+  type DeclaredStores,
+  type StreamStore,
   type Observer,
   type QueryStore,
   type StoreIdentity,
@@ -292,6 +297,118 @@ void inputlessEffect;
 void requiredInputEffect;
 void unknownInputEffect;
 void typecheckOnly;
+
+function neverStreamContractTypesOnly(): void {
+  type Equal<A, B> =
+    (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+  type Input = { readonly id: string };
+  const silent = createStream<Input, never, `silent/${string}`>({
+    name: "silent.events",
+    key: (input) => `silent/${input.id}`,
+    open: async function* () {},
+  });
+  const hidden = createStore({ name: "silent/metadata", initial: "internal" });
+  const decorated = { ...silent, metadata: { hidden } };
+  const sibling = createStore({ name: "silent-sibling", initial: 1 });
+  const contract = defineContract({
+    namespace: "never-stream-types",
+    operations: { nested: { events: decorated }, sibling },
+  });
+  const graph = createGraph({ contract });
+  const member = graph.api.nested.events;
+  const source = member({ id: "one" });
+  const declared = graph.store(sibling);
+  const addressed = graph.at("silent/one");
+
+  const declarationRetained: Equal<
+    typeof contract.operations.nested.events,
+    typeof decorated
+  > = true;
+  const memberInput: Equal<Parameters<MemberOf<typeof decorated>>[0], Input> = true;
+  const memberOutput: Equal<ReturnType<MemberOf<typeof decorated>>, StreamStore<never>> = true;
+  const graphOutput: Equal<typeof source, StreamStore<never>> = true;
+  const exactKeyedValue: Equal<
+    KeyedStores<typeof decorated>,
+    { readonly pattern: `silent/${string}`; readonly value: never }
+  > = true;
+  const exactTreeValues: Equal<
+    KeyedStores<typeof contract.operations>,
+    | { readonly pattern: `silent/${string}`; readonly value: never }
+    | { readonly pattern: "silent-sibling"; readonly value: number }
+  > = true;
+  const noInternalStoreNames: Equal<StoreNames<typeof decorated>, never> = true;
+  const noInternalStores: Equal<DeclaredStores<typeof decorated>, never> = true;
+  const exactDeclaredStore: Equal<
+    DeclaredStores<typeof contract.operations>,
+    typeof sibling
+  > = true;
+  const siblingValue: Equal<ReturnType<typeof declared.value.get>, number | undefined> = true;
+  const silentValue: Equal<ReturnType<typeof addressed.value.get>, undefined> = true;
+
+  // @ts-expect-error Stream metadata is opaque to contract store collection.
+  graph.store(hidden);
+  // @ts-expect-error A never-valued member cannot accept an initial emission.
+  member({ id: "one" }, { initial: "unexpected" });
+  // @ts-expect-error Stream input remains the exact declared object.
+  member({ id: 1 });
+
+  const collision = createStore({ name: "silent/taken", initial: 0 });
+  // @ts-expect-error A never-valued stream still reserves its narrow key pattern.
+  defineContract({ namespace: "silent-collision", operations: { silent, collision } });
+
+  const badEquals = { ...silent, equals: 1 };
+  const badReturn = { ...silent, equals: (_left: never, _right: never) => "wrong" };
+  const badArity = { ...silent, equals: (_left: never, _right: never, _extra: never) => true };
+  const badKey = { ...silent, key: 1 };
+  const badOpen = { ...silent, open: (_input: Input) => 1 };
+  const badKind = { ...silent, kind: "other" };
+
+  // @ts-expect-error Contract admission still requires a callable comparator.
+  defineContract({ namespace: "bad-equals", operations: { badEquals } });
+  // @ts-expect-error An erased comparator still returns boolean.
+  defineContract({ namespace: "bad-return", operations: { badReturn } });
+  // @ts-expect-error An erased comparator cannot require a third argument.
+  defineContract({ namespace: "bad-arity", operations: { badArity } });
+  // @ts-expect-error A stream key must remain callable.
+  defineContract({ namespace: "bad-key", operations: { badKey } });
+  // @ts-expect-error A stream source must remain an async iterable.
+  defineContract({ namespace: "bad-open", operations: { badOpen } });
+  // @ts-expect-error A stream retains its actual operation discriminator.
+  defineContract({ namespace: "bad-kind", operations: { badKind } });
+
+  createStream({
+    name: "factory-domain",
+    key: (input: Input) => `factory/${input.id}`,
+    open: backend.stream<Input, number>("factory-domain"),
+    // @ts-expect-error Equality cannot change the source's inferred numeric value domain.
+    equals: (left: string, right: string) => left === right,
+  });
+  createStream<Input, never, string>({
+    name: "factory-never",
+    key: (input) => `factory-never/${input.id}`,
+    // @ts-expect-error A never-valued stream cannot produce numeric emissions.
+    open: async function* () {
+      yield 1;
+    },
+  });
+
+  void [
+    declarationRetained,
+    memberInput,
+    memberOutput,
+    graphOutput,
+    exactKeyedValue,
+    exactTreeValues,
+    noInternalStoreNames,
+    noInternalStores,
+    exactDeclaredStore,
+    siblingValue,
+    silentValue,
+  ];
+  graph.dispose();
+}
+
+void neverStreamContractTypesOnly;
 
 function bindingTypesOnly(): void {
   const graph = createGraph({
