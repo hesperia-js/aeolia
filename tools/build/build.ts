@@ -1,9 +1,9 @@
 import { $ } from "bun";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { build } from "tsdown";
 
-const root = import.meta.dir;
+const root = resolve(import.meta.dir, "../..");
 const output = join(root, "dist");
 
 try {
