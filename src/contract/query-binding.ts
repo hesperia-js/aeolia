@@ -26,7 +26,12 @@ import {
 import { bindMutationOperation } from "./mutation-binding.ts";
 import type { MutationBinding, MutationBindingConfiguration } from "./mutation-binding.ts";
 import type { MutationDefinition } from "./types.ts";
-import { disposeBindingContextRuntime, normalizeQueryCall } from "./engine.ts";
+import {
+  disposeBindingContextRuntime,
+  retireBindingContextRuntime,
+  normalizeQueryCall,
+} from "./engine.ts";
+import { beginPhysicalWork, createRetirementOwner, finishPhysicalWork } from "./retirement.ts";
 import { makeQueryStore } from "./query.ts";
 import type { BindingContextRuntime, QueryBindingRuntime } from "./runtime.ts";
 
@@ -48,6 +53,18 @@ export interface BindingContext {
    * @throws Fault if writes are restricted by the current reactive scope.
    */
   dispose(): void;
+  /**
+   * Permanently disposes this context and waits for its original bound work and cleanup.
+   * Other contexts and raw graph operations remain independent. Earlier logical
+   * disposal does not discard this completion. Repeated and reentrant calls
+   * return the same promise. Original work that never finishes keeps it pending.
+   * Semantic operation failures do not reject retirement; cleanup failures retain
+   * their original cause, or an AggregateError when several cleanups fail.
+   * Disposal's reactive-write precondition still applies; its failure rejects
+   * the promise before admission changes.
+   * @returns This context's shared physical retirement promise.
+   */
+  retire(): Promise<void>;
 }
 
 /** Query call forms retain the original input/key and use the completed value. */
@@ -137,8 +154,10 @@ export function createBindingContext(graph: Graph): BindingContext {
     graph: state.graph.id,
     active: computed(() => activeCell.get()),
     dispose: () => disposeBindingContextRuntime(context),
+    retire: () => retireBindingContextRuntime(context),
   });
   context = {
+    retirement: createRetirementOwner(state.retirement),
     state,
     handle,
     activeCell,
@@ -265,22 +284,27 @@ function bindQueryOperation<Q extends AnyQuery, V>(
   };
   const member = (...args: [input?: unknown, options?: StoreOptions<V>]) => {
     assertContextOpen(context);
-    const call = normalizeQueryCall(args[0], args[1], args.length > 1);
-    const selectedOptions = call.options === undefined ? undefined : { ...call.options };
-    assertContextOpen(context);
-    if (selectedOptions !== undefined && !isStoreOptions(selectedOptions))
-      throw new TypeError("Invalid query options.");
-    if (
-      value !== undefined &&
-      Object.hasOwn(value, "initial") &&
-      selectedOptions !== undefined &&
-      Object.hasOwn(selectedOptions, "initial") &&
-      !Object.is(value.initial, selectedOptions.initial)
-    )
-      throw new TypeError("Initial value conflicts with query binding configuration");
-    const options = selectedOptions as StoreOptions<V> | undefined;
-    assertContextOpen(context);
-    return makeQueryStore(state, execution, call.input, options, binding, value);
+    const physical = beginPhysicalWork(context.retirement, "acquisition");
+    try {
+      const call = normalizeQueryCall(args[0], args[1], args.length > 1);
+      const selectedOptions = call.options === undefined ? undefined : { ...call.options };
+      assertContextOpen(context);
+      if (selectedOptions !== undefined && !isStoreOptions(selectedOptions))
+        throw new TypeError("Invalid query options.");
+      if (
+        value !== undefined &&
+        Object.hasOwn(value, "initial") &&
+        selectedOptions !== undefined &&
+        Object.hasOwn(selectedOptions, "initial") &&
+        !Object.is(value.initial, selectedOptions.initial)
+      )
+        throw new TypeError("Initial value conflicts with query binding configuration");
+      const options = selectedOptions as StoreOptions<V> | undefined;
+      assertContextOpen(context);
+      return makeQueryStore(state, execution, call.input, options, binding, value);
+    } finally {
+      finishPhysicalWork(physical);
+    }
   };
   const handle = Object.freeze({
     graph: graph.id,

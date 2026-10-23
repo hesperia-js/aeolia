@@ -214,6 +214,49 @@ physical transport termination.
 Calling `cancelPending()` after graph disposal does nothing. Dispose the graph
 when its readable state and resources should finally be released.
 
+## Permanently closing and joining an owner
+
+Use `await graph.retire()` when the graph and its resources must be closed and
+all work the graph owns must finish. Use `await context.retire()` to close one
+binding context and join only its bound queries, mutations, streams and cleanup.
+Graph retirement includes raw operations, every binding context and independent
+projection generation. Context retirement leaves raw operations and other
+contexts running.
+
+Retirement permanently closes admission and follows the owner's disposal path.
+When its preconditions pass, the first call closes admission before abort
+listeners or cleanup can run. A rejected precondition, such as a reactive
+write-restricted scope, is cached and leaves admission unchanged. Every later or
+reentrant call returns the same cached `Promise<void>`. You can call `retire()`
+after the existing synchronous `dispose()` method has already run.
+`dispose()`, `cancelPending()` and stream-session `detached` keep their existing
+completion contracts; none acknowledges that provider work or physical stream
+cleanup has ended.
+
+The retirement promise fulfills after logical disposal and all original work,
+native continuations and acknowledged asynchronous cleanup that Aeolia can track
+through its existing call semantics finish. If any such operation never
+acknowledges completion, the promise remains pending. Query, mutation,
+preparation and stream failures keep their existing caller or diagnostic
+behavior and do not fail retirement by themselves. Cleanup failures do reject
+it: one failure preserves its exact cause, including `undefined`, and several
+failures are reported in an `AggregateError` with the original causes in
+deterministic owner and cleanup-attempt order. An original `AggregateError`
+remains one cause.
+
+A preparation resolver can reenter `retire()` before returning an already-running
+promise. Aeolia cannot join that promise after revocation without inspecting or
+calling its `then` behavior, which may run authored code. That original remains
+unacknowledged, so retirement stays pending. Aeolia does not invoke a generic
+thenable solely to manufacture a completion acknowledgement. Work detached from
+the promise or source contract returned to Aeolia needs its provider's own
+completion acknowledgement.
+
+Custom Promise observers or constructor/species behavior can also prevent Aeolia
+from proving completion through an existing call. The operation keeps its legacy
+result and error behavior, while retirement remains pending. Later settlement of
+an uncertified carrier does not add a new acknowledgement.
+
 ## Context-bound query profiles
 
 Use `createBindingContext(graph)` and `bindOperation(graph, query, configuration)`

@@ -1,4 +1,5 @@
 import type {
+  OpenOptions,
   Readable,
   StreamDefinition,
   StreamStore,
@@ -7,7 +8,6 @@ import type {
 } from "./types.ts";
 import { isValueOptions } from "./types.ts";
 import { __internal as reactiveInternal, computed, signal, subscribe } from "../reactive.ts";
-import { addSignalAbort } from "../utils.ts";
 import type {
   BoundStreamSessionRuntime,
   StreamBindingRuntime,
@@ -27,6 +27,7 @@ import {
 } from "./store.ts";
 import {
   endStream,
+  returnStreamIterator,
   scheduleSweep,
   setStreamStatus,
   touch,
@@ -51,6 +52,12 @@ import type {
 } from "./stream-binding.ts";
 import { storeSubscribe } from "../subscribe.ts";
 import { Fault } from "../fault.ts";
+import {
+  beginPhysicalWork,
+  finishPhysicalWork,
+  observePhysicalWork,
+  physicalCleanup,
+} from "./retirement.ts";
 
 function sameSessionEpoch<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
   return (
@@ -62,6 +69,8 @@ function sameSessionEpoch<T>(runtime: StoreRuntime<T>, session: StreamSession<T>
 function isCurrentSession<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
   return (
     !session.ended &&
+    !runtime.disposed &&
+    !runtime.graph.__runtime.disposed &&
     runtime.stream === session &&
     sameSessionEpoch(runtime, session) &&
     (session.bound === undefined || boundSessionCurrent(session.bound))
@@ -127,28 +136,57 @@ export function openStream<T>(
   abortSignal: AbortSignal | undefined,
 ): void {
   const state = runtime.graph.__runtime;
-  const controller = new AbortController();
-  const removeSignalAbort = addSignalAbort(abortSignal, controller);
-  let callerAttached = true;
-  const removeAbort = (): void => {
-    if (!callerAttached) return;
-    callerAttached = false;
-    removeSignalAbort();
-  };
-  const session: StreamSession<T> = {
-    controller,
-    token: {},
-    resetEpoch: state.resetEpoch,
-    listeners: new Set(),
-    ended: false,
-    emitted: false,
-    removeCallerAbort: removeAbort,
-    unobservedSince: runtime.liveReadableCount === 0 ? Date.now() : undefined,
-  };
-  runtime.stream = session;
-  runtime.streamToken = session.token;
-  state.activeControllers.add(controller);
-  driveStreamSource(runtime, session, stream, input, key, abortSignal, removeAbort);
+  assertGraphOpen(state);
+  const physical = beginPhysicalWork(state.retirement, "stream");
+  let driven = false;
+  try {
+    const controller = new AbortController();
+    const abort = (): void => controller.abort(abortSignal?.reason);
+    let callerAttached = false;
+    const removeAbort = (): void => {
+      if (!callerAttached || abortSignal === undefined) return;
+      callerAttached = false;
+      abortSignal.removeEventListener("abort", abort);
+    };
+    try {
+      if (abortSignal !== undefined) {
+        const aborted = abortSignal.aborted;
+        assertGraphOpen(state);
+        callerAttached = true;
+        if (aborted) abort();
+        else abortSignal.addEventListener("abort", abort, { once: true });
+      }
+    } catch (cause) {
+      try {
+        physicalCleanup(physical.owner, removeAbort);
+      } catch (cleanupCause) {
+        reportContinuationError(state, cleanupCause);
+      }
+      throw cause;
+    }
+    if (state.disposed) {
+      physicalCleanup(physical.owner, removeAbort);
+      assertGraphOpen(state);
+    }
+    const session: StreamSession<T> = {
+      physical,
+      controller,
+      token: {},
+      resetEpoch: state.resetEpoch,
+      listeners: new Set(),
+      ended: false,
+      emitted: false,
+      removeCallerAbort: removeAbort,
+      unobservedSince: runtime.liveReadableCount === 0 ? Date.now() : undefined,
+    };
+    runtime.stream = session;
+    runtime.streamToken = session.token;
+    state.activeControllers.add(controller);
+    driven = true;
+    driveStreamSource(runtime, session, stream, input, key, abortSignal, removeAbort);
+  } finally {
+    if (!driven) finishPhysicalWork(physical);
+  }
 }
 
 function driveStreamSource<T>(
@@ -161,85 +199,131 @@ function driveStreamSource<T>(
   rawRemoveAbort?: () => void,
 ): void {
   const state = runtime.graph.__runtime;
-  const controller = session.controller;
-  const removeAbort =
-    rawRemoveAbort ??
-    (() => {
+  let observed = false;
+  try {
+    const controller = session.controller;
+    const removeAbort = (): void => {
       try {
-        session.removeCallerAbort?.();
+        physicalCleanup(session.physical.owner, () => {
+          if (rawRemoveAbort !== undefined) rawRemoveAbort();
+          else session.removeCallerAbort?.();
+        });
       } catch (cause) {
+        if (rawRemoveAbort !== undefined) throw cause;
         reportContinuationError(state, cause);
       }
-    });
-  try {
-    reactiveInternal.batch(() => {
-      runtime.failing = false;
-      runtime.invalidated = false;
-      runtime.errorCell.set(undefined);
-      if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "opening");
-    });
-  } catch (error) {
-    if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
-  }
-  if (!isCurrentSession(runtime, session)) {
-    removeAbort();
-    return;
-  }
-  const closeOnAbort = (): void => {
-    if (session.ended) return;
+    };
     try {
-      endStream(runtime, session, "closed");
+      reactiveInternal.batch(() => {
+        runtime.failing = false;
+        runtime.invalidated = false;
+        runtime.errorCell.set(undefined);
+        if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "opening");
+      });
     } catch (error) {
       if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
     }
-  };
-  let controllerAttached = false;
-  const removeControllerAbort = (): void => {
-    if (!controllerAttached) return;
-    controllerAttached = false;
-    controller.signal.removeEventListener("abort", closeOnAbort);
-  };
-  const attachController = (): void => {
-    if (controllerAttached) return;
-    controllerAttached = true;
-    session.removeControllerAbort = removeControllerAbort;
-    controller.signal.addEventListener("abort", closeOnAbort, { once: true });
-  };
-  if (session.bound !== undefined) {
-    let linked = false;
-    const abort = (): void => controller.abort(abortSignal?.reason);
-    const unlinkCaller = (): void => {
-      if (!linked || abortSignal === undefined) return;
-      linked = false;
-      abortSignal.removeEventListener("abort", abort);
+    if (!isCurrentSession(runtime, session)) {
+      removeAbort();
+      return;
+    }
+    const closeOnAbort = (): void => {
+      if (session.ended) return;
+      try {
+        endStream(runtime, session, "closed");
+      } catch (error) {
+        if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+      }
     };
-    session.removeCallerAbort = unlinkCaller;
-    try {
-      attachController();
-      if (abortSignal !== undefined) {
-        const aborted = abortSignal.aborted;
-        if (!isCurrentSession(runtime, session)) {
-          removeAbort();
-          return;
-        }
-        if (aborted) abort();
-        else {
-          linked = true;
-          try {
-            abortSignal.addEventListener("abort", abort, { once: true });
-          } finally {
-            // A signal can install its listener after a reentrant retirement already unlinked it.
-            if (!isCurrentSession(runtime, session)) {
-              linked = true;
-              try {
-                unlinkCaller();
-              } catch (cause) {
-                reportContinuationError(state, cause);
+    let controllerAttached = false;
+    const removeControllerAbort = (): void => {
+      if (!controllerAttached) return;
+      controllerAttached = false;
+      controller.signal.removeEventListener("abort", closeOnAbort);
+    };
+    const attachController = (): void => {
+      if (controllerAttached) return;
+      controllerAttached = true;
+      session.removeControllerAbort = removeControllerAbort;
+      controller.signal.addEventListener("abort", closeOnAbort, { once: true });
+    };
+    if (session.bound !== undefined) {
+      let linked = false;
+      const abort = (): void => controller.abort(abortSignal?.reason);
+      const unlinkCaller = (): void => {
+        if (!linked || abortSignal === undefined) return;
+        linked = false;
+        abortSignal.removeEventListener("abort", abort);
+      };
+      session.removeCallerAbort = unlinkCaller;
+      try {
+        attachController();
+        if (abortSignal !== undefined) {
+          const aborted = abortSignal.aborted;
+          if (!isCurrentSession(runtime, session)) {
+            removeAbort();
+            return;
+          }
+          if (aborted) abort();
+          else {
+            linked = true;
+            try {
+              abortSignal.addEventListener("abort", abort, { once: true });
+            } finally {
+              // A signal can install its listener after a reentrant retirement already unlinked it.
+              if (!isCurrentSession(runtime, session)) {
+                linked = true;
+                try {
+                  physicalCleanup(session.physical.owner, unlinkCaller);
+                } catch (cause) {
+                  reportContinuationError(state, cause);
+                }
               }
             }
           }
         }
+      } catch (cause) {
+        removeAbort();
+        failStream(runtime, session, cause);
+        return;
       }
+      if (!isCurrentSession(runtime, session)) {
+        removeAbort();
+        return;
+      }
+    }
+    if (controller.signal.aborted) {
+      closeOnAbort();
+      removeAbort();
+      return;
+    }
+    let iterable: AsyncIterable<T>;
+    try {
+      const open = stream.open;
+      if (!isCurrentSession(runtime, session)) {
+        removeAbort();
+        return;
+      }
+      const sourceOptions: OpenOptions = {
+        abortSignal: controller.signal,
+        graph: state.graph.id,
+        key,
+        reportGap: () => {
+          if (!isCurrentSession(runtime, session)) return;
+          publishStreamEvent(runtime, session, { kind: "gap" });
+          if (!isCurrentSession(runtime, session) || !session.emitted) return;
+          runtime.invalidated = true;
+          try {
+            reactiveInternal.batch(() => {
+              writeAllStatuses(runtime);
+              if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "stale");
+            });
+          } catch (error) {
+            if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+          }
+        },
+      };
+      iterable = Reflect.apply(open, stream, [input, sourceOptions]);
     } catch (cause) {
       removeAbort();
       failStream(runtime, session, cause);
@@ -249,72 +333,44 @@ function driveStreamSource<T>(
       removeAbort();
       return;
     }
-  }
-  if (controller.signal.aborted) {
-    closeOnAbort();
-    removeAbort();
-    return;
-  }
-  let iterable: AsyncIterable<T>;
-  try {
-    iterable = stream.open(input, {
-      abortSignal: controller.signal,
-      graph: state.graph.id,
-      key,
-      reportGap: () => {
-        if (!isCurrentSession(runtime, session)) return;
-        publishStreamEvent(runtime, session, { kind: "gap" });
-        if (!isCurrentSession(runtime, session) || !session.emitted) return;
-        runtime.invalidated = true;
-        try {
-          reactiveInternal.batch(() => {
-            writeAllStatuses(runtime);
-            if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "stale");
-          });
-        } catch (error) {
-          if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
-        }
-      },
-    });
-  } catch (cause) {
-    removeAbort();
-    failStream(runtime, session, cause);
-    return;
-  }
-  if (!isCurrentSession(runtime, session)) {
-    removeAbort();
-    return;
-  }
-  let iterator: AsyncIterator<T>;
-  try {
-    iterator = iterable[Symbol.asyncIterator]();
-  } catch (cause) {
-    removeAbort();
-    failStream(runtime, session, cause);
-    return;
-  }
-  if (!isCurrentSession(runtime, session)) {
-    if (typeof iterator.return === "function") {
-      try {
-        void Promise.resolve(iterator.return()).catch(() => undefined);
-      } catch {
-        /* Native lifetime retirement already owns this source. */
-      }
-    }
-    removeAbort();
-    return;
-  }
-  session.iterator = iterator;
-  attachController();
-  void consumeStream(runtime, session)
-    .finally(() => {
-      removeControllerAbort();
+    let iterator: AsyncIterator<T>;
+    try {
+      iterator = iterable[Symbol.asyncIterator]();
+    } catch (cause) {
       removeAbort();
-      state.activeControllers.delete(controller);
-    })
-    .catch((cause) => {
-      if (sameSessionEpoch(runtime, session)) reportContinuationError(state, cause);
-    });
+      failStream(runtime, session, cause);
+      return;
+    }
+    if (!isCurrentSession(runtime, session)) {
+      try {
+        returnStreamIterator(session, iterator, true);
+      } finally {
+        removeAbort();
+      }
+      return;
+    }
+    session.iterator = iterator;
+    attachController();
+    const original = consumeStream(runtime, session)
+      .finally(() => {
+        try {
+          physicalCleanup(session.physical.owner, removeControllerAbort);
+        } finally {
+          try {
+            removeAbort();
+          } finally {
+            state.activeControllers.delete(controller);
+          }
+        }
+      })
+      .catch((cause) => {
+        if (sameSessionEpoch(runtime, session)) reportContinuationError(state, cause);
+      });
+    observePhysicalWork(session.physical, original);
+    observed = true;
+  } finally {
+    if (!observed) finishPhysicalWork(session.physical);
+  }
 }
 
 function boundSessionCurrent<T>(bound: BoundStreamSessionRuntime<T>): boolean {
@@ -341,46 +397,53 @@ function installBoundSession<T>(
   runtime: StoreRuntime<T>,
   binding: StreamBindingRuntime,
 ): StreamSession<T> {
-  const session: StreamSession<T> = {
-    controller: new AbortController(),
-    token: Object.freeze({}),
-    resetEpoch: runtime.graph.__runtime.resetEpoch,
-    listeners: new Set(),
-    ended: false,
-    emitted: false,
-    unobservedSince: Date.now(),
-  };
-  let resolveDetached!: (receipt: StreamDetachment<T>) => void;
-  const detached = new Promise<StreamDetachment<T>>((resolve) => {
-    resolveDetached = resolve;
-  });
-  const handle: BoundStreamSession<T> = Object.freeze({
-    identity: session.token as StreamSessionIdentity,
-    storeIdentity: runtime.identity,
-    abortSignal: session.controller.signal,
-    detached,
-  });
-  const lifecycle = signal(0);
-  const bound: BoundStreamSessionRuntime<T> = {
-    runtime,
-    binding,
-    session,
-    incarnation: runtime.incarnation!,
-    handle,
-    lifecycle,
-    resolveDetached,
-    phase: "active",
-    liveReadables: 0,
-  };
-  session.bound = bound;
-  runtime.stream = session;
-  runtime.streamToken = session.token;
-  runtime.graph.__runtime.activeControllers.add(session.controller);
-  reactiveInternal.bindReadable(lifecycle, {
-    graphId: runtime.graph.id,
-    reportFault: (fault) => graphFault(runtime.graph.__runtime, fault),
-  });
-  return session;
+  const physical = beginPhysicalWork(binding.context.retirement, "stream");
+  try {
+    const session: StreamSession<T> = {
+      physical,
+      controller: new AbortController(),
+      token: Object.freeze({}),
+      resetEpoch: runtime.graph.__runtime.resetEpoch,
+      listeners: new Set(),
+      ended: false,
+      emitted: false,
+      unobservedSince: Date.now(),
+    };
+    let resolveDetached!: (receipt: StreamDetachment<T>) => void;
+    const detached = new Promise<StreamDetachment<T>>((resolve) => {
+      resolveDetached = resolve;
+    });
+    const handle: BoundStreamSession<T> = Object.freeze({
+      identity: session.token as StreamSessionIdentity,
+      storeIdentity: runtime.identity,
+      abortSignal: session.controller.signal,
+      detached,
+    });
+    const lifecycle = signal(0);
+    const bound: BoundStreamSessionRuntime<T> = {
+      runtime,
+      binding,
+      session,
+      incarnation: runtime.incarnation!,
+      handle,
+      lifecycle,
+      resolveDetached,
+      phase: "active",
+      liveReadables: 0,
+    };
+    session.bound = bound;
+    runtime.stream = session;
+    runtime.streamToken = session.token;
+    runtime.graph.__runtime.activeControllers.add(session.controller);
+    reactiveInternal.bindReadable(lifecycle, {
+      graphId: runtime.graph.id,
+      reportFault: (fault) => graphFault(runtime.graph.__runtime, fault),
+    });
+    return session;
+  } catch (cause) {
+    finishPhysicalWork(physical);
+    throw cause;
+  }
 }
 
 function boundTerminalValue<T>(bound: BoundStreamSessionRuntime<T>): {
@@ -561,7 +624,9 @@ function boundMember<T>(
   if (!isValueOptions(options)) throw new TypeError("Invalid bound stream value options");
   current();
   const values = options as ValueOptions<T>;
-  const key = storeKey(stream.key(input));
+  const keyForInput = stream.key;
+  current();
+  const key = storeKey(Reflect.apply(keyForInput, stream, [input]));
   current();
   const existing = binding.stores.get(String(key)) as StoreRuntime<T> | undefined;
   if (existing?.boundRetirement !== undefined || existing?.transitioning === true)
@@ -606,6 +671,7 @@ function boundMember<T>(
   const admission = reserveBoundStreamAddress(binding, key, expectEmpty);
   let session: StreamSession<T> | undefined;
   let runtime: StoreRuntime<T> | undefined;
+  let driven = false;
   try {
     runtime = getOrCreateStore<T>(state, key, undefined, binding, false);
     current();
@@ -658,6 +724,7 @@ function boundMember<T>(
       ...(values.abortSignal === undefined ? {} : { abortSignal: values.abortSignal }),
     };
     admitStore(runtime);
+    driven = true;
     driveStreamSource(runtime, session, stream, input, key, values.abortSignal);
     return boundWrapper(runtime, session);
   } catch (cause) {
@@ -665,6 +732,7 @@ function boundMember<T>(
       failStream(runtime, session, cause);
     throw cause;
   } finally {
+    if (session !== undefined && !driven) finishPhysicalWork(session.physical);
     endBindingAddress(binding, String(key), admission);
   }
 }
@@ -676,40 +744,56 @@ export function streamMember<T>(
   options: ValueOptions<T> | undefined,
   binding?: StreamBindingRuntime,
 ): StreamStore<T> {
-  if (binding !== undefined) return boundMember(state, stream, input, options, binding);
-  assertGraphOpen(state);
-  if (options !== undefined && !isValueOptions(options))
-    throw new TypeError("Invalid stream options.");
-  const key = storeKey(stream.key(input));
-  const runtime = getOrCreateStore<T>(state, key, undefined, undefined, false);
-  configureKeyedValue(runtime, stream, options);
-  const abortSignal = options?.abortSignal;
-  admitStore(runtime);
+  if (binding !== undefined) assertBindingContextOpen(binding.context);
+  else assertGraphOpen(state);
+  const acquisition = beginPhysicalWork(
+    binding?.context.retirement ?? state.retirement,
+    "acquisition",
+  );
+  try {
+    if (binding !== undefined) return boundMember(state, stream, input, options, binding);
+    assertGraphOpen(state);
+    if (options !== undefined && !isValueOptions(options))
+      throw new TypeError("Invalid stream options.");
+    assertGraphOpen(state);
+    const keyForInput = stream.key;
+    assertGraphOpen(state);
+    const key = storeKey(Reflect.apply(keyForInput, stream, [input]));
+    assertGraphOpen(state);
+    const runtime = getOrCreateStore<T>(state, key, undefined, undefined, false);
+    configureKeyedValue(runtime, stream, options);
+    assertGraphOpen(state);
+    const abortSignal = options?.abortSignal;
+    assertGraphOpen(state);
+    admitStore(runtime);
 
-  const active = runtime.stream;
-  if (active === undefined) {
-    runtime.streamSource = {
-      stream,
-      input,
-      ...(abortSignal === undefined ? {} : { abortSignal }),
-    };
-    openStream(runtime, stream, input, key, abortSignal);
+    const active = runtime.stream;
+    if (active === undefined) {
+      runtime.streamSource = {
+        stream,
+        input,
+        ...(abortSignal === undefined ? {} : { abortSignal }),
+      };
+      openStream(runtime, stream, input, key, abortSignal);
+    }
+    const status = runtime.streamStatus;
+    const pending = computed(() => status.get() === "opening", {
+      label: `stream:${stream.name}:${String(key)}:pending`,
+    });
+    const streamStore = Object.create(runtime.store) as StreamStore<T>;
+    Object.assign(streamStore, { pending, error: runtime.error, status });
+    Object.freeze(streamStore);
+    runtimeByStore.set(streamStore, runtime as StoreRuntime<unknown>);
+
+    observeStoreReadable(runtime, status);
+    observeStoreReadable(runtime, pending);
+    reactiveInternal.bindReadable(pending, {
+      graphId: state.graph.id,
+      reportFault: (fault) => graphFault(state, fault),
+    });
+    touch(runtime);
+    return streamStore;
+  } finally {
+    finishPhysicalWork(acquisition);
   }
-  const status = runtime.streamStatus;
-  const pending = computed(() => status.get() === "opening", {
-    label: `stream:${stream.name}:${String(key)}:pending`,
-  });
-  const streamStore = Object.create(runtime.store) as StreamStore<T>;
-  Object.assign(streamStore, { pending, error: runtime.error, status });
-  Object.freeze(streamStore);
-  runtimeByStore.set(streamStore, runtime as StoreRuntime<unknown>);
-
-  observeStoreReadable(runtime, status);
-  observeStoreReadable(runtime, pending);
-  reactiveInternal.bindReadable(pending, {
-    graphId: state.graph.id,
-    reportFault: (fault) => graphFault(state, fault),
-  });
-  touch(runtime);
-  return streamStore;
 }

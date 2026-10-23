@@ -10,6 +10,14 @@ import { nextValueRevision } from "./identity.ts";
 import { Fault } from "../fault.ts";
 import type { StreamDetachment, StreamTerminalCapture } from "./stream-binding.ts";
 import { beginBindingAddress, captureStoreRuntime, endBindingAddress } from "./registry.ts";
+import {
+  beginPhysicalWork,
+  finishPhysicalWork,
+  normalizePhysicalPromise,
+  observePhysicalWork,
+  physicalCleanup,
+  recordCleanupFailure,
+} from "./retirement.ts";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -180,6 +188,43 @@ export function setStreamStatus<T>(runtime: StoreRuntime<T>, status: StreamStatu
     bound.lifecycle.update((version) => version + 1);
 }
 
+export function returnStreamIterator<T>(
+  session: StreamSession<T>,
+  iterator: AsyncIterator<T>,
+  swallowCallFailure: boolean,
+): void {
+  const work = beginPhysicalWork(session.physical.owner, "stream-return");
+  let hasOriginal = false;
+  try {
+    let close: AsyncIterator<T>["return"];
+    try {
+      close = iterator.return;
+    } catch (cause) {
+      recordCleanupFailure(work, cause);
+      throw cause;
+    }
+    if (typeof close !== "function") return;
+    let original: unknown;
+    try {
+      original = close.call(iterator);
+    } catch (cause) {
+      recordCleanupFailure(work, cause);
+      if (!swallowCallFailure) throw cause;
+      return;
+    }
+    hasOriginal = true;
+    work.original = original;
+    try {
+      observePhysicalWork(work, normalizePhysicalPromise(original), true, original);
+    } catch (cause) {
+      // The returned original remains unacknowledged if normalization or attachment fails.
+      if (!swallowCallFailure) throw cause;
+    }
+  } finally {
+    if (!hasOriginal) finishPhysicalWork(work);
+  }
+}
+
 export function endStream<T>(
   runtime: StoreRuntime<T>,
   session: StreamSession<T>,
@@ -189,6 +234,7 @@ export function endStream<T>(
 ): (() => void) | undefined {
   if (session.bound !== undefined) return endBoundStream(runtime, session, status, reason, options);
   if (session.ended) return;
+  const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
   const state = runtime.graph.__runtime;
   const current = (): boolean =>
     !state.disposed &&
@@ -208,9 +254,10 @@ export function endStream<T>(
     if (cleaned) return;
     cleaned = true;
     const failures: unknown[] = [];
-    const attempt = (action: () => void): void => {
+    const attempt = (action: () => void, tracked = true): void => {
       try {
-        action();
+        if (tracked) physicalCleanup(session.physical.owner, action);
+        else action();
       } catch (error) {
         failures.push(error);
       }
@@ -228,38 +275,32 @@ export function endStream<T>(
     if (removeCallerAbort !== undefined) attempt(removeCallerAbort);
     if (removeControllerAbort !== undefined) attempt(removeControllerAbort);
     attempt(() => session.controller.abort(options?.abortReason));
-    attempt(() => {
-      if (iterator == null) return;
-      const close = iterator.return;
-      if (typeof close !== "function") return;
-      try {
-        void Promise.resolve(close.call(iterator)).catch(() => undefined);
-      } catch {
-        /* closing is best effort; the source is already terminal */
-      }
-    });
+    if (iterator != null) attempt(() => returnStreamIterator(session, iterator, true), false);
     if (current()) {
       try {
-        reactiveInternal.batch(() => {
-          if (!current()) return;
-          if (status === "failed") {
-            runtime.failing = true;
-            runtime.invalidated = true;
-            runtime.errorCell.set(reason);
+        physicalCleanup(session.physical.owner, () =>
+          reactiveInternal.batch(() => {
             if (!current()) return;
-            writeAllStatuses(runtime);
-          } else if (status === "empty") {
-            runtime.failing = false;
-            runtime.invalidated = false;
-            runtime.errorCell.set(undefined);
-          }
-          if (current()) setStreamStatus(runtime, status);
-        });
+            if (status === "failed") {
+              runtime.failing = true;
+              runtime.invalidated = true;
+              runtime.errorCell.set(reason);
+              if (!current()) return;
+              writeAllStatuses(runtime);
+            } else if (status === "empty") {
+              runtime.failing = false;
+              runtime.invalidated = false;
+              runtime.errorCell.set(undefined);
+            }
+            if (current()) setStreamStatus(runtime, status);
+          }),
+        );
       } catch (error) {
         if (current()) reportContinuationError(state, error);
       }
       if (current()) scheduleSweep(state);
     }
+    finishPhysicalWork(cleanupWork);
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1)
       throw new AggregateError(failures, "Several stream cleanup operations failed");
@@ -281,6 +322,7 @@ function endBoundStream<T>(
 ): (() => void) | undefined {
   const bound = session.bound!;
   if (bound.phase !== "active") return;
+  const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
   const state = runtime.graph.__runtime;
   const retirement = { token: {}, epoch: state.resetEpoch };
   bound.retirement = retirement;
@@ -316,9 +358,10 @@ function endBoundStream<T>(
     if (cleaned) return;
     cleaned = true;
     const failures: unknown[] = [];
-    const attempt = (action: () => void): void => {
+    const attempt = (action: () => void, tracked = true): void => {
       try {
-        action();
+        if (tracked) physicalCleanup(session.physical.owner, action);
+        else action();
       } catch (cause) {
         failures.push(cause);
       }
@@ -336,12 +379,8 @@ function endBoundStream<T>(
     if (removeCallerAbort !== undefined) attempt(removeCallerAbort);
     if (removeControllerAbort !== undefined) attempt(removeControllerAbort);
     attempt(() => session.controller.abort(options?.abortReason));
-    attempt(() => {
-      if (iterator === undefined) return;
-      const close = iterator.return;
-      if (typeof close === "function")
-        void Promise.resolve(close.call(iterator)).catch(() => undefined);
-    });
+    if (iterator !== undefined)
+      attempt(() => returnStreamIterator(session, iterator, false), false);
     if (owns() && !runtime.disposed && !state.disposed && !bound.binding.context.disposed) {
       attempt(() =>
         reactiveInternal.batch(() => {
@@ -363,7 +402,10 @@ function endBoundStream<T>(
     }
     // All destructive native tails run before this deferred seal/release; physical cleanup is separate.
     queueMicrotask(() => {
-      if (bound.phase !== "retiring" || bound.retirement !== retirement) return;
+      if (bound.phase !== "retiring" || bound.retirement !== retirement) {
+        finishPhysicalWork(cleanupWork);
+        return;
+      }
       if (terminalCapture.kind === "captured") {
         if (state.disposed || bound.binding.context.disposed)
           terminalCapture = Object.freeze({
@@ -385,24 +427,29 @@ function endBoundStream<T>(
       bound.receipt = receipt;
       bound.phase = "detached";
       try {
-        bound.lifecycle.update((version) => version + 1);
+        physicalCleanup(session.physical.owner, () =>
+          bound.lifecycle.update((version) => version + 1),
+        );
       } catch (cause) {
         reportContinuationError(state, cause);
       }
       queueMicrotask(() => {
         try {
-          if (runtime.boundRetirement === bound) {
-            const owned = owns();
-            runtime.boundRetirement = undefined;
-            if (owned) runtime.transitioning = false;
-          }
-          endBindingAddress(bound.binding, String(runtime.key), addressOperation);
-          updateCollectionCandidate(runtime);
-          scheduleSweep(state);
+          physicalCleanup(session.physical.owner, () => {
+            if (runtime.boundRetirement === bound) {
+              const owned = owns();
+              runtime.boundRetirement = undefined;
+              if (owned) runtime.transitioning = false;
+            }
+            endBindingAddress(bound.binding, String(runtime.key), addressOperation);
+            updateCollectionCandidate(runtime);
+            scheduleSweep(state);
+          });
         } catch (cause) {
           reportContinuationError(state, cause);
         } finally {
           bound.resolveDetached(receipt);
+          finishPhysicalWork(cleanupWork);
         }
       });
     });

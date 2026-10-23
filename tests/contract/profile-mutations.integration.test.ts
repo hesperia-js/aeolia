@@ -106,6 +106,25 @@ function visible<T>(handle: QueryStore<T>): T | undefined {
   return handle.value.get();
 }
 
+async function expectPending(promise: Promise<unknown>): Promise<void> {
+  jest.useRealTimers();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      promise.then(
+        () => "settled",
+        () => "settled",
+      ),
+      new Promise<"pending">((resolve) => {
+        timer = setTimeout(() => resolve("pending"), 0);
+      }),
+    ]);
+    expect(result).toBe("pending");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 describe("context-bound mutation effects", () => {
   it("uses the executing plan and physical override identity across existing same-context profiles", async () => {
     const f = fixture();
@@ -301,17 +320,60 @@ describe("context-bound mutation effects", () => {
     }
   });
 
-  it.each(["caller", "graph", "context", "reset", "dispose"] as const)(
+  it.each(
+    [
+      "caller",
+      "graph",
+      "context",
+      "reset",
+      "dispose",
+      "graph.retire",
+      "context.retire",
+      "graph.self-retire",
+      "context.self-retire",
+      "thenable.revoked",
+    ] as const,
+  )(
     "revokes suspended preparation through %s without publishing or dispatching",
     async (mode) => {
       const f = fixture();
       const gate = Promise.withResolvers<readonly PreparedEffect[]>();
+      const finalizer = Promise.withResolvers<void>();
+      const finalized = Promise.withResolvers<void>();
+      const nativeOriginal = gate.promise.then(async (effects) => {
+        await finalizer.promise;
+        finalized.resolve();
+        return effects;
+      });
       const caller = new AbortController();
+      let retirement: Promise<void> | undefined;
+      let prepareCalls = 0;
+      let thenCalls = 0;
+      const revokedThenable = {
+        then(resolve: (value: readonly PreparedEffect[]) => unknown) {
+          thenCalls += 1;
+          return Promise.resolve(resolve([]));
+        },
+      } as PromiseLike<readonly PreparedEffect[]>;
       try {
         const handle = f.native.member({ id: "one" }, { initial: 1 });
         const mutation = f.binding(
           profileEffect(f.save, 0, f.query, {
-            prepare: () => gate.promise,
+            prepare: () => {
+              prepareCalls += 1;
+              if (mode === "graph.self-retire" || mode === "thenable.revoked")
+                retirement = f.graph.retire();
+              if (mode === "context.self-retire") retirement = f.context.retire();
+              if (mode === "thenable.revoked") return revokedThenable;
+              if (
+                mode === "graph.retire" ||
+                mode === "context.retire" ||
+                mode === "graph.self-retire" ||
+                mode === "context.self-retire"
+              )
+                return nativeOriginal;
+              return gate.promise;
+            },
             settle: () => [],
           }),
         );
@@ -325,12 +387,32 @@ describe("context-bound mutation effects", () => {
         if (mode === "context") f.context.dispose();
         if (mode === "reset") await f.graph.reset();
         if (mode === "dispose") f.graph.dispose();
+        if (mode === "graph.retire") retirement = f.graph.retire();
+        if (mode === "context.retire") retirement = f.context.retire();
         expect(await outcome).toMatchObject({ name: "AbortError" });
+        const selfRetired = mode === "graph.self-retire" || mode === "context.self-retire";
+        if (retirement !== undefined && !selfRetired) {
+          void retirement.catch(() => undefined);
+          await expectPending(retirement);
+        }
         gate.resolve([]);
         expect(f.backend.calls).toHaveLength(0);
         if (mode === "caller" || mode === "graph") expect(visible(handle)).toBe(1);
+        expect(prepareCalls).toBe(1);
+        if (retirement !== undefined && !selfRetired) {
+          if (mode === "thenable.revoked") {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            expect(thenCalls).toBe(0);
+          } else {
+            await expectPending(retirement);
+            finalizer.resolve();
+            await finalized.promise;
+            await retirement;
+          }
+        }
       } finally {
         gate.resolve([]);
+        finalizer.resolve();
         f.graph.dispose();
       }
     },
@@ -702,6 +784,191 @@ describe("context-bound mutation effects", () => {
       expect(f.selections).toHaveLength(1);
       expect(f.backend.calls.map((call) => call.name)).toEqual(["save"]);
     } finally {
+      f.graph.dispose();
+    }
+  });
+
+  it("keeps context retirement pending through bound mutation output adoption", async () => {
+    const f = fixture();
+    const finalization = Promise.withResolvers<void>();
+    const listenerRemoved = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const controller = new AbortController();
+    const nativeAdd = controller.signal.addEventListener.bind(controller.signal);
+    const nativeRemove = controller.signal.removeEventListener.bind(controller.signal);
+    let linkedListener: EventListenerOrEventListenerObject | null = null;
+    let providerRead = false;
+    let finalOutputAdoption = false;
+    const signal = new Proxy(controller.signal, {
+      get(target, property) {
+        if (property === "addEventListener")
+          return (
+            type: string,
+            listener: EventListenerOrEventListenerObject | null,
+            options?: boolean | AddEventListenerOptions,
+          ) => {
+            nativeAdd(type, listener, options);
+            if (type === "abort") linkedListener = listener;
+          };
+        if (property === "removeEventListener")
+          return (
+            type: string,
+            listener: EventListenerOrEventListenerObject | null,
+            options?: boolean | EventListenerOptions,
+          ) => {
+            nativeRemove(type, listener, options);
+            if (type === "abort" && listener === linkedListener) {
+              finalOutputAdoption = true;
+              listenerRemoved.resolve();
+            }
+          };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const providerResult = Object.defineProperty({}, "then", {
+      get() {
+        if (!providerRead) {
+          providerRead = true;
+          return undefined;
+        }
+        if (!finalOutputAdoption) return undefined;
+        return (resolve: (value: string) => void, reject: (reason: unknown) => void) => {
+          finalization.promise.then(() => resolve("finalized"), reject);
+        };
+      },
+    });
+    let call: (typeof f.backend.calls)[number] | undefined;
+    let providerResolved = false;
+    try {
+      const binding = bindOperation(f.graph, f.save, {
+        context: f.context,
+        profile: {},
+        effects: [
+          profileEffect(f.save, 0, f.query, {
+            prepare: () => [],
+            settle: () => [],
+          }),
+        ],
+        run: (input, call) => {
+          started.resolve();
+          return f.save.run(input, call);
+        },
+      });
+      const running = binding.member({ id: "one", value: 2 }, { abortSignal: signal });
+      await started.promise;
+      call = f.backend.pending("save")[0]!;
+      f.backend.resolve(call, providerResult as unknown as string);
+      providerResolved = true;
+      expect(providerRead).toBe(true);
+      await listenerRemoved.promise;
+      expect(finalOutputAdoption).toBe(true);
+
+      const retirement = f.context.retire();
+      await expectPending(running);
+      await expectPending(retirement);
+
+      finalization.resolve();
+      await expect(running).resolves.toBe("finalized");
+      await retirement;
+      expect(f.backend.calls.map((entry) => entry.name)).toEqual(["save"]);
+    } finally {
+      if (!providerResolved && call !== undefined)
+        f.backend.resolve(call, providerResult as unknown as string);
+      finalization.resolve();
+      f.graph.dispose();
+    }
+  });
+
+  it("retains a custom run original hidden behind asynchronous preparation", async () => {
+    const f = fixture();
+    const provider = Promise.withResolvers<unknown>();
+    const legacyCarrier = Promise.withResolvers<unknown>();
+    const started = Promise.withResolvers<void>();
+    const callbackSettled = Promise.withResolvers<void>();
+    const nativeThen = Promise.prototype.then;
+    let prepareCalls = 0;
+    let runCalls = 0;
+    let observerCalls = 0;
+    let callbackCalls = 0;
+    let callbackInput: unknown;
+    let callbackResult: unknown;
+    let providerResolved = false;
+    Object.defineProperty(provider.promise, "then", {
+      configurable: true,
+      value: function (
+        this: Promise<unknown>,
+        onFulfilled: ((value: unknown) => unknown) | null | undefined,
+        onRejected: ((cause: unknown) => unknown) | null | undefined,
+      ): Promise<unknown> {
+        observerCalls += 1;
+        if (typeof onFulfilled !== "function")
+          throw new Error("Expected the public bound mutation continuation");
+        const callbackCarrier = Reflect.apply(nativeThen, this, [
+          (value: unknown) => {
+            callbackCalls += 1;
+            callbackInput = value;
+            return onFulfilled(value);
+          },
+          onRejected,
+        ]) as Promise<unknown>;
+        void Reflect.apply(nativeThen, callbackCarrier, [
+          (value: unknown) => {
+            callbackResult = value;
+            callbackSettled.resolve();
+          },
+          (cause: unknown) => {
+            callbackResult = cause;
+            callbackSettled.resolve();
+          },
+        ]);
+        return legacyCarrier.promise;
+      },
+    });
+    try {
+      const binding = bindOperation(f.graph, f.save, {
+        context: f.context,
+        profile: {},
+        effects: [
+          profileEffect(f.save, 0, f.query, {
+            prepare: async () => {
+              prepareCalls += 1;
+              return [];
+            },
+            settle: () => [],
+          }),
+        ],
+        run: () => {
+          runCalls += 1;
+          started.resolve();
+          return provider.promise;
+        },
+      });
+      const running = binding.member({ id: "one", value: 2 });
+      expect(runCalls).toBe(0);
+      await started.promise;
+      expect(prepareCalls).toBe(1);
+      expect(runCalls).toBe(1);
+      expect(observerCalls).toBe(1);
+
+      const retirement = f.context.retire();
+      await expectPending(retirement);
+      await expectPending(running);
+      legacyCarrier.resolve("independent legacy result");
+      await expect(running).resolves.toBe("independent legacy result");
+      expect(providerResolved).toBe(false);
+      await expectPending(retirement);
+
+      provider.resolve("original provider result");
+      providerResolved = true;
+      await callbackSettled.promise;
+      expect(callbackInput).toBe("original provider result");
+      expect(callbackResult).toBe("original provider result");
+      expect(callbackCalls).toBe(1);
+      await expectPending(retirement);
+    } finally {
+      legacyCarrier.resolve("independent legacy result");
+      if (!providerResolved) provider.resolve("original provider result");
       f.graph.dispose();
     }
   });

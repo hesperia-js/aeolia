@@ -1,7 +1,7 @@
 import type { Affected, MutationDefinition, MutationOptions } from "./types.ts";
 import { Fault } from "../fault.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
-import { addSignalAbort, isObject } from "../utils.ts";
+import { isObject } from "../utils.ts";
 import type { ExistingTarget, TypedTarget } from "./query-binding.ts";
 import type {
   PreparedEffect,
@@ -38,6 +38,37 @@ import {
   pushPrediction,
   removePrediction,
 } from "./store-state.ts";
+import type { PhysicalWork } from "./retirement.ts";
+import {
+  beginPhysicalWork,
+  canReplacePhysicalCarrier,
+  continuePhysicalPromise,
+  createPhysicalCompletion,
+  createPhysicalPromise,
+  finishPhysicalWork,
+  normalizePhysicalPromise,
+  physicalCleanup,
+} from "./retirement.ts";
+
+const nativeApply = Reflect.apply;
+
+interface MutationOutput<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+  readonly reject: (reason: unknown) => void;
+  acknowledged: boolean;
+}
+
+function createMutationOutput<T>(physical: PhysicalWork): MutationOutput<T> {
+  let output: MutationOutput<T>;
+  const { promise, resolve, reject } = createPhysicalCompletion<T>(() => {
+    if (output.acknowledged) finishPhysicalWork(physical);
+  });
+  output = { promise, resolve, reject, acknowledged: true };
+  physical.original = promise;
+  physical.continuation = promise;
+  return output;
+}
 
 export interface MutationTarget {
   readonly affected: Affected<any>;
@@ -48,6 +79,28 @@ export interface MutationTarget {
 
 function isCurrentMutationEpoch(state: GraphRuntimeState<any>, resetEpoch: number): boolean {
   return !state.disposed && state.resetEpoch === resetEpoch;
+}
+
+function linkMutationAbort(
+  state: GraphRuntimeState<any>,
+  signal: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
+  if (signal === undefined) return () => undefined;
+  const abort = (): void => controller.abort(signal.reason);
+  const remove = (): void => signal.removeEventListener("abort", abort);
+  try {
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+    return remove;
+  } catch (error) {
+    try {
+      physicalCleanup(state.retirement, remove);
+    } catch (cleanupError) {
+      reportContinuationError(state, cleanupError);
+    }
+    throw error;
+  }
 }
 
 function resolveMutationTarget(
@@ -113,119 +166,198 @@ export function runMutation<I, R>(
   options: MutationOptions | undefined,
 ): Promise<R> {
   assertGraphOpen(state);
-  const resetEpoch = state.resetEpoch;
-  const targets: MutationTarget[] = [];
-  for (const affected of definition.affects) {
-    const target = resolveMutationTarget(state, affected, input, resetEpoch);
-    if (target === undefined)
-      return Promise.reject(new AbortError("The mutation was superseded by a graph reset."));
-    targets.push(target);
-  }
-  const prepared: Array<{
-    readonly runtime: StoreRuntime<unknown>;
-    readonly prediction: Prediction<unknown>;
-  }> = [];
-  for (const target of targets) {
-    if (target.runtime === undefined) continue;
-    const declared = target.affected.optimistic as
-      | ((current: unknown, input: unknown) => unknown)
-      | undefined;
-    const predictor = (options?.optimistic?.get(target.key) ?? declared) as
-      | ((current: unknown, input: unknown) => unknown)
-      | undefined;
-    if (!isCurrentMutationEpoch(state, resetEpoch))
-      return Promise.reject(new AbortError("The mutation was superseded by a graph reset."));
-    if (predictor === undefined) continue;
-    const prediction = preparePrediction(target.runtime, predictor, input, () =>
-      isCurrentMutationEpoch(state, resetEpoch),
-    );
-    if (!isCurrentMutationEpoch(state, resetEpoch))
-      return Promise.reject(new AbortError("The mutation was superseded by a graph reset."));
-    if (prediction != null) prepared.push({ runtime: target.runtime, prediction });
-  }
-  const predictions: Array<{ readonly runtime: StoreRuntime<unknown>; readonly id: number }> = [];
-  reactiveInternal.batch(() => {
-    for (const job of prepared) {
-      if (pushPrediction(job.runtime, job.prediction))
-        predictions.push({ runtime: job.runtime, id: job.prediction.id });
-      else if (!isCurrentMutationEpoch(state, resetEpoch)) return;
-    }
-  });
-  if (!isCurrentMutationEpoch(state, resetEpoch))
-    return Promise.reject(new AbortError("The mutation was superseded by a graph reset."));
-
-  const controller = new AbortController();
-  const removeAbort = addSignalAbort(options?.abortSignal, controller);
-  state.activeControllers.add(controller);
-  let returned: Promise<R>;
+  const acquisition = beginPhysicalWork(state.retirement, "acquisition");
+  let output: MutationOutput<R>;
   try {
-    returned = Promise.resolve(
-      definition.run(input, { abortSignal: controller.signal, graph: state.graph.id }),
-    );
+    output = createMutationOutput<R>(acquisition);
   } catch (error) {
-    returned = Promise.reject(error);
+    finishPhysicalWork(acquisition);
+    throw error;
   }
-  return returned.then(
-    (result) => {
-      removeAbort();
-      state.activeControllers.delete(controller);
-      if (isCurrentMutationEpoch(state, resetEpoch)) {
-        try {
-          reactiveInternal.batch(() => {
-            for (const prediction of predictions) {
-              markPredictionSucceeded(prediction.runtime, prediction.id);
-            }
-            applyMutationEffects(state, definition, input, resetEpoch);
-          });
-        } catch (error) {
-          if (isCurrentMutationEpoch(state, resetEpoch)) reportContinuationError(state, error);
-        }
+  let sourceStarted = false;
+  const superseded = (): Promise<R> => {
+    output.reject(new AbortError("The mutation was superseded by a graph reset."));
+    return output.promise;
+  };
+  try {
+    const resetEpoch = state.resetEpoch;
+    const targets: MutationTarget[] = [];
+    for (const affected of definition.affects) {
+      const target = resolveMutationTarget(state, affected, input, resetEpoch);
+      if (target === undefined) return superseded();
+      targets.push(target);
+    }
+    const prepared: Array<{
+      readonly runtime: StoreRuntime<unknown>;
+      readonly prediction: Prediction<unknown>;
+    }> = [];
+    for (const target of targets) {
+      if (target.runtime === undefined) continue;
+      const declared = target.affected.optimistic as
+        | ((current: unknown, input: unknown) => unknown)
+        | undefined;
+      const predictor = (options?.optimistic?.get(target.key) ?? declared) as
+        | ((current: unknown, input: unknown) => unknown)
+        | undefined;
+      if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
+      if (predictor === undefined) continue;
+      const prediction = preparePrediction(target.runtime, predictor, input, () =>
+        isCurrentMutationEpoch(state, resetEpoch),
+      );
+      if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
+      if (prediction != null) prepared.push({ runtime: target.runtime, prediction });
+    }
+    const predictions: Array<{ readonly runtime: StoreRuntime<unknown>; readonly id: number }> = [];
+    reactiveInternal.batch(() => {
+      for (const job of prepared) {
+        if (pushPrediction(job.runtime, job.prediction))
+          predictions.push({ runtime: job.runtime, id: job.prediction.id });
+        else if (!isCurrentMutationEpoch(state, resetEpoch)) return;
       }
-      return result;
-    },
-    (error) => {
-      removeAbort();
-      state.activeControllers.delete(controller);
-      if (isCurrentMutationEpoch(state, resetEpoch)) {
+    });
+    if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
+
+    const controller = new AbortController();
+    const removeAbort = linkMutationAbort(state, options?.abortSignal, controller);
+    if (!isCurrentMutationEpoch(state, resetEpoch)) {
+      physicalCleanup(state.retirement, removeAbort);
+      return superseded();
+    }
+    state.activeControllers.add(controller);
+    let runResult: unknown;
+    let runReturned = false;
+    let returned: Promise<R>;
+    sourceStarted = true;
+    try {
+      runResult = definition.run(input, { abortSignal: controller.signal, graph: state.graph.id });
+      runReturned = true;
+      acquisition.original = runResult;
+      returned = normalizePhysicalPromise(runResult as R | PromiseLike<R>);
+    } catch (error) {
+      if (runReturned && isObject(runResult)) output.acknowledged = false;
+      const rejected = createPhysicalCompletion<R>();
+      rejected.reject(error);
+      returned = rejected.promise;
+    }
+    const observer = returned.then;
+    const nativeObserver = canReplacePhysicalCarrier(returned, observer);
+    if (!nativeObserver) output.acknowledged = false;
+    const succeeded = (result: R): R | void => {
+      try {
         try {
-          reactiveInternal.batch(() => {
-            for (const prediction of predictions) {
-              removePrediction(prediction.runtime, prediction.id);
-            }
-          });
-        } catch (cleanupError) {
-          if (isCurrentMutationEpoch(state, resetEpoch))
-            reportContinuationError(state, cleanupError);
+          physicalCleanup(state.retirement, removeAbort);
+        } finally {
+          state.activeControllers.delete(controller);
         }
+        if (isCurrentMutationEpoch(state, resetEpoch)) {
+          try {
+            reactiveInternal.batch(() => {
+              for (const prediction of predictions) {
+                markPredictionSucceeded(prediction.runtime, prediction.id);
+              }
+              applyMutationEffects(state, definition, input, resetEpoch);
+            });
+          } catch (error) {
+            if (isCurrentMutationEpoch(state, resetEpoch)) reportContinuationError(state, error);
+          }
+        }
+        if (nativeObserver) output.resolve(result);
+        else return result;
+      } catch (error) {
+        if (nativeObserver) output.reject(error);
+        else throw error;
       }
-      return Promise.reject(error);
-    },
-  );
+    };
+    const failed = (error: unknown): Promise<never> | void => {
+      try {
+        try {
+          physicalCleanup(state.retirement, removeAbort);
+        } finally {
+          state.activeControllers.delete(controller);
+        }
+        if (isCurrentMutationEpoch(state, resetEpoch)) {
+          try {
+            reactiveInternal.batch(() => {
+              for (const prediction of predictions) {
+                removePrediction(prediction.runtime, prediction.id);
+              }
+            });
+          } catch (cleanupError) {
+            if (isCurrentMutationEpoch(state, resetEpoch))
+              reportContinuationError(state, cleanupError);
+          }
+        }
+        if (nativeObserver) output.reject(error);
+        else return Promise.reject(error);
+      } catch (failure) {
+        if (nativeObserver) output.reject(failure);
+        else throw failure;
+      }
+    };
+    const completion = nativeApply(observer, returned, [succeeded, failed]) as Promise<R>;
+    if (!nativeObserver) {
+      acquisition.continuation = completion;
+      output.resolve(undefined as R);
+      return completion;
+    }
+    return output.promise;
+  } catch (error) {
+    if (sourceStarted) output.acknowledged = false;
+    output.reject(error);
+    if (!sourceStarted) finishPhysicalWork(acquisition);
+    throw error;
+  }
 }
 
 export interface BoundMutationAttempt {
+  readonly physical: PhysicalWork;
+  readonly outputPhysical: PhysicalWork;
+  readonly output: MutationOutput<unknown>;
   readonly binding: MutationBindingRuntime;
   readonly controller: AbortController;
   readonly epoch: number;
   readonly predictions: Array<{ readonly target: QueryTargetRuntime; readonly id: number }>;
   stage: "prepare" | "run" | "settle" | "finished";
+  unacknowledged: boolean;
+  outputStarted: boolean;
   removeAbort?: () => void;
+}
+
+function retainUnacknowledgedMutation(attempt: BoundMutationAttempt): void {
+  attempt.unacknowledged = true;
+  attempt.output.acknowledged = false;
 }
 
 /** @internal Enroll before option accessors, selectors, resolvers or signal linking. */
 export function beginBoundMutation(binding: MutationBindingRuntime): BoundMutationAttempt {
   assertBindingContextOpen(binding.context);
-  const controller = new AbortController();
-  const attempt: BoundMutationAttempt = {
-    binding,
-    controller,
-    epoch: binding.context.state.resetEpoch,
-    predictions: [],
-    stage: "prepare",
-  };
-  binding.context.mutationControllers.add(controller);
-  binding.context.state.activeControllers.add(controller);
-  return attempt;
+  const physical = beginPhysicalWork(binding.context.retirement, "acquisition");
+  const outputPhysical = beginPhysicalWork(binding.context.retirement, "mutation");
+  let output: MutationOutput<unknown> | undefined;
+  try {
+    output = createMutationOutput(outputPhysical);
+    const controller = new AbortController();
+    const attempt: BoundMutationAttempt = {
+      physical,
+      outputPhysical,
+      output,
+      binding,
+      controller,
+      epoch: binding.context.state.resetEpoch,
+      predictions: [],
+      stage: "prepare",
+      unacknowledged: false,
+      outputStarted: false,
+    };
+    binding.context.mutationControllers.add(controller);
+    binding.context.state.activeControllers.add(controller);
+    return attempt;
+  } catch (error) {
+    output?.reject(error);
+    if (output === undefined) finishPhysicalWork(outputPhysical);
+    finishPhysicalWork(physical);
+    throw error;
+  }
 }
 
 /** @internal Release both native controller owners without aborting successful work. */
@@ -235,11 +367,14 @@ export function finishBoundMutation(attempt: BoundMutationAttempt): void {
   attempt.binding.context.mutationControllers.delete(attempt.controller);
   attempt.binding.context.state.activeControllers.delete(attempt.controller);
   try {
-    attempt.removeAbort?.();
+    physicalCleanup(attempt.binding.context.retirement, () => attempt.removeAbort?.());
   } catch (error) {
     reportContinuationError(attempt.binding.context.state, error);
+  } finally {
+    attempt.removeAbort = undefined;
+    if (!attempt.outputStarted) attempt.output.resolve(undefined);
+    if (!attempt.unacknowledged) finishPhysicalWork(attempt.physical);
   }
-  attempt.removeAbort = undefined;
 }
 
 function currentBoundLifetime(attempt: BoundMutationAttempt): boolean {
@@ -405,38 +540,96 @@ function afterPhase<T>(
   value: unknown,
   next: (value: unknown) => T | Promise<T>,
 ): T | Promise<T> {
-  const then: unknown = isObject(value) ? Reflect.get(value, "then") : undefined;
-  assertBoundPhase(attempt);
-  if (typeof then !== "function") return next(value);
-  let removeWait = (): void => undefined;
-  const pending = new Promise<unknown>((resolve, reject) => {
-    if (attempt.stage === "prepare" && attempt.controller.signal.aborted) {
-      reject(new AbortError("Mutation preparation was canceled."));
-      return;
-    }
-    const aborted = (): void => reject(new AbortError("Mutation preparation was canceled."));
-    if (attempt.stage === "prepare") {
-      attempt.controller.signal.addEventListener("abort", aborted, { once: true });
-      removeWait = () => attempt.controller.signal.removeEventListener("abort", aborted);
-    }
-    try {
-      then.call(value, resolve, reject);
-    } catch (error) {
-      reject(error);
-    }
-  });
-  // The native signal listener belongs only to this wait, including when authored then never settles.
-  return pending.then(
-    (result) => {
-      removeWait();
-      assertBoundPhase(attempt);
-      return next(result);
-    },
-    (error: unknown) => {
-      removeWait();
-      throw error;
-    },
-  );
+  const owner = attempt.binding.context.retirement;
+  const physical = beginPhysicalWork(owner, "mutation-phase");
+  let retained = false;
+  let thenCaptured = false;
+  let thenCallable = false;
+  let invoked = false;
+  const retainUnacknowledgedOriginal = (): void => {
+    if (!isObject(value)) return;
+    retained = true;
+    retainUnacknowledgedMutation(attempt);
+    // Revoked thenables cannot gain new callouts to manufacture an acknowledgement.
+    physical.original = value;
+  };
+  try {
+    const then: unknown = isObject(value) ? Reflect.get(value, "then") : undefined;
+    thenCaptured = true;
+    thenCallable = typeof then === "function";
+    assertBoundPhase(attempt);
+    if (typeof then !== "function") return next(value);
+    let removeWait = (): void => undefined;
+    const pending = createPhysicalPromise<{ readonly value: unknown }>((resolve, reject) => {
+      if (attempt.stage === "prepare" && attempt.controller.signal.aborted) {
+        retainUnacknowledgedOriginal();
+        reject(new AbortError("Mutation preparation was canceled."));
+        return;
+      }
+      const aborted = (): void => reject(new AbortError("Mutation preparation was canceled."));
+      try {
+        if (attempt.stage === "prepare") {
+          removeWait = () => attempt.controller.signal.removeEventListener("abort", aborted);
+          attempt.controller.signal.addEventListener("abort", aborted, { once: true });
+        }
+        assertBoundPhase(attempt);
+      } catch (error) {
+        retainUnacknowledgedOriginal();
+        reject(error);
+        return;
+      }
+      physical.original = value;
+      const original = createPhysicalPromise<unknown>((resolveOriginal, rejectOriginal) => {
+        try {
+          invoked = true;
+          then.call(value, resolveOriginal, rejectOriginal);
+        } catch (error) {
+          rejectOriginal(error);
+        }
+      });
+      retained = true;
+      const continuation = continuePhysicalPromise<unknown, void>(original, (certified) => {
+        if (!certified) retainUnacknowledgedMutation(attempt);
+        return {
+          fulfilled: (result) => {
+            try {
+              resolve({ value: result });
+            } finally {
+              if (certified) finishPhysicalWork(physical);
+            }
+          },
+          rejected: (error) => {
+            try {
+              reject(error);
+            } finally {
+              if (certified) finishPhysicalWork(physical);
+            }
+          },
+        };
+      });
+      if (physical.active) physical.continuation = continuation.promise;
+    });
+    // Cancellation ends this wait; the invoked original keeps its separate physical owner.
+    return continuePhysicalPromise<{ readonly value: unknown }, T>(pending, (certified) => {
+      if (!certified) retainUnacknowledgedMutation(attempt);
+      return {
+        fulfilled: ({ value: result }) => {
+          physicalCleanup(owner, removeWait);
+          assertBoundPhase(attempt);
+          return next(result);
+        },
+        rejected: (error) => {
+          physicalCleanup(owner, removeWait);
+          throw error;
+        },
+      };
+    }).promise;
+  } catch (error) {
+    if (!invoked && (!thenCaptured || thenCallable)) retainUnacknowledgedOriginal();
+    throw error;
+  } finally {
+    if (!retained) finishPhysicalWork(physical);
+  }
 }
 
 function prepareBoundEffects(
@@ -452,10 +645,18 @@ function prepareBoundEffects(
       phaseInstructions(attempt, phase, value),
     );
     if (resolved instanceof Promise)
-      return resolved.then((instructions) => {
-        prepared.push(...instructions);
-        return prepareBoundEffects(attempt, input, position + 1, prepared);
-      });
+      return continuePhysicalPromise<
+        readonly EffectInstructionRuntime[],
+        readonly EffectInstructionRuntime[]
+      >(resolved, (certified) => {
+        if (!certified) retainUnacknowledgedMutation(attempt);
+        return {
+          fulfilled: (instructions) => {
+            prepared.push(...instructions);
+            return prepareBoundEffects(attempt, input, position + 1, prepared);
+          },
+        };
+      }).promise;
     prepared.push(...resolved);
   }
   return prepared;
@@ -587,13 +788,25 @@ function settleBoundEffects(
         }
       }
     };
-    if (resolved instanceof Promise)
-      return resolved
-        .then(apply, (error) => {
-          if (currentBoundLifetime(attempt))
-            reportContinuationError(attempt.binding.context.state, error);
-        })
-        .then(() => settleBoundEffects(attempt, input, position + 1));
+    if (resolved instanceof Promise) {
+      const applied = continuePhysicalPromise<readonly EffectInstructionRuntime[], void>(
+        resolved,
+        (certified) => {
+          if (!certified) retainUnacknowledgedMutation(attempt);
+          return {
+            fulfilled: apply,
+            rejected: (error) => {
+              if (currentBoundLifetime(attempt))
+                reportContinuationError(attempt.binding.context.state, error);
+            },
+          };
+        },
+      ).promise;
+      return continuePhysicalPromise<void, void>(applied, (certified) => {
+        if (!certified) retainUnacknowledgedMutation(attempt);
+        return { fulfilled: () => settleBoundEffects(attempt, input, position + 1) };
+      }).promise;
+    }
     apply(resolved);
   }
 }
@@ -619,7 +832,8 @@ export function runBoundMutation(
       throw new TypeError("Duplicate prediction override for one store identity");
     overrides.set(identity, checked);
   }
-  const fail = (error: unknown): Promise<never> => {
+  attempt.outputStarted = true;
+  const cleanFailedMutation = (): void => {
     try {
       removeBoundPredictions(attempt);
     } catch (cleanupError) {
@@ -627,7 +841,14 @@ export function runBoundMutation(
     } finally {
       finishBoundMutation(attempt);
     }
-    return Promise.reject(error);
+  };
+  const fail = (error: unknown): void => {
+    try {
+      cleanFailedMutation();
+      attempt.output.reject(error);
+    } catch (failure) {
+      attempt.output.reject(failure);
+    }
   };
   try {
     assertBoundPhase(attempt);
@@ -645,37 +866,102 @@ export function runBoundMutation(
       publishBoundPredictions(attempt, input, instructions, overrides);
       attempt.stage = "run";
       let returned: unknown;
+      let runReturned = false;
       try {
         returned = attempt.binding.run(input, {
           graph: attempt.binding.context.state.graph.id,
           abortSignal: attempt.controller.signal,
         });
+        runReturned = true;
+        attempt.physical.original = returned;
       } catch (error) {
-        return Promise.reject(error);
+        returned = Promise.reject(error);
       }
-      return Promise.resolve(returned).then((result) => {
-        attempt.stage = "settle";
-        if (!currentBoundLifetime(attempt)) return result;
-        for (const prediction of attempt.predictions) {
-          if (!currentBoundLifetime(attempt)) return result;
-          if (!isQueryTargetCurrent(prediction.target)) continue;
-          try {
-            markPredictionSucceeded(prediction.target.runtime, prediction.id);
-          } catch (error) {
-            reportContinuationError(attempt.binding.context.state, error);
-          }
-        }
-        const settlement = settleBoundEffects(attempt, input);
-        return settlement instanceof Promise ? settlement.then(() => result) : result;
-      });
+      try {
+        const output = normalizePhysicalPromise(returned);
+        const completion = continuePhysicalPromise(output, (certified) => {
+          if (!certified) retainUnacknowledgedMutation(attempt);
+          return {
+            fulfilled: (result) => {
+              attempt.stage = "settle";
+              if (!currentBoundLifetime(attempt)) return result;
+              for (const prediction of attempt.predictions) {
+                if (!currentBoundLifetime(attempt)) return result;
+                if (!isQueryTargetCurrent(prediction.target)) continue;
+                try {
+                  markPredictionSucceeded(prediction.target.runtime, prediction.id);
+                } catch (error) {
+                  reportContinuationError(attempt.binding.context.state, error);
+                }
+              }
+              const settlement = settleBoundEffects(attempt, input);
+              return settlement instanceof Promise
+                ? continuePhysicalPromise<void, unknown>(settlement, (settlementCertified) => {
+                  if (!settlementCertified) retainUnacknowledgedMutation(attempt);
+                  return { fulfilled: () => result };
+                }).promise
+                : result;
+            },
+          };
+        });
+        return completion.promise;
+      } catch (error) {
+        if (runReturned && isObject(returned)) retainUnacknowledgedMutation(attempt);
+        throw error;
+      }
     };
     const running =
-      preparation instanceof Promise ? preparation.then(dispatch) : dispatch(preparation);
-    return running.then((result) => {
-      finishBoundMutation(attempt);
-      return result;
-    }, fail);
+      preparation instanceof Promise
+        ? continuePhysicalPromise<readonly EffectInstructionRuntime[], unknown>(
+            preparation,
+            (certified) => {
+              if (!certified) retainUnacknowledgedMutation(attempt);
+              return { fulfilled: dispatch };
+            },
+          ).promise
+        : dispatch(preparation);
+    try {
+      let replaceFinalCarrier = false;
+      const final = continuePhysicalPromise(running, (certified) => {
+        if (!certified) retainUnacknowledgedMutation(attempt);
+        const nativeObserver = certified && !attempt.unacknowledged;
+        replaceFinalCarrier = nativeObserver;
+        const succeeded = (result: unknown): unknown => {
+          if (!nativeObserver) {
+            finishBoundMutation(attempt);
+            return result;
+          }
+          try {
+            finishBoundMutation(attempt);
+            attempt.output.resolve(result);
+          } catch (error) {
+            attempt.output.reject(error);
+          }
+        };
+        const failed = (error: unknown): Promise<never> | void => {
+          if (nativeObserver) fail(error);
+          else {
+            cleanFailedMutation();
+            return Promise.reject(error);
+          }
+        };
+        return { fulfilled: succeeded, rejected: failed };
+      });
+      const completion = final.promise;
+      if (attempt.physical.active) attempt.physical.continuation = completion;
+      if (!replaceFinalCarrier) {
+        attempt.outputPhysical.original = completion;
+        attempt.output.resolve(undefined);
+        return completion;
+      }
+      return attempt.output.promise;
+    } catch (error) {
+      if (attempt.stage !== "prepare" && isObject(attempt.physical.original))
+        retainUnacknowledgedMutation(attempt);
+      throw error;
+    }
   } catch (error) {
-    return fail(error);
+    fail(error);
+    return attempt.output.promise;
   }
 }

@@ -6,7 +6,6 @@ import type {
   StoreRuntime,
 } from "./runtime.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
-import { addSignalAbort } from "../utils.ts";
 import { Fault } from "../fault.ts";
 import { AbortError, assertStoreOpen, reportContinuationError } from "./faults.ts";
 import {
@@ -20,15 +19,59 @@ import { interact, scheduleSweep, touch, updateCollectionCandidate } from "./col
 import { issue, nextGeneration, recordLanding, retirePredictions } from "./store-state.ts";
 
 import { beginBindingAddress, changeBoundAddress, endBindingAddress } from "./registry.ts";
+import {
+  beginPhysicalWork,
+  canReplacePhysicalCarrier,
+  createPhysicalCompletion,
+  finishPhysicalWork,
+  normalizePhysicalPromise,
+  physicalCleanup,
+} from "./retirement.ts";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const nativeApply = Reflect.apply;
+
+function linkCallerAbort<T>(
+  runtime: StoreRuntime<T>,
+  signal: AbortSignal | undefined,
+  controller: AbortController,
+): () => void {
+  if (signal === undefined) return () => undefined;
+  const abort = (): void => controller.abort(signal.reason);
+  const remove = (): void => signal.removeEventListener("abort", abort);
+  try {
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+    return remove;
+  } catch (error) {
+    try {
+      physicalCleanup(
+        runtime.binding?.context.retirement ?? runtime.graph.__runtime.retirement,
+        remove,
+      );
+    } catch (cleanupError) {
+      reportContinuationError(runtime.graph.__runtime, cleanupError);
+    }
+    throw error;
+  }
+}
 
 export function finishRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   if (request.settled) return false;
   request.settled = true;
   changeBoundAddress(runtime);
-  request.removeCallerAbort();
-  request.removeRequestAbort?.();
+  const owner = runtime.binding?.context.retirement ?? runtime.graph.__runtime.retirement;
+  let cleanupFailed = false;
+  let cleanupError: unknown;
+  for (const remove of [request.removeCallerAbort, request.removeRequestAbort]) {
+    if (remove === undefined) continue;
+    try {
+      physicalCleanup(owner, remove);
+    } catch (error) {
+      if (!cleanupFailed) cleanupError = error;
+      cleanupFailed = true;
+    }
+  }
   request.removeRequestAbort = undefined;
   runtime.graph.__runtime.activeControllers.delete(request.controller);
   runtime.requests.delete(request);
@@ -38,6 +81,7 @@ export function finishRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest
     request.generation === runtime.generation &&
     request.resetEpoch === runtime.graph.__runtime.resetEpoch;
   if (current) runtime.lastSettledAt = Date.now();
+  if (cleanupFailed) throw cleanupError;
   return current;
 }
 
@@ -152,14 +196,17 @@ export function startQueryRequest<T>(
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
   const state = runtime.graph.__runtime;
-  const resetEpoch = state.resetEpoch;
-  const entryIncarnation =
-    runtime.binding === undefined ? undefined : (expectedIncarnation ?? runtime.incarnation);
-  if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation) return undefined;
-  if ((force || isCurrentRequest(runtime) === undefined) && (force || !runtime.recoveryDisarmed))
-    nextGeneration(runtime.generation);
-  const admission = beginBindingAddress(runtime.binding, String(runtime.key));
+  const owner = runtime.binding?.context.retirement ?? state.retirement;
+  const acquisition = beginPhysicalWork(owner, "acquisition");
+  let admission: object | undefined;
   try {
+    const resetEpoch = state.resetEpoch;
+    const entryIncarnation =
+      runtime.binding === undefined ? undefined : (expectedIncarnation ?? runtime.incarnation);
+    if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation) return undefined;
+    if ((force || isCurrentRequest(runtime) === undefined) && (force || !runtime.recoveryDisarmed))
+      nextGeneration(runtime.generation);
+    admission = beginBindingAddress(runtime.binding, String(runtime.key));
     // Effects supply their ticket before interaction can collect or replace the entry.
     interact(state);
     if (runtime.binding !== undefined) {
@@ -204,7 +251,7 @@ export function startQueryRequest<T>(
     }
     const incarnation = runtime.incarnation;
     const controller = new AbortController();
-    const removeCallerAbort = addSignalAbort(abortSignal, controller);
+    const removeCallerAbort = linkCallerAbort(runtime, abortSignal, controller);
     if (
       runtime.binding !== undefined &&
       (runtime.disposed ||
@@ -212,7 +259,7 @@ export function startQueryRequest<T>(
         state.resetEpoch !== resetEpoch ||
         runtime.incarnation !== incarnation)
     ) {
-      removeCallerAbort();
+      physicalCleanup(owner, removeCallerAbort);
       assertStoreOpen(runtime);
       return undefined;
     }
@@ -221,7 +268,7 @@ export function startQueryRequest<T>(
       generation = issue(runtime);
     } catch (error) {
       try {
-        removeCallerAbort();
+        physicalCleanup(owner, removeCallerAbort);
       } catch (cleanupError) {
         reportContinuationError(state, cleanupError);
       }
@@ -300,9 +347,18 @@ export function startQueryRequest<T>(
       )
         settleQueryFailure(runtime, request, controller.signal.reason);
     };
-    controller.signal.addEventListener("abort", onRequestAbort, { once: true });
     request.removeRequestAbort = () =>
       controller.signal.removeEventListener("abort", onRequestAbort);
+    try {
+      controller.signal.addEventListener("abort", onRequestAbort, { once: true });
+    } catch (error) {
+      try {
+        finishRequest(runtime, request);
+      } catch (cleanupError) {
+        reportContinuationError(state, cleanupError);
+      }
+      throw error;
+    }
     if (controller.signal.aborted) onRequestAbort();
     if (request.resetEpoch !== state.resetEpoch || runtime.disposed) {
       settleQueryFailure(
@@ -314,6 +370,10 @@ export function startQueryRequest<T>(
       );
       return request;
     }
+    const original = beginPhysicalWork(owner, "query");
+    let fetched: unknown;
+    let fetchedReturned = false;
+    let acknowledged = true;
     let result: Promise<T>;
     try {
       const options = {
@@ -321,22 +381,53 @@ export function startQueryRequest<T>(
         graph: state.graph.id,
         key: runtime.key,
       };
-      result = Promise.resolve(caller.query.fetch(caller.input, options));
+      fetched = caller.query.fetch(caller.input, options);
+      fetchedReturned = true;
+      original.original = fetched;
+      result = normalizePhysicalPromise(fetched as T | PromiseLike<T>);
     } catch (error) {
-      result = Promise.reject(error);
+      if (
+        fetchedReturned &&
+        fetched !== null &&
+        (typeof fetched === "object" || typeof fetched === "function")
+      )
+        acknowledged = false;
+      const rejected = createPhysicalCompletion<T>();
+      rejected.reject(error);
+      result = rejected.promise;
     }
-    request.promise = result.then(
-      (value) => {
-        settleQuerySuccess(runtime, request, value);
-      },
-      (error) => {
-        settleQueryFailure(runtime, request, error);
-      },
-    );
+    try {
+      const observer = result.then;
+      if (!canReplacePhysicalCarrier(result, observer)) acknowledged = false;
+      request.promise = nativeApply(observer, result, [
+        (value: T) => {
+          try {
+            settleQuerySuccess(runtime, request, value);
+          } finally {
+            if (acknowledged) finishPhysicalWork(original);
+          }
+        },
+        (error: unknown) => {
+          try {
+            settleQueryFailure(runtime, request, error);
+          } finally {
+            if (acknowledged) finishPhysicalWork(original);
+          }
+        },
+      ]) as Promise<void>;
+    } catch (error) {
+      original.original = fetched;
+      throw error;
+    }
+    if (original.active) original.continuation = request.promise;
     if (setupFailed) throw setupError;
     return request;
   } finally {
-    endBindingAddress(runtime.binding, String(runtime.key), admission);
+    try {
+      endBindingAddress(runtime.binding, String(runtime.key), admission);
+    } finally {
+      finishPhysicalWork(acquisition);
+    }
   }
 }
 

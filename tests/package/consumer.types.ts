@@ -12,6 +12,7 @@ import {
   storeKey,
   type BoundStreamSession,
   type BoundAddressStamp,
+  type BindingContext,
   profileEffect,
   predictionFor,
   type BindingMutationOptions,
@@ -66,6 +67,10 @@ import {
   type StreamSnapshotAddressV2,
   withoutWrites,
 } from "aeolia";
+import type {
+  BindingContext as ContractBindingContext,
+  Graph as ContractGraph,
+} from "aeolia/contract";
 import { testBackend } from "aeolia/testing";
 
 const backend = testBackend();
@@ -795,3 +800,23 @@ function transferSnapshotTypesOnly(): void {
 }
 
 void transferSnapshotTypesOnly;
+
+function publicRetirementTypes(
+  graph: Graph,
+  context: BindingContext,
+  contractGraph: ContractGraph,
+  contractContext: ContractBindingContext,
+): void {
+  const rootGraphRetirement: Promise<void> = graph.retire();
+  const rootContextRetirement: Promise<void> = context.retire();
+  const contractGraphRetirement: Promise<void> = contractGraph.retire();
+  const contractContextRetirement: Promise<void> = contractContext.retire();
+  void [
+    rootGraphRetirement,
+    rootContextRetirement,
+    contractGraphRetirement,
+    contractContextRetirement,
+  ];
+}
+
+void publicRetirementTypes;

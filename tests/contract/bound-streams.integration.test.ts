@@ -25,6 +25,25 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
+async function expectPending(promise: Promise<unknown>): Promise<void> {
+  jest.useRealTimers();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      promise.then(
+        () => "settled",
+        () => "settled",
+      ),
+      new Promise<"pending">((resolve) => {
+        timer = setTimeout(() => resolve("pending"), 0);
+      }),
+    ]);
+    expect(result).toBe("pending");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 function fixture() {
   const backend = testBackend();
   const signals: AbortSignal[] = [];
@@ -325,10 +344,15 @@ describe("genuine context-bound stream sessions", () => {
   );
 
   it("holds B through native retirement while logical detachment does not await physical return", async () => {
-    const physical = Promise.withResolvers<IteratorResult<number>>();
+    const physical = [
+      Promise.withResolvers<IteratorResult<number>>(),
+      Promise.withResolvers<IteratorResult<number>>(),
+    ];
     const firstNext = Promise.withResolvers<IteratorResult<number>>();
-    const returned = Promise.withResolvers<void>();
+    const secondNext = Promise.withResolvers<IteratorResult<number>>();
+    const returned = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
     let opens = 0;
+    let returnCalls = 0;
     let reentry: unknown;
     let acquire = (): void => undefined;
     const stream = createStream({
@@ -339,19 +363,25 @@ describe("genuine context-bound stream sessions", () => {
         const own = opens;
         return {
           [Symbol.asyncIterator]() {
+            let nextCalls = 0;
             return {
-              next: () =>
-                own === 1
-                  ? firstNext.promise
-                  : new Promise<IteratorResult<number>>(() => undefined),
+              next: () => {
+                nextCalls += 1;
+                if (own === 1)
+                  return nextCalls === 1
+                    ? firstNext.promise
+                    : Promise.resolve({ done: true as const, value: undefined });
+                return secondNext.promise;
+              },
               return: () => {
-                returned.resolve();
+                returnCalls += 1;
+                returned[own - 1]!.resolve();
                 try {
                   acquire();
                 } catch (cause) {
                   reentry = cause;
                 }
-                return physical.promise;
+                return physical[own - 1]!.promise;
               },
             };
           },
@@ -361,16 +391,17 @@ describe("genuine context-bound stream sessions", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "slow-return", operations: { stream } }),
     });
+    const context = createBindingContext(graph);
     try {
       const binding = bindStream(graph, stream, graph.api.stream, {
-        context: createBindingContext(graph),
+        context,
       });
       const a = binding.member(undefined, { initial: 1 });
       acquire = () => {
         binding.member();
       };
       graph.cancelPending();
-      await returned.promise;
+      await returned[0]!.promise;
       const receipt = await binding.session(a).detached;
       expect(reentry).toBeInstanceOf(TypeError);
       expect(opens).toBe(1);
@@ -385,11 +416,23 @@ describe("genuine context-bound stream sessions", () => {
       firstNext.resolve({ done: false, value: 77 });
       await delivery;
       expect(b.value.get()).toBeUndefined();
-      physical.resolve({ done: true, value: undefined });
+      physical[0]!.resolve({ done: true, value: undefined });
+      await physical[0]!.promise;
       expect(a.value.get()).toBe(1);
+
+      const retirement = context.retire();
+      expect(context.retire()).toBe(retirement);
+      await expectPending(retirement);
+      expect(returnCalls).toBe(2);
+      secondNext.resolve({ done: true, value: undefined });
+      physical[1]!.resolve({ done: true, value: undefined });
+      await retirement;
     } finally {
       acquire = () => undefined;
-      physical.resolve({ done: true, value: undefined });
+      firstNext.resolve({ done: true, value: undefined });
+      secondNext.resolve({ done: true, value: undefined });
+      physical[0]!.resolve({ done: true, value: undefined });
+      physical[1]!.resolve({ done: true, value: undefined });
       graph.dispose();
     }
   });

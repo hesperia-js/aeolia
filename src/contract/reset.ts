@@ -6,6 +6,12 @@ import { retireObservation } from "./observation-state.ts";
 import { nextValueRevision } from "./identity.ts";
 import { callerForSource, startQueryRequest } from "./query-request.ts";
 import { openStream } from "./stream.ts";
+import {
+  beginPhysicalWork,
+  finishPhysicalWork,
+  observePhysicalWork,
+  physicalCleanup,
+} from "./retirement.ts";
 import type { Contract } from "./types.ts";
 import type {
   GraphResetOperation,
@@ -41,8 +47,17 @@ function detachRequest<C extends Contract>(
   if (request.settled) return undefined;
   request.superseded = true;
   request.settled = true;
-  request.removeCallerAbort();
-  request.removeRequestAbort?.();
+  const owner = runtime.binding?.context.retirement ?? state.retirement;
+  const failures: unknown[] = [];
+  for (const remove of [request.removeCallerAbort, request.removeRequestAbort]) {
+    if (remove === undefined) continue;
+    try {
+      physicalCleanup(owner, remove);
+    } catch (cause) {
+      failures.push(cause);
+    }
+  }
+  if (failures.length !== 0) throw failures[0];
   request.removeRequestAbort = undefined;
   request.outcomeReported = true;
   request.resolveOutcome({ ok: false, error: reason });
@@ -203,7 +218,8 @@ function awaitOutcomes<C extends Contract>(
     if (signal.aborted) rejectCancellation(signal.reason);
     else signal.addEventListener("abort", () => rejectCancellation(signal.reason), { once: true });
   });
-  void Promise.race([promise, cancellation]).then(
+  const physical = beginPhysicalWork(state.retirement, "acquisition");
+  const completion = Promise.race([promise, cancellation]).then(
     () => {
       if (!currentOperation(state, operation)) return;
       state.resetOperation = undefined;
@@ -218,187 +234,192 @@ function awaitOutcomes<C extends Contract>(
       reject(error);
     },
   );
+  observePhysicalWork(physical, completion);
 }
 
 export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Promise<void> {
   assertGraphOpen(state);
   reactiveInternal.assertWritesAllowed(state.resetVersion);
-
-  const generations = new Map(
-    [...state.stores.values()]
-      .filter((runtime) => !runtime.disposed)
-      .map((runtime) => [runtime, nextGeneration(runtime.generation)] as const),
-  );
-  const revisions = new Map(
-    [...state.stores.values()].map(
-      (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
-    ),
-  );
-
-  const queries: ActiveQuery<unknown>[] = [];
-  const streams: ActiveStream<unknown>[] = [];
-  for (const runtime of state.stores.values()) {
-    if (!isLive(runtime)) continue;
-    if (runtime.source !== undefined)
-      queries.push({
-        runtime,
-        caller: callerForSource(runtime, runtime.source),
-      });
-    if (runtime.binding?.kind !== "stream" && runtime.streamSource !== undefined)
-      streams.push({ runtime, source: runtime.streamSource, key: runtime.key });
-  }
-  const projections = [...state.projections];
-
-  const previous = state.resetOperation;
-  const epoch = state.resetEpoch + 1;
-  state.resetEpoch = epoch;
-  for (const context of state.bindingContexts) {
-    for (const profiles of context.bindings.values())
-      for (const binding of profiles.values()) binding.addresses.clear();
-    for (const members of context.streamBindings.values())
-      for (const binding of members.values()) binding.addresses.clear();
-  }
-  for (const runtime of state.stores.values())
-    if (
-      !runtime.disposed &&
-      runtime.binding?.kind !== "stream" &&
-      (runtime.binding === undefined ? !runtime.dropped : runtime.incarnation !== undefined)
-    )
-      runtime.incarnation = {};
-  for (const [runtime, revision] of revisions) runtime.valueRevision = revision;
-  for (const [runtime, generation] of generations) runtime.generation = generation;
-  for (const runtime of state.stores.values()) runtime.transitioning = true;
-  let resolvePromise!: () => void;
-  let rejectPromise!: (error: unknown) => void;
-  let settled = false;
-  const promise = new Promise<void>((resolve, reject) => {
-    resolvePromise = resolve;
-    rejectPromise = reject;
-  });
-  const controller = new AbortController();
-  const operation: GraphResetOperation = {
-    epoch,
-    signal: controller.signal,
-    reject(error) {
-      if (settled) return;
-      settled = true;
-      rejectPromise(error);
-    },
-    abort(reason) {
-      if (!controller.signal.aborted) controller.abort(reason);
-    },
-  };
-  state.resetOperation = operation;
-  previous?.reject(new AbortError("A newer graph reset superseded this reset."));
-
-  const oldControllers: AbortController[] = [];
-  const streamCleanup: Array<() => void> = [];
-  const projectionCleanup: Array<() => void> = [];
+  const physical = beginPhysicalWork(state.retirement, "acquisition");
   try {
-    reactiveInternal.batch(() => {
-      for (const runtime of state.stores.values()) retireObservation(runtime);
-      for (const runtime of state.stores.values()) {
-        if (!currentOperation(state, operation)) return;
-        for (const request of runtime.requests) {
-          const detached = detachRequest(
-            state,
-            runtime,
-            request,
-            new AbortError("A graph reset canceled this query request."),
-          );
-          if (detached !== undefined) oldControllers.push(detached);
-        }
-        runtime.requests.clear();
-        runtime.activeRequest = undefined;
-        const session = runtime.stream;
-        if (session !== undefined && !session.ended) {
-          const cleanup = endStream(runtime, session, "closed", undefined, {
-            abortReason: new AbortError("A graph reset canceled work from the previous state."),
-            deferCleanup: true,
-          });
-          if (cleanup !== undefined) streamCleanup.push(cleanup);
-        }
-        if (runtime.binding?.kind === "stream" && runtime.incarnation !== undefined) {
-          runtime.incarnation = {};
-          runtime.streamSource = undefined;
-        }
-      }
-      oldControllers.push(...state.activeControllers);
-      state.activeControllers.clear();
+    const generations = new Map(
+      [...state.stores.values()]
+        .filter((runtime) => !runtime.disposed)
+        .map((runtime) => [runtime, nextGeneration(runtime.generation)] as const),
+    );
+    const revisions = new Map(
+      [...state.stores.values()].map(
+        (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
+      ),
+    );
 
-      for (const projection of projections) {
-        if (!currentOperation(state, operation)) return;
-        try {
-          const cleanup = projection.reset();
-          if (cleanup !== undefined) projectionCleanup.push(cleanup);
-        } catch (error) {
-          reportContinuationError(state, error);
-        }
-      }
-      for (const runtime of state.stores.values()) {
-        if (!currentOperation(state, operation)) return;
-        const generation = generations.get(runtime);
-        if (generation === undefined) continue;
-        try {
-          clearRuntime(runtime, () => currentOperation(state, operation), generation);
-        } catch (error) {
-          reportContinuationError(state, error);
-        }
-      }
-      if (currentOperation(state, operation))
-        for (const runtime of state.stores.values()) runtime.transitioning = false;
-      if (currentOperation(state, operation)) state.resetVersion.set(epoch);
+    const queries: ActiveQuery<unknown>[] = [];
+    const streams: ActiveStream<unknown>[] = [];
+    for (const runtime of state.stores.values()) {
+      if (!isLive(runtime)) continue;
+      if (runtime.source !== undefined)
+        queries.push({
+          runtime,
+          caller: callerForSource(runtime, runtime.source),
+        });
+      if (runtime.binding?.kind !== "stream" && runtime.streamSource !== undefined)
+        streams.push({ runtime, source: runtime.streamSource, key: runtime.key });
+    }
+    const projections = [...state.projections];
+
+    const previous = state.resetOperation;
+    const epoch = state.resetEpoch + 1;
+    state.resetEpoch = epoch;
+    for (const context of state.bindingContexts) {
+      for (const profiles of context.bindings.values())
+        for (const binding of profiles.values()) binding.addresses.clear();
+      for (const members of context.streamBindings.values())
+        for (const binding of members.values()) binding.addresses.clear();
+    }
+    for (const runtime of state.stores.values())
+      if (
+        !runtime.disposed &&
+        runtime.binding?.kind !== "stream" &&
+        (runtime.binding === undefined ? !runtime.dropped : runtime.incarnation !== undefined)
+      )
+        runtime.incarnation = {};
+    for (const [runtime, revision] of revisions) runtime.valueRevision = revision;
+    for (const [runtime, generation] of generations) runtime.generation = generation;
+    for (const runtime of state.stores.values()) runtime.transitioning = true;
+    let resolvePromise!: () => void;
+    let rejectPromise!: (error: unknown) => void;
+    let settled = false;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
     });
-  } catch (error) {
-    reportContinuationError(state, error);
-  }
+    const controller = new AbortController();
+    const operation: GraphResetOperation = {
+      epoch,
+      signal: controller.signal,
+      reject(error) {
+        if (settled) return;
+        settled = true;
+        rejectPromise(error);
+      },
+      abort(reason) {
+        if (!controller.signal.aborted) controller.abort(reason);
+      },
+    };
+    state.resetOperation = operation;
+    previous?.reject(new AbortError("A newer graph reset superseded this reset."));
 
-  previous?.abort(new AbortError("A newer graph reset superseded this reset."));
-  for (const controller of oldControllers)
-    controller.abort(new AbortError("A graph reset canceled work from the previous state."));
-  for (const cleanup of [...streamCleanup, ...projectionCleanup]) {
+    const oldControllers: AbortController[] = [];
+    const streamCleanup: Array<() => void> = [];
+    const projectionCleanup: Array<() => void> = [];
     try {
-      cleanup();
+      reactiveInternal.batch(() => {
+        for (const runtime of state.stores.values()) retireObservation(runtime);
+        for (const runtime of state.stores.values()) {
+          if (!currentOperation(state, operation)) return;
+          for (const request of runtime.requests) {
+            const detached = detachRequest(
+              state,
+              runtime,
+              request,
+              new AbortError("A graph reset canceled this query request."),
+            );
+            if (detached !== undefined) oldControllers.push(detached);
+          }
+          runtime.requests.clear();
+          runtime.activeRequest = undefined;
+          const session = runtime.stream;
+          if (session !== undefined && !session.ended) {
+            const cleanup = endStream(runtime, session, "closed", undefined, {
+              abortReason: new AbortError("A graph reset canceled work from the previous state."),
+              deferCleanup: true,
+            });
+            if (cleanup !== undefined) streamCleanup.push(cleanup);
+          }
+          if (runtime.binding?.kind === "stream" && runtime.incarnation !== undefined) {
+            runtime.incarnation = {};
+            runtime.streamSource = undefined;
+          }
+        }
+        oldControllers.push(...state.activeControllers);
+        state.activeControllers.clear();
+
+        for (const projection of projections) {
+          if (!currentOperation(state, operation)) return;
+          try {
+            const cleanup = projection.reset();
+            if (cleanup !== undefined) projectionCleanup.push(cleanup);
+          } catch (error) {
+            reportContinuationError(state, error);
+          }
+        }
+        for (const runtime of state.stores.values()) {
+          if (!currentOperation(state, operation)) return;
+          const generation = generations.get(runtime);
+          if (generation === undefined) continue;
+          try {
+            clearRuntime(runtime, () => currentOperation(state, operation), generation);
+          } catch (error) {
+            reportContinuationError(state, error);
+          }
+        }
+        if (currentOperation(state, operation))
+          for (const runtime of state.stores.values()) runtime.transitioning = false;
+        if (currentOperation(state, operation)) state.resetVersion.set(epoch);
+      });
     } catch (error) {
       reportContinuationError(state, error);
     }
-  }
 
-  if (!currentOperation(state, operation)) return promise;
-
-  dispatchStreams(state, operation, streams);
-  if (!currentOperation(state, operation)) return promise;
-  for (const projection of projections) {
-    try {
-      projection.restart();
-    } catch (error) {
-      reportContinuationError(state, error);
+    previous?.abort(new AbortError("A newer graph reset superseded this reset."));
+    for (const controller of oldControllers)
+      controller.abort(new AbortError("A graph reset canceled work from the previous state."));
+    for (const cleanup of [...streamCleanup, ...projectionCleanup]) {
+      try {
+        cleanup();
+      } catch (error) {
+        reportContinuationError(state, error);
+      }
     }
+
     if (!currentOperation(state, operation)) return promise;
-  }
 
-  const work: ResetWork = { requests: [], failures: [] };
-  dispatchQueries(state, operation, queries, work);
-  const outcomes = Promise.all(work.requests.map((request) => request.outcome)).then(
-    (settlements) => {
-      work.failures.push(
-        ...settlements.flatMap((settlement) => (settlement.ok ? [] : [settlement.error])),
-      );
-    },
-  );
-  awaitOutcomes(
-    state,
-    operation,
-    work,
-    outcomes,
-    () => {
-      if (settled) return;
-      settled = true;
-      resolvePromise();
-    },
-    (error) => {
-      operation.reject(error);
-    },
-  );
-  return promise;
+    dispatchStreams(state, operation, streams);
+    if (!currentOperation(state, operation)) return promise;
+    for (const projection of projections) {
+      try {
+        projection.restart();
+      } catch (error) {
+        reportContinuationError(state, error);
+      }
+      if (!currentOperation(state, operation)) return promise;
+    }
+
+    const work: ResetWork = { requests: [], failures: [] };
+    dispatchQueries(state, operation, queries, work);
+    const outcomes = Promise.all(work.requests.map((request) => request.outcome)).then(
+      (settlements) => {
+        work.failures.push(
+          ...settlements.flatMap((settlement) => (settlement.ok ? [] : [settlement.error])),
+        );
+      },
+    );
+    awaitOutcomes(
+      state,
+      operation,
+      work,
+      outcomes,
+      () => {
+        if (settled) return;
+        settled = true;
+        resolvePromise();
+      },
+      (error) => {
+        operation.reject(error);
+      },
+    );
+    return promise;
+  } finally {
+    finishPhysicalWork(physical);
+  }
 }

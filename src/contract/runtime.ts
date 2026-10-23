@@ -21,6 +21,7 @@ import type { Fault, Unsubscribe } from "../fault.ts";
 import type { Computed, WritableSignal } from "../reactive.ts";
 import type { BindingContext } from "./query-binding.ts";
 import type { BoundStreamSession, StreamDetachment } from "./stream-binding.ts";
+import type { PhysicalWork, RetirementOwner } from "./retirement.ts";
 
 export type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -69,6 +70,7 @@ export interface QueryRequest {
 export type QueryOutcome = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
 
 export interface StreamSession<T> {
+  readonly physical: PhysicalWork;
   readonly controller: AbortController;
   readonly token: object;
   /** Reset identity under which this session was opened. */
@@ -200,6 +202,7 @@ export interface GraphRuntime<C extends Contract> extends Graph<C> {
 }
 
 export interface GraphRuntimeState<C extends Contract> {
+  readonly retirement: RetirementOwner;
   readonly graph: GraphRuntime<C>;
   readonly namespace: string;
   readonly idleMs: number;
@@ -225,6 +228,7 @@ export interface GraphRuntimeState<C extends Contract> {
 }
 
 export interface BindingContextRuntime {
+  readonly retirement: RetirementOwner;
   readonly state: GraphRuntimeState<any>;
   readonly handle: BindingContext;
   readonly activeCell: WritableSignal<boolean>;

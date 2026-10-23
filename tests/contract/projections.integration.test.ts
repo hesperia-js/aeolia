@@ -22,6 +22,25 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
+async function expectPending(promise: Promise<unknown>): Promise<void> {
+  jest.useRealTimers();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      promise.then(
+        () => "settled",
+        () => "settled",
+      ),
+      new Promise<"pending">((resolve) => {
+        timer = setTimeout(() => resolve("pending"), 0);
+      }),
+    ]);
+    expect(result).toBe("pending");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
@@ -68,9 +87,11 @@ describe("stream projections", () => {
       const sources: Array<{
         signal: AbortSignal;
         read: ReturnType<typeof Promise.withResolvers<IteratorResult<number>>>;
+        close: ReturnType<typeof Promise.withResolvers<IteratorResult<number>>>;
         returns: number;
         nextCalls: number;
       }> = [];
+      const queryRead = Promise.withResolvers<number>();
       let nestedReset: Promise<void> | undefined;
       let reenter = false;
       const stream = createStream({
@@ -80,6 +101,7 @@ describe("stream projections", () => {
           const source = {
             signal: options.abortSignal,
             read: Promise.withResolvers<IteratorResult<number>>(),
+            close: Promise.withResolvers<IteratorResult<number>>(),
             returns: 0,
             nextCalls: 0,
           };
@@ -89,6 +111,8 @@ describe("stream projections", () => {
               return {
                 next: () => {
                   source.nextCalls += 1;
+                  if (source.returns > 0)
+                    return Promise.resolve({ done: true as const, value: undefined });
                   if (source.nextCalls > 1)
                     source.read = Promise.withResolvers<IteratorResult<number>>();
                   return source.read.promise;
@@ -99,7 +123,7 @@ describe("stream projections", () => {
                     reenter = false;
                     nestedReset = graph.reset();
                   }
-                  return Promise.resolve({ done: true as const, value: undefined });
+                  return source.close.promise;
                 },
               };
             },
@@ -119,7 +143,7 @@ describe("stream projections", () => {
             },
             { once: true },
           );
-          return new Promise<number>(() => undefined);
+          return queryRead.promise;
         },
       });
       const graph = createGraph({
@@ -170,7 +194,21 @@ describe("stream projections", () => {
         expect(projection.status.get()).toBe("closed");
         expect(projection.value.get()).toEqual([7]);
         expect(projection.error.get()).toBeUndefined();
+        queryRead.resolve(1);
+        const retirement = graph.retire();
+        await expectPending(retirement);
+        expect(sources.map((source) => source.returns)).toEqual([1, 1]);
+        sources[1]!.read.resolve({ done: true, value: undefined });
+        sources[1]!.close.resolve({ done: true, value: undefined });
+        await expectPending(retirement);
+        sources[0]!.close.resolve({ done: true, value: undefined });
+        await retirement;
       } finally {
+        queryRead.resolve(1);
+        for (const source of sources) {
+          source.read.resolve({ done: true, value: undefined });
+          source.close.resolve({ done: true, value: undefined });
+        }
         graph.dispose();
       }
       expect(sources.map((source) => source.returns)).toEqual([1, 1]);

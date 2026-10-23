@@ -73,6 +73,15 @@ import { configureKeyedValue, issue, nextGeneration } from "./store-state.ts";
 import { boundAddressOccupied } from "./binding-address.ts";
 import { writeAllStatuses } from "./status.ts";
 import { resetGraph } from "./reset.ts";
+import {
+  beginPhysicalWork,
+  createRetirementOwner,
+  finishPhysicalWork,
+  physicalCleanup,
+  recordCleanupFailure,
+  retireOwner,
+  type PhysicalWork,
+} from "./retirement.ts";
 
 /** @internal Default keyed-store retention period, in milliseconds. */
 export const DEFAULT_IDLE_MS = 300_000;
@@ -435,26 +444,38 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
       if (value.kind === "query") {
         state.queryDefinitions.add(value);
         api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) => {
-          const [input, options] = args;
-          const call = normalizeQueryCall(input, options, args.length > 1);
-          return makeQueryStore(
-            state,
-            value as QueryDefinition<unknown, unknown, any>,
-            call.input,
-            call.options,
-          );
+          assertGraphOpen(state);
+          const physical = beginPhysicalWork(state.retirement, "acquisition");
+          try {
+            const [input, options] = args;
+            const call = normalizeQueryCall(input, options, args.length > 1);
+            return makeQueryStore(
+              state,
+              value as QueryDefinition<unknown, unknown, any>,
+              call.input,
+              call.options,
+            );
+          } finally {
+            finishPhysicalWork(physical);
+          }
         };
       } else if (value.kind === "mutation") {
         state.mutationDefinitions.add(value);
         api[property] = (...args: [input?: unknown, options?: MutationOptions]) => {
-          const [input, options] = args;
-          const call = normalizeMutationCall(input, options, args.length > 1);
-          return runMutation(
-            state,
-            value as MutationDefinition<unknown, unknown>,
-            call.input,
-            call.options,
-          );
+          assertGraphOpen(state);
+          const physical = beginPhysicalWork(state.retirement, "acquisition");
+          try {
+            const [input, options] = args;
+            const call = normalizeMutationCall(input, options, args.length > 1);
+            return runMutation(
+              state,
+              value as MutationDefinition<unknown, unknown>,
+              call.input,
+              call.options,
+            );
+          } finally {
+            finishPhysicalWork(physical);
+          }
         };
       } else {
         const definition = value as StreamDefinition<unknown, unknown, any>;
@@ -570,9 +591,29 @@ function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?:
 }
 
 /** @internal Revokes a binding branch through the native graph/store owners. */
-export function disposeBindingContextRuntime(context: BindingContextRuntime): void {
+export function disposeBindingContextRuntime(
+  context: BindingContextRuntime,
+  physical?: PhysicalWork,
+): void {
   if (context.disposed) return;
   reactiveInternal.assertWritesAllowed(context.activeCell);
+  const work = physical ?? beginPhysicalWork(context.retirement, "cleanup");
+  try {
+    disposeBindingContext(context);
+  } catch (cause) {
+    recordCleanupFailure(work, cause);
+    throw cause;
+  } finally {
+    finishPhysicalWork(work);
+  }
+}
+
+/** @internal Genuine context closure, including work removed by prior disposal. */
+export function retireBindingContextRuntime(context: BindingContextRuntime): Promise<void> {
+  return retireOwner(context.retirement, (work) => disposeBindingContextRuntime(context, work));
+}
+
+function disposeBindingContext(context: BindingContextRuntime): void {
   const state = context.state;
   const stores = [
     ...[...context.bindings.values()].flatMap((profiles) =>
@@ -601,9 +642,10 @@ export function disposeBindingContextRuntime(context: BindingContextRuntime): vo
     updateCollectionCandidate(runtime);
   }
   armCollectionTimer(state);
-  const attempt = (action: () => void): void => {
+  const attempt = (action: () => void, alreadyOwned = false): void => {
     try {
-      action();
+      if (alreadyOwned) action();
+      else physicalCleanup(context.retirement, action);
     } catch (error) {
       reportContinuationError(state, error);
     }
@@ -624,7 +666,7 @@ export function disposeBindingContextRuntime(context: BindingContextRuntime): vo
     if (session !== undefined && runtime.binding?.kind === "stream")
       attempt(() => {
         endStream(runtime, session, "closed", new Fault("disposed", [String(state.graph.id)]));
-      });
+      }, true);
     if (runtime.timer !== undefined) clearTimeout(runtime.timer);
     runtime.timer = undefined;
     runtime.source = undefined;
@@ -639,7 +681,7 @@ export function disposeBindingContextRuntime(context: BindingContextRuntime): vo
       state.activeControllers.delete(request.controller);
       attempt(() => {
         finishRequest(runtime, request);
-      });
+      }, true);
       if (!request.outcomeReported) {
         request.outcomeReported = true;
         request.resolveOutcome({ ok: false, error: reason });
@@ -662,8 +704,32 @@ export function disposeBindingContextRuntime(context: BindingContextRuntime): vo
   }
 }
 
-function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
+function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>, physical?: PhysicalWork): void {
   if (state.disposed) return;
+  const work = physical ?? beginPhysicalWork(state.retirement, "cleanup");
+  try {
+    disposeGraphContents(state, physical !== undefined);
+  } catch (cause) {
+    recordCleanupFailure(work, cause);
+    throw cause;
+  } finally {
+    finishPhysicalWork(work);
+  }
+}
+
+function disposeGraphContents<C extends Contract>(state: GraphRuntimeState<C>, retiring: boolean): void {
+  const attempt = (action: () => void, alreadyOwned = false): void => {
+    if (!retiring) {
+      action();
+      return;
+    }
+    try {
+      if (alreadyOwned) action();
+      else physicalCleanup(state.retirement, action);
+    } catch (cause) {
+      reportContinuationError(state, cause);
+    }
+  };
   const revisions = new Map(
     [...state.stores.values()].map(
       (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
@@ -671,20 +737,23 @@ function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
   );
   state.disposed = true;
   try {
-    reactiveInternal.batch(() => {
-      for (const [runtime, revision] of revisions) {
-        runtime.valueRevision = revision;
-        retireObservation(runtime);
-      }
-    });
+    physicalCleanup(state.retirement, () =>
+      reactiveInternal.batch(() => {
+        for (const [runtime, revision] of revisions) {
+          runtime.valueRevision = revision;
+          retireObservation(runtime);
+        }
+      }),
+    );
   } catch (error) {
     reportContinuationError(state, error);
   }
-  for (const context of [...state.bindingContexts]) disposeBindingContextRuntime(context);
-  state.resetOperation?.reject(new Fault("disposed", []));
-  state.resetOperation?.abort(new Fault("disposed", []));
+  for (const context of [...state.bindingContexts])
+    attempt(() => disposeBindingContextRuntime(context), true);
+  attempt(() => state.resetOperation?.reject(new Fault("disposed", [])));
+  attempt(() => state.resetOperation?.abort(new Fault("disposed", [])));
   state.resetOperation = undefined;
-  state.stopAbort?.();
+  attempt(() => state.stopAbort?.());
   state.stopAbort = undefined;
   if (state.collectionTimer != null) clearTimeout(state.collectionTimer);
   state.collectionTimer = undefined;
@@ -700,8 +769,8 @@ function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
   for (const runtime of state.stores.values()) {
     if (runtime.timer != null) clearTimeout(runtime.timer);
     runtime.timer = undefined;
-    for (const stop of runtime.livenessStops) stop();
-    for (const stop of runtime.readStops) stop();
+    for (const stop of runtime.livenessStops) attempt(stop);
+    for (const stop of runtime.readStops) attempt(stop);
     runtime.livenessStops.length = 0;
     runtime.readStops.length = 0;
     const stream = runtime.stream;
@@ -716,15 +785,17 @@ function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
     runtime.incarnation = undefined;
     runtime.collectionIndex = -1;
     try {
-      reactiveInternal.batch(() => {
-        runtime.presence.set(false);
-        runtime.lifecycle.update((value) => value + 1);
-      });
+      physicalCleanup(runtime.binding?.context.retirement ?? state.retirement, () =>
+        reactiveInternal.batch(() => {
+          runtime.presence.set(false);
+          runtime.lifecycle.update((value) => value + 1);
+        }),
+      );
     } catch (error) {
       reportContinuationError(state, error);
     }
   }
-  for (const controller of Array.from(state.activeControllers)) controller.abort();
+  for (const controller of Array.from(state.activeControllers)) attempt(() => controller.abort());
   state.activeControllers.clear();
   __unregisterFaultChannel(state.graph);
   state.faultObservers.clear();
@@ -751,6 +822,7 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
   const id = allocateGraphId();
   const graph = {} as GraphRuntime<C>;
   const state: GraphRuntimeState<C> = {
+    retirement: createRetirementOwner(),
     graph,
     namespace: options.contract.namespace,
     idleMs,
@@ -802,19 +874,48 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     store: graphStore,
     at: graphAt,
     dispose: () => disposeGraph(state),
+    retire: () =>
+      retireOwner(state.retirement, (work) => {
+        if (!state.disposed) {
+          reactiveInternal.assertWritesAllowed(state.resetVersion);
+          for (const context of state.bindingContexts)
+            reactiveInternal.assertWritesAllowed(context.activeCell);
+        }
+        disposeGraph(state, work);
+      }),
   });
   graphRuntimeByGraph.set(graph, state);
   __registerFaultChannel(graph, onFault);
-  const abortSignal = options.abortSignal;
-  if (abortSignal != null) {
-    if (abortSignal.aborted) disposeGraph(state);
-    else {
-      const abort = (): void => disposeGraph(state);
-      abortSignal.addEventListener("abort", abort, { once: true });
-      state.stopAbort = () => abortSignal.removeEventListener("abort", abort);
+  const acquisition = beginPhysicalWork(state.retirement, "acquisition");
+  try {
+    const abortSignal = options.abortSignal;
+    if (abortSignal != null) {
+      if (abortSignal.aborted || state.disposed) disposeGraph(state);
+      else {
+        const abort = (): void => disposeGraph(state);
+        const stop = (): void => abortSignal.removeEventListener("abort", abort);
+        state.stopAbort = stop;
+        try {
+          abortSignal.addEventListener("abort", abort, { once: true });
+        } catch (cause) {
+          state.stopAbort = undefined;
+          try {
+            physicalCleanup(state.retirement, stop);
+          } catch (cleanupCause) {
+            reportContinuationError(state, cleanupCause);
+          }
+          throw cause;
+        }
+        if (state.disposed) {
+          state.stopAbort = undefined;
+          physicalCleanup(state.retirement, stop);
+        }
+      }
     }
+    return graph;
+  } finally {
+    finishPhysicalWork(acquisition);
   }
-  return graph;
 }
 
 /** @internal Integration surface shared by Aeolia's graph-adjacent modules. */

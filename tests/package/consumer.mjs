@@ -32,6 +32,24 @@ function check(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+async function expectPending(promise, message) {
+  let timer;
+  try {
+    const result = await Promise.race([
+      promise.then(
+        () => "settled",
+        () => "settled",
+      ),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve("pending"), 0);
+      }),
+    ]);
+    check(result === "pending", message);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export async function verifyConsumer() {
   await verifyTransferConsumer();
   await verifyBoundConsumer();
@@ -69,6 +87,8 @@ export async function verifyConsumer() {
   const store = graph.api.item("one");
   const observed = [];
   const stop = subscribe(store, (value) => observed.push(value));
+  let retirementCall;
+  let retirementCallResolved = false;
   try {
     backend.resolve(pending("item.get"), "initial");
     check((await store.ready) === "initial", "Packed query did not resolve");
@@ -93,6 +113,7 @@ export async function verifyConsumer() {
 
     const refreshing = store.revalidate();
     const call = pending("item.get");
+    retirementCall = call;
     const disposedRead = store.ready.then(
       () => {
         throw new Error("Disposed query readiness unexpectedly resolved");
@@ -102,11 +123,18 @@ export async function verifyConsumer() {
     );
     graph.dispose();
     check(call.aborted, "Disposal did not abort the backend request");
+    const retirement = graph.retire();
+    check(graph.retire() === retirement, "Graph retirement did not return its cached promise");
     await disposedRead;
+    await expectPending(retirement, "Graph retirement completed before the original fetch");
     backend.resolve(call, "late response");
+    retirementCallResolved = true;
     await refreshing;
+    await retirement;
     check(!observed.includes("late response"), "Disposed graph published a late response");
   } finally {
+    if (retirementCall !== undefined && !retirementCallResolved)
+      backend.resolve(retirementCall, "late response");
     stop();
     graph.dispose();
   }

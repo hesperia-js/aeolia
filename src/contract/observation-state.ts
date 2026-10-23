@@ -1,6 +1,7 @@
 import { computed, signal, __internal as reactiveInternal } from "../reactive.ts";
 import type { ObservationState, StoreRuntime } from "./runtime.ts";
 import { reportContinuationError } from "./faults.ts";
+import { physicalCleanup } from "./retirement.ts";
 
 /** Acquire metadata only after the native query incarnation was validated. */
 export function observationState<T>(runtime: StoreRuntime<T>): ObservationState {
@@ -37,7 +38,7 @@ export function retireObservation<T>(runtime: StoreRuntime<T>): void {
   state.liveReadables = 0;
   const attempt = (action: () => void): void => {
     try {
-      action();
+      physicalCleanup(runtime.binding?.context.retirement ?? runtime.graph.__runtime.retirement, action);
     } catch (error) {
       reportContinuationError(runtime.graph.__runtime, error);
     }
