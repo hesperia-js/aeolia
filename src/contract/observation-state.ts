@@ -38,7 +38,10 @@ export function retireObservation<T>(runtime: StoreRuntime<T>): void {
   state.liveReadables = 0;
   const attempt = (action: () => void): void => {
     try {
-      physicalCleanup(runtime.binding?.context.retirement ?? runtime.graph.__runtime.retirement, action);
+      physicalCleanup(
+        runtime.binding?.context.retirement ?? runtime.graph.__runtime.retirement,
+        action,
+      );
     } catch (error) {
       reportContinuationError(runtime.graph.__runtime, error);
     }

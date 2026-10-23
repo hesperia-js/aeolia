@@ -320,20 +320,18 @@ describe("context-bound mutation effects", () => {
     }
   });
 
-  it.each(
-    [
-      "caller",
-      "graph",
-      "context",
-      "reset",
-      "dispose",
-      "graph.retire",
-      "context.retire",
-      "graph.self-retire",
-      "context.self-retire",
-      "thenable.revoked",
-    ] as const,
-  )(
+  it.each([
+    "caller",
+    "graph",
+    "context",
+    "reset",
+    "dispose",
+    "graph.retire",
+    "context.retire",
+    "graph.self-retire",
+    "context.self-retire",
+    "thenable.revoked",
+  ] as const)(
     "revokes suspended preparation through %s without publishing or dispatching",
     async (mode) => {
       const f = fixture();

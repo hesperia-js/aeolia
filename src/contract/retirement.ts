@@ -104,15 +104,15 @@ export function canReplacePhysicalCarrier(promise: Promise<unknown>, observer: u
   )
     return false;
   const constructor = ownDescriptor(promise, "constructor");
-  if (
-    constructor !== undefined &&
-    descriptorField(constructor, "value") !== NativePromise
-  )
+  if (constructor !== undefined && descriptorField(constructor, "value") !== NativePromise)
     return false;
   return (
     nativeConstructorDescriptor !== undefined &&
     descriptorField(nativeConstructorDescriptor, "value") === NativePromise &&
-    sameDescriptor(ownDescriptor(nativePromisePrototype, "constructor"), nativeConstructorDescriptor) &&
+    sameDescriptor(
+      ownDescriptor(nativePromisePrototype, "constructor"),
+      nativeConstructorDescriptor,
+    ) &&
     sameDescriptor(ownDescriptor(NativePromise, speciesKey), nativeSpeciesDescriptor)
   );
 }
@@ -187,12 +187,7 @@ function rootOwner(owner: RetirementOwner): RetirementOwner {
 }
 
 function completeRetirement(owner: RetirementOwner): void {
-  if (
-    !owner.closed ||
-    owner.closing ||
-    owner.work.size !== 0 ||
-    owner.resolve === undefined
-  )
+  if (!owner.closed || owner.closing || owner.work.size !== 0 || owner.resolve === undefined)
     return;
   const resolve = owner.resolve;
   const reject = owner.reject!;

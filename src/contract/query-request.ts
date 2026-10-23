@@ -203,7 +203,8 @@ export function startQueryRequest<T>(
     const resetEpoch = state.resetEpoch;
     const entryIncarnation =
       runtime.binding === undefined ? undefined : (expectedIncarnation ?? runtime.incarnation);
-    if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation) return undefined;
+    if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation)
+      return undefined;
     if ((force || isCurrentRequest(runtime) === undefined) && (force || !runtime.recoveryDisarmed))
       nextGeneration(runtime.generation);
     admission = beginBindingAddress(runtime.binding, String(runtime.key));

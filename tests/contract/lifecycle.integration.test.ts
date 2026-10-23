@@ -747,7 +747,9 @@ it.each(["stateful constructor and species", "custom then observer"] as const)(
         constructorReads += 1;
         if (constructorReads === 1) return Promise;
         if (constructorReads === 2) return speciesHolder;
-        throw new Error("Promise carrier constructor was read beyond native normalization and then");
+        throw new Error(
+          "Promise carrier constructor was read beyond native normalization and then",
+        );
       },
     });
     const nativeThen = Promise.prototype.then;
@@ -822,8 +824,7 @@ it.each(["stateful constructor and species", "custom then observer"] as const)(
       if (releaseLegacy === undefined)
         throw new Error("Expected the legacy carrier to retain its native completion");
       releaseLegacy();
-      const expectedResult =
-        mode === "custom then observer" ? customThenResult : "provider result";
+      const expectedResult = mode === "custom then observer" ? customThenResult : "provider result";
       await expect(running).resolves.toBe(expectedResult);
       await expectPending(retirement);
     } finally {
@@ -896,7 +897,9 @@ it("keeps retirement pending after post-bootstrap Promise descriptor changes", a
       running = graph.api.save(undefined);
 
       phase = "baseline";
-      const normalizedControl = Reflect.apply(nativeResolve, Promise, [control.promise]) as Promise<unknown>;
+      const normalizedControl = Reflect.apply(nativeResolve, Promise, [
+        control.promise,
+      ]) as Promise<unknown>;
       baselineCarrier = Reflect.apply(nativeThen, normalizedControl, [
         (value: unknown) => value,
       ]) as Promise<unknown>;

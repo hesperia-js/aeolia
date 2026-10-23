@@ -704,7 +704,10 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   }
 }
 
-function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>, physical?: PhysicalWork): void {
+function disposeGraph<C extends Contract>(
+  state: GraphRuntimeState<C>,
+  physical?: PhysicalWork,
+): void {
   if (state.disposed) return;
   const work = physical ?? beginPhysicalWork(state.retirement, "cleanup");
   try {
@@ -717,7 +720,10 @@ function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>, physical?
   }
 }
 
-function disposeGraphContents<C extends Contract>(state: GraphRuntimeState<C>, retiring: boolean): void {
+function disposeGraphContents<C extends Contract>(
+  state: GraphRuntimeState<C>,
+  retiring: boolean,
+): void {
   const attempt = (action: () => void, alreadyOwned = false): void => {
     if (!retiring) {
       action();

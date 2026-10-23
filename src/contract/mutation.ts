@@ -897,9 +897,9 @@ export function runBoundMutation(
               const settlement = settleBoundEffects(attempt, input);
               return settlement instanceof Promise
                 ? continuePhysicalPromise<void, unknown>(settlement, (settlementCertified) => {
-                  if (!settlementCertified) retainUnacknowledgedMutation(attempt);
-                  return { fulfilled: () => result };
-                }).promise
+                    if (!settlementCertified) retainUnacknowledgedMutation(attempt);
+                    return { fulfilled: () => result };
+                  }).promise
                 : result;
             },
           };

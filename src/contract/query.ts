@@ -121,7 +121,10 @@ export function makeQueryStore<T>(
   bindingDefaults?: Pick<ValueOptions<NoInfer<T>>, "initial">,
 ): QueryStore<T> {
   assertGraphOpen(state);
-  const physical = beginPhysicalWork(binding?.context.retirement ?? state.retirement, "acquisition");
+  const physical = beginPhysicalWork(
+    binding?.context.retirement ?? state.retirement,
+    "acquisition",
+  );
   try {
     const epoch = state.resetEpoch;
     const window = asWindow(options?.revalidateAfterMs, query.revalidateAfterMs);
@@ -162,7 +165,8 @@ export function makeQueryStore<T>(
         const activeSource = runtime.source;
         const activeCaller = runtime.callers.find(
           (candidate) =>
-            candidate.query === activeSource.query && Object.is(candidate.input, activeSource.input),
+            candidate.query === activeSource.query &&
+            Object.is(candidate.input, activeSource.input),
         );
         if (activeCaller === undefined) return;
         try {

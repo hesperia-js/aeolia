@@ -184,7 +184,10 @@ function safeSet<T, V>(runtime: ProjectionRuntime<T, V>, set: () => void): void 
   }
 }
 
-function returnProjectionIterator<T>(source: ProjectionSource<T>, iterator: AsyncIterator<T>): void {
+function returnProjectionIterator<T>(
+  source: ProjectionSource<T>,
+  iterator: AsyncIterator<T>,
+): void {
   const work = beginPhysicalWork(source.retirement, "projection-return");
   let hasOriginal = false;
   try {
@@ -366,7 +369,8 @@ function finish<T, V>(
       cleanupFailed = true;
       cleanupError = error;
     }
-    if (current() && failed && reason != null) safeSet(runtime, () => runtime.errorCell.set(reason));
+    if (current() && failed && reason != null)
+      safeSet(runtime, () => runtime.errorCell.set(reason));
     if (current()) {
       try {
         physicalCleanup(source.retirement, () => runtime.statusCell.set(terminalStatus));
