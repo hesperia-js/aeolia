@@ -5,6 +5,7 @@ import type {
   QuerySource,
   StoreRuntime,
 } from "./runtime.ts";
+import type { QueryFetchOptions } from "./types.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
 import { Fault } from "../fault.ts";
 import { AbortError, assertStoreOpen, reportContinuationError } from "./faults.ts";
@@ -17,6 +18,13 @@ import {
 } from "./status.ts";
 import { interact, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { issue, nextGeneration, recordLanding, retirePredictions } from "./store-state.ts";
+import {
+  beginQueryProgress,
+  completeQueryProgress,
+  failQueryProgress,
+  interruptQueryProgress,
+  reportQueryProgress,
+} from "./query-progress.ts";
 
 import { beginBindingAddress, changeBoundAddress, endBindingAddress } from "./registry.ts";
 import {
@@ -118,6 +126,7 @@ export function settleQuerySuccess<T>(
     if (!runtime.disposed && request.resetEpoch === state.resetEpoch)
       reportContinuationError(state, error);
   }
+  completeQueryProgress(runtime, request);
   if (!runtime.disposed && request.resetEpoch === state.resetEpoch) {
     try {
       armStoreTimer(runtime);
@@ -148,6 +157,8 @@ export function settleQueryFailure<T>(
       runtime.failing = true;
       runtime.invalidated = true;
       runtime.errorCell.set(reason);
+      if (request.controller.signal.aborted) interruptQueryProgress(runtime, request, reason);
+      else failQueryProgress(runtime, request, reason);
       touch(runtime);
       writeAllStatuses(runtime);
     });
@@ -231,8 +242,10 @@ export function startQueryRequest<T>(
       runtime.recoveryDisarmed = false;
     }
     if (runtime.activeRequest != null && !runtime.activeRequest.settled) {
-      runtime.activeRequest.superseded = true;
-      runtime.activeRequest.controller.abort();
+      const predecessor = runtime.activeRequest;
+      predecessor.superseded = true;
+      predecessor.controller.abort();
+      interruptQueryProgress(runtime, predecessor, predecessor.controller.signal.reason);
       if (state.resetEpoch !== resetEpoch || state.disposed) return undefined;
       if (runtime.binding !== undefined) {
         assertStoreOpen(runtime);
@@ -248,9 +261,8 @@ export function startQueryRequest<T>(
     if (runtime.binding !== undefined) {
       assertStoreOpen(runtime);
       if (state.resetEpoch !== resetEpoch) return undefined;
-      if (runtime.incarnation === undefined) runtime.incarnation = {};
     }
-    const incarnation = runtime.incarnation;
+    const incarnation = runtime.incarnation ?? (runtime.incarnation = {});
     const controller = new AbortController();
     const removeCallerAbort = linkCallerAbort(runtime, abortSignal, controller);
     if (
@@ -284,6 +296,8 @@ export function startQueryRequest<T>(
       controller,
       generation,
       resetEpoch,
+      incarnation,
+      progressIdentity: Object.freeze({}),
       automaticRecovery,
       predictionIds: reactiveInternal
         .signalValue(runtime.predictionStack)
@@ -317,6 +331,7 @@ export function startQueryRequest<T>(
     let setupFailed = false;
     try {
       reactiveInternal.batch(() => {
+        beginQueryProgress(runtime, request);
         runtime.failing = false;
         runtime.errorCell.set(undefined);
         touch(runtime);
@@ -377,10 +392,11 @@ export function startQueryRequest<T>(
     let acknowledged = true;
     let result: Promise<T>;
     try {
-      const options = {
+      const options: QueryFetchOptions<unknown> = {
         abortSignal: controller.signal,
         graph: state.graph.id,
         key: runtime.key,
+        reportProgress: (value) => reportQueryProgress(runtime, request, value),
       };
       fetched = caller.query.fetch(caller.input, options);
       fetchedReturned = true;

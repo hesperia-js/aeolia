@@ -22,13 +22,16 @@ import { testBackend } from "../../src/testing.ts";
 type Input = { readonly id: string; readonly revision?: number };
 type Change = Input & { readonly value: number };
 
+let ownsFakeTimers = false;
 beforeEach(() => {
   jest.useFakeTimers();
+  ownsFakeTimers = true;
   jest.setSystemTime(0);
 });
 afterEach(() => {
-  jest.clearAllTimers();
+  if (ownsFakeTimers) jest.clearAllTimers();
   jest.useRealTimers();
+  ownsFakeTimers = false;
 });
 
 function fixture(on: "invalidate" | "revalidate" = "revalidate", maxPredictions = 64) {
@@ -108,6 +111,7 @@ function visible<T>(handle: QueryStore<T>): T | undefined {
 
 async function expectPending(promise: Promise<unknown>): Promise<void> {
   jest.useRealTimers();
+  ownsFakeTimers = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([

@@ -73,6 +73,7 @@ import { configureKeyedValue, issue, nextGeneration } from "./store-state.ts";
 import { boundAddressOccupied } from "./binding-address.ts";
 import { writeAllStatuses } from "./status.ts";
 import { resetGraph } from "./reset.ts";
+import { retireQueryProgress } from "./query-progress.ts";
 import {
   beginPhysicalWork,
   createRetirementOwner,
@@ -451,7 +452,7 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
             const call = normalizeQueryCall(input, options, args.length > 1);
             return makeQueryStore(
               state,
-              value as QueryDefinition<unknown, unknown, any>,
+              value as QueryDefinition<unknown, unknown, any, any>,
               call.input,
               call.options,
             );
@@ -636,6 +637,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   for (const controller of mutationControllers) state.activeControllers.delete(controller);
   state.bindingContexts.delete(context);
   for (const runtime of stores) {
+    retireQueryProgress(runtime as StoreRuntime<unknown>);
     runtime.disposed = true;
     runtime.incarnation = undefined;
     state.stores.delete(runtime.identity);
@@ -787,6 +789,7 @@ function disposeGraphContents<C extends Contract>(
         reportContinuationError(state, error);
       }
     }
+    retireQueryProgress(runtime as StoreRuntime<unknown>);
     runtime.disposed = true;
     runtime.incarnation = undefined;
     runtime.collectionIndex = -1;

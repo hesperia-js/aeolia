@@ -72,7 +72,7 @@ function ownData(value: unknown, allowed: readonly string[]): Record<string, unk
  */
 export function observeStore<Value>(
   graph: Graph,
-  existingProfileQuery: QueryStore<Value>,
+  existingProfileQuery: QueryStore<Value, any>,
 ): ObservationLease<Value> {
   const graphState = graphRuntimeByGraph.get(graph);
   if (graphState === undefined) throw new TypeError("The value is not an Aeolia graph");

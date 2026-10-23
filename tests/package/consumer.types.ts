@@ -27,6 +27,7 @@ import {
   createStream,
   queryOptions,
   subscribe,
+  observeQueryProgress,
   observeStore,
   peekStore,
   type ObservationLease,
@@ -38,6 +39,11 @@ import {
   type CreateStreamInput,
   type DefineContractInput,
   type FetchOptions,
+  type QueryFetchOptions,
+  type QueryProgressEvent,
+  type QueryProgressObservation,
+  type QueryProgressSnapshot,
+  type QueryProgressStatus,
   type Graph,
   type MemberOf,
   type KeyedStores,
@@ -79,6 +85,26 @@ const query = createQuery({
   name: "items.get",
   key: (input: { readonly id: string }) => `items/${input.id}`,
   fetch: backend.respond<{ readonly id: string }, { readonly id: string }>("items.get"),
+});
+type Progress = { readonly received: number };
+const progressQuery = createQuery<string, number, string, Progress>({
+  name: "items.progress",
+  key: (input) => `progress/${input}`,
+  fetch: async (_input, { reportProgress }) => {
+    reportProgress({ received: 1 });
+    return 1;
+  },
+});
+const legacyFiveGenericQuery = createQuery<
+  { readonly id: string },
+  number,
+  string,
+  (input: { readonly id: string }) => string,
+  (input: { readonly id: string }, options: FetchOptions) => Promise<number>
+>({
+  name: "legacy.five-generics",
+  key: (input) => input.id,
+  fetch: async (_input, _options) => 1,
 });
 const mutation = createMutation({
   name: "items.save",
@@ -242,6 +268,31 @@ function typecheckOnly(): void {
     graph: graph.id,
     key: queried.key,
   };
+  const finiteQueryFetchOptions: QueryFetchOptions = fetchOptions;
+  const finiteFetchResult: Promise<{ readonly id: string }> = query.fetch(
+    { id: "1" },
+    fetchOptions,
+  );
+  const legacyFetchResult: Promise<number> = legacyFiveGenericQuery.fetch(
+    { id: "1" },
+    fetchOptions,
+  );
+  const progressFetchOptions: QueryFetchOptions<Progress> = {
+    ...fetchOptions,
+    reportProgress(value) {
+      void (value satisfies Progress);
+    },
+  };
+  progressFetchOptions.reportProgress({ received: 2 });
+  // @ts-expect-error Progress reporters retain their declared value type.
+  progressFetchOptions.reportProgress({ received: "two" });
+  // @ts-expect-error Finite queries do not declare a progress value type.
+  finiteQueryFetchOptions.reportProgress?.("undeclared");
+  const progressFetchResult: Promise<number> = progressQuery.fetch("one", progressFetchOptions);
+  const progressGraph = createGraph({
+    contract: defineContract({ namespace: "progress-types", operations: { progressQuery } }),
+  });
+  const progressStore = progressGraph.api.progressQuery("one");
 
   void declared.value.get();
   void queried.status.get();
@@ -268,6 +319,7 @@ function typecheckOnly(): void {
 
   type Equal<A, B> =
     (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+  type ProgressOf<S> = S extends QueryStore<any, infer P> ? P : never;
   type AddressedValue = ReturnType<typeof addressed.value.get>;
   type DeclaredValue = ReturnType<typeof declared.value.get>;
   type UnknownValue = ReturnType<typeof unknown.value.get>;
@@ -276,10 +328,34 @@ function typecheckOnly(): void {
   const declaredSurvivesWidePattern: Equal<DeclaredValue, number | undefined> = true;
   const widenedPatternClaimsNothing: Equal<UnknownValue, unknown> = true;
   const widenedAtIsUnknown: Equal<WidenedValue, unknown> = true;
+  const finiteQueryHasNoProgress: Equal<ProgressOf<typeof queried>, never> = true;
+  const progressQueryKeepsExactType: Equal<ProgressOf<typeof progressStore>, Progress> = true;
+  const progressStatus: QueryProgressStatus = progressStore.progress.get().status;
+  const progressSnapshot: QueryProgressSnapshot<Progress> = progressStore.progress.get();
+  const progressObservation: QueryProgressObservation<Progress> =
+    observeQueryProgress(progressStore);
+  const progressCapture: QueryProgressSnapshot<Progress> = progressObservation.capture();
+  const stopProgressEvents = progressObservation.subscribe(
+    (event: QueryProgressEvent<Progress>) => {
+      const current: QueryProgressSnapshot<Progress> = event.snapshot;
+      void current;
+    },
+  );
+  // @ts-expect-error Projection policy belongs to the Hesperia view, not native progress state.
+  void progressStore.progress.get().project;
   void addressedIsTyped;
   void declaredSurvivesWidePattern;
   void widenedPatternClaimsNothing;
   void widenedAtIsUnknown;
+  void finiteQueryHasNoProgress;
+  void progressQueryKeepsExactType;
+  void progressStatus;
+  void progressSnapshot;
+  void progressCapture;
+  void stopProgressEvents;
+  void finiteFetchResult;
+  void legacyFetchResult;
+  void progressFetchResult;
 
   // @ts-expect-error graph.at returns Store, not QueryStore.
   void unknown.status.get();

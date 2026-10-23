@@ -96,12 +96,12 @@ export function createQuery<
 >(
   input: CreateQueryInput<I, T, K> & { readonly key: Key; readonly fetch: Fetch },
 ): QueryDefinition<QueryInputFromCallbacks<I, Key, Fetch>, T, K>;
-export function createQuery<I, T, K extends string>(
-  input: CreateQueryInput<I, T, K>,
-): QueryDefinition<I, T, K>;
-export function createQuery<I, T, K extends string>(
-  input: CreateQueryInput<I, T, K>,
-): QueryDefinition<I, T, K> {
+export function createQuery<I, T, K extends string, P = never>(
+  input: CreateQueryInput<I, T, K, P>,
+): QueryDefinition<I, T, K, P>;
+export function createQuery<I, T, K extends string, P = never>(
+  input: CreateQueryInput<I, T, K, P>,
+): QueryDefinition<I, T, K, P> {
   if (!isCreateQueryInput(input)) throw new TypeError("Invalid query declaration.");
   return Object.freeze({ ...input, kind: "query" as const });
 }
@@ -160,11 +160,11 @@ export function createStream<I, T, K extends string>(
  * ```
  */
 export function affects<MI, QI, T>(
-  query: QueryDefinition<QI, T>,
+  query: QueryDefinition<QI, T, string, any>,
   spec: AffectSpec<MI, NoInfer<QI>, T>,
 ): Affected<MI>;
 export function affects<MI, QI, T>(
-  query: QueryDefinition<QI, T>,
+  query: QueryDefinition<QI, T, string, any>,
   spec: AffectSpec<MI, QI, T>,
 ): Affected<MI> {
   if (!isQueryDefinition(query)) throw new TypeError("An effect must target a query declaration.");

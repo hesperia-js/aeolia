@@ -13,6 +13,7 @@ export {
   createBindingContext,
   peekStore,
   observeStore,
+  observeQueryProgress,
 } from "./contract/index.ts";
 export type {
   Affected,
@@ -24,6 +25,11 @@ export type {
   DefineContractInput,
   DeclaredStores,
   FetchOptions,
+  QueryFetchOptions,
+  QueryProgressEvent,
+  QueryProgressObservation,
+  QueryProgressSnapshot,
+  QueryProgressStatus,
   Generation,
   Graph,
   GraphId,

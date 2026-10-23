@@ -107,6 +107,7 @@ export function isLive<T>(runtime: StoreRuntime<T>): boolean {
   }
   return (
     runtime.liveReadableCount > 0 ||
+    runtime.progressReadableCount > 0 ||
     runtime.readyWaiterCount > 0 ||
     (runtime.stream?.listeners.size ?? 0) > 0
   );
@@ -502,6 +503,8 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
       runtime.refreshOnActivation = false;
       runtime.baseAvailable = false;
       runtime.hasAcceptedLanding = false;
+      runtime.queryProgressClear?.();
+      if (!current()) return;
       runtime.transferEligible = true;
       runtime.failing = false;
       runtime.recoveryDisarmed = false;
