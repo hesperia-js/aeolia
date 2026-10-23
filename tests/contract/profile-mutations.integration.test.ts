@@ -802,8 +802,8 @@ describe("context-bound mutation effects", () => {
         if (property === "addEventListener")
           return (
             type: string,
-            listener: EventListenerOrEventListenerObject | null,
-            options?: boolean | AddEventListenerOptions,
+            listener: Parameters<typeof nativeAdd>[1],
+            options?: Parameters<typeof nativeAdd>[2],
           ) => {
             nativeAdd(type, listener, options);
             if (type === "abort") linkedListener = listener;
@@ -811,8 +811,8 @@ describe("context-bound mutation effects", () => {
         if (property === "removeEventListener")
           return (
             type: string,
-            listener: EventListenerOrEventListenerObject | null,
-            options?: boolean | EventListenerOptions,
+            listener: Parameters<typeof nativeRemove>[1],
+            options?: Parameters<typeof nativeRemove>[2],
           ) => {
             nativeRemove(type, listener, options);
             if (type === "abort" && listener === linkedListener) {

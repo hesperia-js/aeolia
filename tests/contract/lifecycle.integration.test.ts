@@ -640,8 +640,8 @@ it("joins the final mutation output adoption after abort-listener removal", asyn
       if (property === "addEventListener")
         return (
           type: string,
-          listener: EventListenerOrEventListenerObject | null,
-          options?: boolean | AddEventListenerOptions,
+          listener: Parameters<typeof nativeAdd>[1],
+          options?: Parameters<typeof nativeAdd>[2],
         ) => {
           nativeAdd(type, listener, options);
           if (type === "abort") linkedListener = listener;
@@ -649,8 +649,8 @@ it("joins the final mutation output adoption after abort-listener removal", asyn
       if (property === "removeEventListener")
         return (
           type: string,
-          listener: EventListenerOrEventListenerObject | null,
-          options?: boolean | EventListenerOptions,
+          listener: Parameters<typeof nativeRemove>[1],
+          options?: Parameters<typeof nativeRemove>[2],
         ) => {
           nativeRemove(type, listener, options);
           if (type === "abort" && listener === linkedListener) {
@@ -1028,8 +1028,8 @@ it.each(["single Error", "single undefined", "multiple"] as const)(
       }),
     });
     try {
-      graph.api.first();
-      if (activeCount === 2) graph.api.second();
+      graph.api.first(undefined);
+      if (activeCount === 2) graph.api.second(undefined);
       await Promise.all(pullStarted.slice(0, activeCount).map((started) => started.promise));
       graph.dispose();
       await Promise.all(returnStarted.slice(0, activeCount).map((started) => started.promise));
