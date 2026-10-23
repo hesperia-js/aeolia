@@ -320,10 +320,8 @@ function neverStreamContractTypesOnly(): void {
   const declared = graph.store(sibling);
   const addressed = graph.at("silent/one");
 
-  const declarationRetained: Equal<
-    typeof contract.operations.nested.events,
-    typeof decorated
-  > = true;
+  const declarationRetained: Equal<typeof contract.operations.nested.events, typeof decorated> =
+    true;
   const memberInput: Equal<Parameters<MemberOf<typeof decorated>>[0], Input> = true;
   const memberOutput: Equal<ReturnType<MemberOf<typeof decorated>>, StreamStore<never>> = true;
   const graphOutput: Equal<typeof source, StreamStore<never>> = true;
