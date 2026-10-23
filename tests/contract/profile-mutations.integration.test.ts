@@ -397,10 +397,16 @@ describe("context-bound mutation effects", () => {
         expect(f.backend.calls).toHaveLength(0);
         if (mode === "caller" || mode === "graph") expect(visible(handle)).toBe(1);
         expect(prepareCalls).toBe(1);
-        if (retirement !== undefined && !selfRetired) {
+        if (selfRetired) {
+          if (retirement === undefined) throw new Error("Expected self-retirement promise");
+          finalizer.resolve();
+          await finalized.promise;
+          await expectPending(retirement);
+        } else if (retirement !== undefined) {
           if (mode === "thenable.revoked") {
             await new Promise<void>((resolve) => setTimeout(resolve, 0));
             expect(thenCalls).toBe(0);
+            await expectPending(retirement);
           } else {
             await expectPending(retirement);
             finalizer.resolve();
