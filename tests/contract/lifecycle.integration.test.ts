@@ -17,13 +17,16 @@ import {
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
+let ownsFakeTimers = false;
 beforeEach(() => {
   jest.useFakeTimers();
+  ownsFakeTimers = true;
   jest.setSystemTime(100);
 });
 afterEach(() => {
-  jest.clearAllTimers();
+  if (ownsFakeTimers) jest.clearAllTimers();
   jest.useRealTimers();
+  ownsFakeTimers = false;
 });
 async function flush(): Promise<void> {
   await Promise.resolve();
@@ -33,6 +36,7 @@ async function flush(): Promise<void> {
 
 async function expectPending(promise: Promise<unknown>): Promise<void> {
   jest.useRealTimers();
+  ownsFakeTimers = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
@@ -52,6 +56,7 @@ async function expectPending(promise: Promise<unknown>): Promise<void> {
 
 async function expectSettled(promise: Promise<unknown>): Promise<void> {
   jest.useRealTimers();
+  ownsFakeTimers = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([

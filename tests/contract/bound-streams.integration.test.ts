@@ -16,17 +16,21 @@ import {
 import { testBackend } from "../../src/testing.ts";
 
 type Input = { readonly room: string };
+let ownsFakeTimers = false;
 beforeEach(() => {
   jest.useFakeTimers();
+  ownsFakeTimers = true;
   jest.setSystemTime(0);
 });
 afterEach(() => {
-  jest.clearAllTimers();
+  if (ownsFakeTimers) jest.clearAllTimers();
   jest.useRealTimers();
+  ownsFakeTimers = false;
 });
 
 async function expectPending(promise: Promise<unknown>): Promise<void> {
   jest.useRealTimers();
+  ownsFakeTimers = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
