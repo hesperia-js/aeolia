@@ -809,6 +809,11 @@ export function isOperationDefinition(value: unknown): value is OperationDefinit
   }
 }
 
+// Tree admission keeps comparator arguments opaque, including never-valued streams.
+type ContractStreamDefinition = Omit<StreamDefinition<any, any, any>, "equals"> & {
+  readonly equals?: (a: never, b: never) => boolean;
+};
+
 /**
  * A nested, named operation and store declaration tree.
  *
@@ -818,7 +823,11 @@ export function isOperationDefinition(value: unknown): value is OperationDefinit
  * within their respective categories.
  */
 export type OperationTree = {
-  readonly [name: string]: OperationDefinition | StoreDefinition<any> | OperationTree;
+  readonly [name: string]:
+    | OperationDefinition
+    | ContractStreamDefinition
+    | StoreDefinition<any>
+    | OperationTree;
 };
 
 /** Input accepted by {@link defineContract}. */
@@ -896,7 +905,7 @@ export type ContractApi<C extends Contract> =
 export type StorePatterns<D> =
   D extends QueryDefinition<any, any, infer K>
     ? K
-    : D extends StreamDefinition<any, any, infer K>
+    : D extends StreamDefinition<any, infer _T, infer K>
       ? K
       : D extends StoreDefinition<any, any> | MutationDefinition<any, any>
         ? never
@@ -908,7 +917,7 @@ export type StorePatterns<D> =
 export type StoreNames<D> =
   D extends StoreDefinition<any, infer N>
     ? N
-    : D extends OperationDefinition
+    : D extends OperationDefinition | ContractStreamDefinition
       ? never
       : D extends object
         ? { readonly [P in keyof D]: StoreNames<D[P]> }[keyof D]
@@ -918,7 +927,7 @@ export type StoreNames<D> =
 export type DeclaredStores<D> =
   D extends StoreDefinition<infer T, infer N>
     ? StoreDefinition<T, N>
-    : D extends OperationDefinition
+    : D extends OperationDefinition | ContractStreamDefinition
       ? never
       : D extends object
         ? { readonly [P in keyof D]: DeclaredStores<D[P]> }[keyof D]
