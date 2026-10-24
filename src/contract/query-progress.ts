@@ -37,7 +37,7 @@ function snapshot<P>(
   return Object.freeze({ execution, hasValue, value, status, reportRevision, error });
 }
 
-function progressCell(runtime: StoreRuntime<unknown>) {
+function progressCell<T>(runtime: StoreRuntime<T>) {
   const existing = runtime.queryProgressCell;
   if (existing !== undefined) return existing;
 
@@ -67,13 +67,13 @@ function progressCell(runtime: StoreRuntime<unknown>) {
   return created;
 }
 
-function authority(runtime: StoreRuntime<unknown>): QueryProgressAuthority {
+function authority<T>(runtime: StoreRuntime<T>): QueryProgressAuthority {
   progressCell(runtime);
   return runtime.queryProgressAuthority!;
 }
 
-function observeQueryProgressReadable(
-  runtime: StoreRuntime<unknown>,
+function observeQueryProgressReadable<T>(
+  runtime: StoreRuntime<T>,
   readable: Readable<unknown>,
 ): void {
   runtime.readStops.push(
@@ -88,13 +88,13 @@ function observeQueryProgressReadable(
   );
 }
 
-function retainProgress(runtime: StoreRuntime<unknown>, amount: number): void {
+function retainProgress<T>(runtime: StoreRuntime<T>, amount: number): void {
   runtime.progressReadableCount = Math.max(0, runtime.progressReadableCount + amount);
   updateCollectionCandidate(runtime);
   scheduleSweep(runtime.graph.__runtime);
 }
 
-function currentRequest(runtime: StoreRuntime<unknown>, request: QueryRequest): boolean {
+function currentRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   const state = runtime.graph.__runtime;
   const context = runtime.binding?.context;
   return (
@@ -111,7 +111,7 @@ function currentRequest(runtime: StoreRuntime<unknown>, request: QueryRequest): 
   );
 }
 
-function ownsSnapshot(runtime: StoreRuntime<unknown>, request: QueryRequest): boolean {
+function ownsSnapshot<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   const state = runtime.graph.__runtime;
   const current = runtime.queryProgressAuthority?.current;
   return (
@@ -147,8 +147,8 @@ function sameExecution(
   );
 }
 
-function seedIsCurrent(
-  runtime: StoreRuntime<unknown>,
+function seedIsCurrent<T>(
+  runtime: StoreRuntime<T>,
   owner: QueryProgressAuthority,
   delivery: QueryProgressDelivery,
 ): boolean {
@@ -193,8 +193,8 @@ function deferContinuationError(owner: QueryProgressAuthority, error: unknown): 
   owner.continuationErrors.push(error);
 }
 
-function deliveryIsCurrent(
-  runtime: StoreRuntime<unknown>,
+function deliveryIsCurrent<T>(
+  runtime: StoreRuntime<T>,
   delivery: QueryProgressDelivery,
 ): boolean {
   const owner = authority(runtime);
@@ -241,7 +241,7 @@ function deliverTo(
   }
 }
 
-function drain(runtime: StoreRuntime<unknown>, owner: QueryProgressAuthority): void {
+function drain<T>(runtime: StoreRuntime<T>, owner: QueryProgressAuthority): void {
   while (owner.queue.length !== 0) {
     const delivery = owner.queue.shift()!;
     if (delivery.target !== undefined) {
@@ -266,7 +266,7 @@ function drain(runtime: StoreRuntime<unknown>, owner: QueryProgressAuthority): v
   }
 }
 
-function drainAndReport(runtime: StoreRuntime<unknown>, owner: QueryProgressAuthority): void {
+function drainAndReport<T>(runtime: StoreRuntime<T>, owner: QueryProgressAuthority): void {
   try {
     while (owner.queue.length !== 0 || owner.continuationErrors.length !== 0) {
       drain(runtime, owner);
@@ -279,8 +279,8 @@ function drainAndReport(runtime: StoreRuntime<unknown>, owner: QueryProgressAuth
   }
 }
 
-function publish<P>(
-  runtime: StoreRuntime<unknown>,
+function publish<T, P>(
+  runtime: StoreRuntime<T>,
   value: QueryProgressSnapshot<P>,
   kind: "report" | "lifecycle",
   request?: QueryRequest,
@@ -311,8 +311,8 @@ function publish<P>(
   if (ownsDispatch) drainAndReport(runtime, owner);
 }
 
-function subscribeProgress<P>(
-  runtime: StoreRuntime<unknown>,
+function subscribeProgress<T, P>(
+  runtime: StoreRuntime<T>,
   observer: (event: QueryProgressEvent<P>) => void,
 ): Unsubscribe {
   assertStoreOpen(runtime);
@@ -361,13 +361,13 @@ function subscribeProgress<P>(
   return stop;
 }
 
-function clearQueryProgress(runtime: StoreRuntime<unknown>): void {
+function clearQueryProgress<T>(runtime: StoreRuntime<T>): void {
   if (runtime.disposed || runtime.graph.__runtime.disposed) return;
   publish(runtime, idleSnapshot(), "lifecycle");
 }
 
 /** Releases observer callbacks and request references when their store is disposed. @internal */
-export function retireQueryProgress(runtime: StoreRuntime<unknown>): void {
+export function retireQueryProgress<T>(runtime: StoreRuntime<T>): void {
   const owner = runtime.queryProgressAuthority;
   if (owner === undefined) return;
   owner.request = undefined;
@@ -378,16 +378,16 @@ export function retireQueryProgress(runtime: StoreRuntime<unknown>): void {
 }
 
 /** Returns the stable, read-only progress readable for one query runtime. @internal */
-export function queryProgressReadable<P>(
-  runtime: StoreRuntime<unknown>,
+export function queryProgressReadable<T, P>(
+  runtime: StoreRuntime<T>,
 ): Readable<QueryProgressSnapshot<P>> {
   assertStoreOpen(runtime);
   return progressCell(runtime) as Readable<QueryProgressSnapshot<P>>;
 }
 
 /** Acquires the non-coalescing query-owned progress observation. @internal */
-export function queryProgressObservation<P>(
-  runtime: StoreRuntime<unknown>,
+export function queryProgressObservation<T, P>(
+  runtime: StoreRuntime<T>,
 ): QueryProgressObservation<P> {
   assertStoreOpen(runtime);
   progressCell(runtime);
@@ -402,8 +402,8 @@ export function queryProgressObservation<P>(
 }
 
 /** Begins a fresh progress epoch when a real request becomes current. @internal */
-export function beginQueryProgress(
-  runtime: StoreRuntime<unknown>,
+export function beginQueryProgress<T>(
+  runtime: StoreRuntime<T>,
   request: QueryRequest,
 ): void {
   if (!currentRequest(runtime, request)) return;
@@ -416,8 +416,8 @@ export function beginQueryProgress(
 }
 
 /** Publishes one value only while its actual request remains current and active. @internal */
-export function reportQueryProgress<P>(
-  runtime: StoreRuntime<unknown>,
+export function reportQueryProgress<T, P>(
+  runtime: StoreRuntime<T>,
   request: QueryRequest,
   value: P,
 ): void {
@@ -443,8 +443,8 @@ export function reportQueryProgress<P>(
 }
 
 /** Marks the current request complete after its full fetch promise succeeds. @internal */
-export function completeQueryProgress(
-  runtime: StoreRuntime<unknown>,
+export function completeQueryProgress<T>(
+  runtime: StoreRuntime<T>,
   request: QueryRequest,
 ): void {
   if (!ownsSnapshot(runtime, request)) return;
@@ -466,8 +466,8 @@ export function completeQueryProgress(
 }
 
 /** Preserves the latest progress value while recording the request's failure. @internal */
-export function failQueryProgress(
-  runtime: StoreRuntime<unknown>,
+export function failQueryProgress<T>(
+  runtime: StoreRuntime<T>,
   request: QueryRequest,
   error: unknown,
 ): void {
@@ -494,8 +494,8 @@ export function failQueryProgress(
  * This transition never acknowledges or settles the underlying fetch promise.
  * @internal
  */
-export function interruptQueryProgress(
-  runtime: StoreRuntime<unknown>,
+export function interruptQueryProgress<T>(
+  runtime: StoreRuntime<T>,
   request: QueryRequest,
   reason: unknown,
   options: { readonly authorityChanged: true } | undefined = undefined,

@@ -205,7 +205,7 @@ export function makeQueryStore<T, P = never>(
       Object.defineProperty(queryStore, "progress", {
         configurable: false,
         enumerable: true,
-        get: () => queryProgressReadable<P>(runtime),
+        get: () => queryProgressReadable<T, P>(runtime),
       });
       Object.freeze(queryStore);
       queryRuntimeByStore.set(queryStore, runtime as StoreRuntime<unknown>);
@@ -248,5 +248,5 @@ export function observeQueryProgress<T, P>(
 ): QueryProgressObservation<P> {
   const runtime = queryRuntimeByStore.get(store);
   if (runtime === undefined) throw new TypeError("The value is not an Aeolia query store");
-  return queryProgressObservation<P>(runtime);
+  return queryProgressObservation<unknown, P>(runtime);
 }
