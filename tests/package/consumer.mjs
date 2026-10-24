@@ -78,8 +78,12 @@ export async function verifyConsumer() {
     affects: [affects(item, { select: (input) => input.id, on: "invalidate" })],
     run: backend.perform("item.save"),
   });
+  const unobservedFaults = [];
   const graph = createGraph({
     contract: defineContract({ namespace: "packed-consumer", operations: { item, save } }),
+    onUnobservedFault: (error) => {
+      unobservedFaults.push(error);
+    },
   });
   const pending = (name) => {
     const calls = backend.pending(name);
@@ -126,13 +130,37 @@ export async function verifyConsumer() {
     graph.dispose();
     check(call.aborted, "Disposal did not abort the backend request");
     const retirement = graph.retire();
+    const retirementOutcome = retirement.then(
+      () => ({ status: "fulfilled" }),
+      (reason) => ({ status: "rejected", reason }),
+    );
     check(graph.retire() === retirement, "Graph retirement did not return its cached promise");
     await disposedRead;
     await expectPending(retirement, "Graph retirement completed before the original fetch");
     backend.resolve(call, "late response");
     retirementCallResolved = true;
     await refreshing;
-    await retirement;
+    const outcome = await retirementOutcome;
+    check(
+      unobservedFaults.length === 1,
+      `Expected one unobserved disposal fault, got ${unobservedFaults.length}`,
+    );
+    const [disposalFault] = unobservedFaults;
+    check(
+      disposalFault instanceof Fault &&
+        disposalFault.kind === "disposed" &&
+        disposalFault.involved.length === 1 &&
+        disposalFault.involved[0] === "items/one",
+      "Disposal reported an unexpected fault",
+    );
+    check(
+      outcome.status === "rejected",
+      "Graph retirement fulfilled despite the live-subscription cleanup failure",
+    );
+    check(
+      outcome.reason === disposalFault,
+      "Graph retirement did not reject with the reported disposal fault",
+    );
     check(!observed.includes("late response"), "Disposed graph published a late response");
   } finally {
     if (retirementCall !== undefined && !retirementCallResolved)
