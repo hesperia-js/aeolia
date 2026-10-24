@@ -845,16 +845,44 @@ describe("query progress", () => {
         hasValue: false,
         value: undefined,
       });
-      const oldTerminalEvents = (records: typeof events) =>
-        records.filter(
+      const replacementActiveIndex = (records: typeof events) =>
+        records.findIndex(
+          ({ kind, snapshot }) =>
+            kind === "lifecycle" &&
+            snapshot.execution === replacementBeforeSettlement.execution &&
+            snapshot.status === "active",
+        );
+      const replacementFrontier = replacementActiveIndex(eventsBeforeSettlement);
+      expect(replacementFrontier).toBeGreaterThanOrEqual(0);
+      const predecessorTerminalEvents = eventsBeforeSettlement
+        .slice(0, replacementFrontier)
+        .filter(
           ({ kind, snapshot }) =>
             kind === "lifecycle" &&
             snapshot.execution === firstExecution &&
             snapshot.status !== "active",
         );
-      expect(oldTerminalEvents(eventsBeforeSettlement)).toEqual([]);
-      expect(oldTerminalEvents(eventsAfterLateReport)).toEqual([]);
-      expect(oldTerminalEvents(finalEvents)).toEqual([]);
+      expect(predecessorTerminalEvents).toHaveLength(1);
+      expect(predecessorTerminalEvents[0]).toMatchObject({
+        kind: "lifecycle",
+        snapshot: {
+          execution: firstExecution,
+          reportRevision: 1,
+          status: "interrupted",
+          hasValue: true,
+          value: "first progress",
+          error: undefined,
+        },
+      });
+      const oldEventsAfterReplacement = (records: typeof events) => {
+        const frontier = replacementActiveIndex(records);
+        return records
+          .slice(frontier + 1)
+          .filter(({ snapshot }) => snapshot.execution === firstExecution);
+      };
+      expect(oldEventsAfterReplacement(eventsBeforeSettlement)).toEqual([]);
+      expect(oldEventsAfterReplacement(eventsAfterLateReport)).toEqual([]);
+      expect(oldEventsAfterReplacement(finalEvents)).toEqual([]);
       expect(ordinaryValueBeforeSettlement).toBe(initial);
       expect(ordinaryErrorBeforeSettlement).toBeUndefined();
       expect(secondSource.status).toBe("fulfilled");
