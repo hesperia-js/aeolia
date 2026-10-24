@@ -65,7 +65,7 @@ function throwingRemovalSignal(
       if (property === "addEventListener")
         return (
           type: string,
-          listener: EventListenerOrEventListenerObject | null,
+          listener: EventListenerOrEventListenerObject,
           options?: boolean | AddEventListenerOptions,
         ) => {
           nativeAdd(type, listener, options);
@@ -77,7 +77,7 @@ function throwingRemovalSignal(
       if (property === "removeEventListener")
         return (
           type: string,
-          listener: EventListenerOrEventListenerObject | null,
+          listener: EventListenerOrEventListenerObject,
           options?: boolean | EventListenerOptions,
         ) => {
           nativeRemove(type, listener, options);
