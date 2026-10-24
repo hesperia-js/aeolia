@@ -834,6 +834,7 @@ function disposeGraphContents<C extends Contract>(
         progress.contexts ??= [...state.bindingContexts];
         const context = progress.contexts[progress.contextIndex];
         if (context !== undefined) {
+          if (!context.disposed) reactiveInternal.assertWritesAllowed(context.activeCell);
           progress.contextIndex += 1;
           attempt(() => disposeBindingContextRuntime(context), true);
           break;
