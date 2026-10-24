@@ -1,9 +1,9 @@
 import type {
-  FetchOptions,
   Graph,
   GraphId,
   MemberOf,
   QueryDefinition,
+  QueryFetchOptions,
   QueryStore,
   Readable,
   StoreIdentity,
@@ -35,9 +35,16 @@ import { beginPhysicalWork, createRetirementOwner, finishPhysicalWork } from "./
 import { makeQueryStore } from "./query.ts";
 import type { BindingContextRuntime, QueryBindingRuntime } from "./runtime.ts";
 
-type AnyQuery = QueryDefinition<any, any, any>;
-type QueryInput<Q extends AnyQuery> = Q extends QueryDefinition<infer I, any, any> ? I : never;
-type QueryKey<Q extends AnyQuery> = Q extends QueryDefinition<any, any, infer K> ? K : never;
+type AnyQuery = QueryDefinition<any, any, any, any>;
+type QueryInput<Q extends AnyQuery> = Q extends QueryDefinition<infer I, any, any, any> ? I : never;
+type QueryKey<Q extends AnyQuery> = Q extends QueryDefinition<any, any, infer K, any> ? K : never;
+type QueryProgress<Q extends AnyQuery> = Q extends {
+  readonly fetch: (input: any, options: infer Options) => any;
+}
+  ? Options extends { readonly reportProgress: (value: infer P) => void }
+    ? P
+    : never
+  : never;
 declare const queryBindingHandleBrand: unique symbol;
 declare const targetBrand: unique symbol;
 
@@ -69,7 +76,7 @@ export interface BindingContext {
 
 /** Query call forms retain the original input/key and use the completed value. */
 export type BoundQueryMember<Q extends AnyQuery, V> = MemberOf<
-  QueryDefinition<QueryInput<Q>, V, QueryKey<Q>>
+  QueryDefinition<QueryInput<Q>, V, QueryKey<Q>, QueryProgress<Q>>
 >;
 
 /** Opaque query binding metadata; its fields alone grant no runtime authority. */
@@ -118,7 +125,7 @@ export interface QueryBinding<Q extends AnyQuery, V> extends QueryBindingHandle 
    * Reset permits a new ticket on the retained handle; older tickets stay stale.
    * @throws TypeError for a foreign/fabricated handle; disposed lifetimes throw Fault.
    */
-  target(store: QueryStore<V>): TypedTarget<Q, V> | undefined;
+  target(store: QueryStore<V, QueryProgress<Q>>): TypedTarget<Q, V> | undefined;
 }
 
 /** Captured callback and value policy for one context/query/profile association. */
@@ -133,7 +140,10 @@ export interface QueryBindingConfiguration<Q extends AnyQuery, V> {
    * @param context - Native request cancellation, graph and logical key.
    * @returns A completed value or thenable; rejection uses normal query failure.
    */
-  readonly fetch: (input: QueryInput<Q>, context: FetchOptions) => V | PromiseLike<V>;
+  readonly fetch: (
+    input: QueryInput<Q>,
+    context: QueryFetchOptions<QueryProgress<Q>>,
+  ) => V | PromiseLike<V>;
   /** Value-specific defaults; raw equality is never inherited through a cast. */
   readonly value?: Pick<ValueOptions<NoInfer<V>>, "initial" | "equals" | "snapshot">;
 }
@@ -174,7 +184,7 @@ export function createBindingContext(graph: Graph): BindingContext {
 
 function captureTarget<Q extends AnyQuery, V>(
   binding: QueryBindingRuntime,
-  store: QueryStore<V>,
+  store: QueryStore<V, QueryProgress<Q>>,
 ): TypedTarget<Q, V> | undefined {
   assertContextOpen(binding.context);
   const runtime = queryRuntimeByStore.get(store);
@@ -259,15 +269,20 @@ function bindQueryOperation<Q extends AnyQuery, V>(
     (value !== undefined && !isValueOptions(value))
   )
     throw new TypeError("Invalid query binding configuration");
-  const execution: QueryDefinition<QueryInput<Q>, V, QueryKey<Q>> = Object.freeze({
-    kind: "query",
-    name: definition.name,
-    key: definition.key,
-    fetch: async (input: QueryInput<Q>, options: FetchOptions): Promise<V> => fetch(input, options),
-    revalidateAfterMs: definition.revalidateAfterMs,
-    snapshot: value?.snapshot ?? definition.snapshot,
-    equals: value?.equals,
-  });
+  const execution: QueryDefinition<QueryInput<Q>, V, QueryKey<Q>, QueryProgress<Q>> = Object.freeze(
+    {
+      kind: "query",
+      name: definition.name,
+      key: definition.key,
+      fetch: async (
+        input: QueryInput<Q>,
+        options: QueryFetchOptions<QueryProgress<Q>>,
+      ): Promise<V> => fetch(input, options),
+      revalidateAfterMs: definition.revalidateAfterMs,
+      snapshot: value?.snapshot ?? definition.snapshot,
+      equals: value?.equals,
+    },
+  );
   assertContextOpen(context);
   let profiles = context.bindings.get(definition);
   if (profiles?.has(profile)) throw new TypeError("Query binding is already registered");
@@ -312,7 +327,7 @@ function bindQueryOperation<Q extends AnyQuery, V>(
     profile,
     definition,
     member,
-    target: (store: QueryStore<V>) => captureTarget<Q, V>(binding, store),
+    target: (store: QueryStore<V, QueryProgress<Q>>) => captureTarget<Q, V>(binding, store),
   }) as QueryBinding<Q, V>;
   binding.handle = handle;
   bindings.set(handle, binding);

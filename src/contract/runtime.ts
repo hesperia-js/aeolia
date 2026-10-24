@@ -5,6 +5,8 @@ import type {
   MutationDefinition,
   CallContext,
   QueryDefinition,
+  QueryProgressEvent,
+  QueryProgressSnapshot,
   Readable,
   Store,
   StoreDefinition,
@@ -26,7 +28,7 @@ import type { PhysicalWork, RetirementOwner } from "./retirement.ts";
 export type TimerHandle = ReturnType<typeof setTimeout>;
 
 export interface QuerySource<T> {
-  readonly query: QueryDefinition<unknown, T, any>;
+  readonly query: QueryDefinition<unknown, T, any, any>;
   readonly input: unknown;
 }
 
@@ -53,6 +55,10 @@ export interface QueryRequest {
   readonly generation: number;
   /** Reset identity under which this request was issued. */
   readonly resetEpoch: number;
+  /** Store incarnation under which this request was issued. */
+  readonly incarnation: object;
+  /** Frozen opaque identity exposed by this request's progress snapshots. */
+  readonly progressIdentity: object;
   /** Whether this request is the one automatic recovery allowed after a failure. */
   readonly automaticRecovery: boolean;
   /** Successful predictions present when this request was issued. */
@@ -65,6 +71,30 @@ export interface QueryRequest {
   removeRequestAbort?: () => void;
   settled: boolean;
   superseded: boolean;
+}
+
+export interface QueryProgressListener {
+  readonly observer: (event: QueryProgressEvent<unknown>) => void;
+  active: boolean;
+  frontier: number;
+}
+
+export interface QueryProgressDelivery {
+  readonly sequence: number;
+  readonly event: QueryProgressEvent<unknown>;
+  readonly request?: QueryRequest;
+  readonly target?: QueryProgressListener;
+}
+
+/** Plain per-query authority behind the coalescing reactive projection. */
+export interface QueryProgressAuthority {
+  current: QueryProgressSnapshot<unknown>;
+  request?: QueryRequest;
+  sequence: number;
+  readonly listeners: Set<QueryProgressListener>;
+  readonly queue: QueryProgressDelivery[];
+  readonly continuationErrors: unknown[];
+  dispatching: boolean;
 }
 
 export type QueryOutcome = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
@@ -147,6 +177,14 @@ export interface StoreRuntime<T> {
   readonly requests: Set<QueryRequest>;
   readonly livenessStops: Unsubscribe[];
   readonly readStops: Unsubscribe[];
+  /** Lazily created query-only progress metadata; never part of store values. */
+  queryProgressCell?: WritableSignal<QueryProgressSnapshot<unknown>>;
+  /** Non-coalescing event authority; capture does not read the reactive cell. */
+  queryProgressAuthority?: QueryProgressAuthority;
+  /** Interrupts the current reporter before a non-request authority generation changes. */
+  queryProgressAuthorityChange?: (request: QueryRequest) => void;
+  /** Resets retained progress data when an idle keyed store is collected. */
+  queryProgressClear?: () => void;
   readonly binding?: StoreBindingRuntime;
   /** Current entry authority, independent of request success and the legacy dropped flag. */
   incarnation: object | undefined;
@@ -190,6 +228,8 @@ export interface StoreRuntime<T> {
   generation: number;
   lastInteraction: number;
   liveReadableCount: number;
+  /** Live query-progress readers retain collection without touching freshness. */
+  progressReadableCount: number;
   readyWaiterCount: number;
   valueLive: boolean;
   collectionIndex: number;
@@ -266,7 +306,7 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly maxPredictions: number;
   readonly onUnobservedFault?: (error: unknown) => void;
   readonly stores: Map<string | StoreIdentity, StoreRuntime<unknown>>;
-  readonly queryDefinitions: Set<QueryDefinition<any, any, any>>;
+  readonly queryDefinitions: Set<QueryDefinition<any, any, any, any>>;
   readonly mutationDefinitions: Set<MutationDefinition<any, any>>;
   readonly bindingContexts: Set<BindingContextRuntime>;
   readonly declaredStores: Map<string, StoreDefinition<unknown>>;
@@ -290,7 +330,7 @@ export interface BindingContextRuntime {
   readonly state: GraphRuntimeState<any>;
   readonly handle: BindingContext;
   readonly activeCell: WritableSignal<boolean>;
-  readonly bindings: Map<QueryDefinition<any, any, any>, Map<object, QueryBindingRuntime>>;
+  readonly bindings: Map<QueryDefinition<any, any, any, any>, Map<object, QueryBindingRuntime>>;
   readonly streamBindings: Map<StreamDefinition<any, any, any>, Map<object, StreamBindingRuntime>>;
   readonly mutations: Map<MutationDefinition<any, any>, Map<object, MutationBindingRuntime>>;
   readonly mutationControllers: Set<AbortController>;
@@ -301,9 +341,9 @@ export interface QueryBindingRuntime {
   readonly kind: "query";
   readonly addresses: Map<string, BindingAddressRuntime>;
   readonly context: BindingContextRuntime;
-  readonly definition: QueryDefinition<any, any, any>;
+  readonly definition: QueryDefinition<any, any, any, any>;
   readonly profile: object;
-  readonly execution: QueryDefinition<any, any, any>;
+  readonly execution: QueryDefinition<any, any, any, any>;
   readonly value: ValueOptions<any> | undefined;
   handle: object;
   readonly stores: Map<string, StoreRuntime<unknown>>;
@@ -353,7 +393,7 @@ export interface ProfileEffectRuntime {
   readonly affected: Affected<any>;
   readonly mutation: MutationDefinition<any, any>;
   readonly index: number;
-  readonly query: QueryDefinition<any, any, any>;
+  readonly query: QueryDefinition<any, any, any, any>;
   readonly prepare: (phase: object) => unknown;
   readonly settle: (phase: object) => unknown;
 }

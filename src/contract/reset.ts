@@ -5,6 +5,7 @@ import { nextGeneration } from "./store-state.ts";
 import { retireObservation } from "./observation-state.ts";
 import { nextValueRevision } from "./identity.ts";
 import { callerForSource, startQueryRequest } from "./query-request.ts";
+import { interruptQueryProgress } from "./query-progress.ts";
 import { openStream } from "./stream.ts";
 import {
   beginPhysicalWork,
@@ -47,6 +48,7 @@ function detachRequest<C extends Contract>(
   if (request.settled) return undefined;
   request.superseded = true;
   request.settled = true;
+  interruptQueryProgress(runtime, request, reason, { authorityChanged: true });
   const owner = runtime.binding?.context.retirement ?? state.retirement;
   const failures: unknown[] = [];
   for (const remove of [request.removeCallerAbort, request.removeRequestAbort]) {

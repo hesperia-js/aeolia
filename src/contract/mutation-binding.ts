@@ -24,10 +24,10 @@ import {
 import type { MutationBindingRuntime } from "./runtime.ts";
 
 type AnyMutation = MutationDefinition<any, any>;
-type AnyQuery = QueryDefinition<any, any, any>;
+type AnyQuery = QueryDefinition<any, any, any, any>;
 type MutationInput<M extends AnyMutation> = M extends MutationDefinition<infer I, any> ? I : never;
-type QueryInput<Q extends AnyQuery> = Q extends QueryDefinition<infer I, any, any> ? I : never;
-type QueryValue<Q extends AnyQuery> = Q extends QueryDefinition<any, infer V, any> ? V : never;
+type QueryInput<Q extends AnyQuery> = Q extends QueryDefinition<infer I, any, any, any> ? I : never;
+type QueryValue<Q extends AnyQuery> = Q extends QueryDefinition<any, infer V, any, any> ? V : never;
 type MaybePromise<T> = T | PromiseLike<T>;
 declare const instructionBrand: unique symbol;
 declare const predictionBrand: unique symbol;

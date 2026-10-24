@@ -2,15 +2,19 @@ import {
   adopt as rootAdopt,
   createGraph,
   observeStore as rootObserveStore,
+  observeQueryProgress as rootObserveQueryProgress,
   snapshot as rootSnapshot,
   type AdoptOptionsV2,
   type Signal as RootSignal,
   type SnapshotBindingReference,
   type SnapshotV2,
+  type QueryProgressEvent as RootQueryProgressEvent,
+  type QueryProgressObservation as RootQueryProgressObservation,
 } from "aeolia";
 import {
   createQuery,
   defineContract,
+  observeQueryProgress,
   observeStore,
   peekStore,
   affects,
@@ -29,6 +33,12 @@ import {
   type TargetPrediction,
   type ObservationLease,
   type StoreCapture,
+  type QueryFetchOptions,
+  type QueryProgressSnapshot,
+  type QueryProgressStatus,
+  type QueryProgressEvent,
+  type QueryProgressObservation,
+  type QueryStore,
   type QueryBindingHandle,
   type StreamBindingHandle,
 } from "aeolia/contract";
@@ -175,3 +185,43 @@ function versionedTransferSubpathConsumer(): void {
 }
 
 void versionedTransferSubpathConsumer;
+
+function queryProgressSubpathConsumer(): void {
+  type Progress = { readonly received: number };
+  const query = createQuery<string, number, string, Progress>({
+    name: "subpath-progress",
+    key: (input) => input,
+    fetch: async (_input, { reportProgress }) => {
+      reportProgress({ received: 1 });
+      return 1;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "subpath-progress", operations: { query } }),
+  });
+  const store: QueryStore<number, Progress> = graph.api.query("one");
+  const options: QueryFetchOptions<Progress> = {
+    abortSignal: new AbortController().signal,
+    graph: graph.id,
+    key: store.key,
+    reportProgress(value) {
+      void (value satisfies Progress);
+    },
+  };
+  const result: Promise<number> = query.fetch("one", options);
+  const snapshot: QueryProgressSnapshot<Progress> = store.progress.get();
+  const status: QueryProgressStatus = snapshot.status;
+  const observation: QueryProgressObservation<Progress> = observeQueryProgress(store);
+  const rootObservation: RootQueryProgressObservation<Progress> = rootObserveQueryProgress(store);
+  const captured: QueryProgressSnapshot<Progress> = observation.capture();
+  const stop = rootObservation.subscribe((event: RootQueryProgressEvent<Progress>) => {
+    const current: QueryProgressEvent<Progress> = event;
+    void current;
+  });
+  // @ts-expect-error Contract subpath snapshots expose no Hesperia projection field.
+  void snapshot.project;
+  void [result, status, captured, stop];
+  graph.dispose();
+}
+
+void queryProgressSubpathConsumer;

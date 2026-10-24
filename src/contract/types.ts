@@ -1,4 +1,5 @@
 import type { Readable } from "../reactive.ts";
+import type { Unsubscribe } from "../fault.ts";
 import { isAbortSignal, isObject } from "../utils.ts";
 import type {
   GraphId,
@@ -119,7 +120,7 @@ export interface Store<T> {
  * writable store, so `set` and `update` can establish local authoritative
  * state while a request is in flight.
  */
-export interface QueryStore<T> extends Store<T> {
+export interface QueryStore<T, P = never> extends Store<T> {
   /**
    * Resolves with the committed query value when this caller is ready.
    *
@@ -149,6 +150,16 @@ export interface QueryStore<T> extends Store<T> {
 
   /** The lifecycle status for this query caller. */
   readonly status: Readable<StoreStatus>;
+
+  /**
+   * Read-only metadata for the current query execution's accepted progress.
+   *
+   * A live observer can retain this query for collection, but reading or
+   * observing progress does not activate a request, touch ordinary query
+   * retention, arm freshness, or change committed values. The snapshot is not
+   * included in graph snapshots or adoption.
+   */
+  readonly progress: Readable<QueryProgressSnapshot<P>>;
 
   /**
    * Starts a fresh request for this caller's input and key.
@@ -411,19 +422,108 @@ export interface FetchOptions extends CallContext {
   readonly key: StoreKey;
 }
 
+/** Fetch options for a query that can publish execution-scoped progress. */
+export type QueryFetchOptions<P = never> = FetchOptions &
+  ([P] extends [never]
+    ? { readonly reportProgress?: (value: never) => void }
+    : {
+        /**
+         * Publishes one accepted progress value for this actual keyed execution.
+         * Stale, replaced, reset, revoked, terminal, or generation-invalidated
+         * requests are ignored.
+         * Reporting does not settle the fetch promise or write the ordinary query
+         * value; the callback's eventual promise remains the completion authority.
+         * Consumer callback faults are diagnosed after ordered delivery drains and
+         * do not change request settlement.
+         * @throws Fault if native writes are forbidden at the call site.
+         * @throws RangeError if the report revision or internal event sequence is
+         * exhausted.
+         * @param value - The newly assembled progress value. `undefined` is a valid
+         * value and is distinguished from no progress by the query snapshot.
+         */
+        readonly reportProgress: (value: P) => void;
+      });
+
+/** Lifecycle of the most recent query execution that owns a progress snapshot. */
+export type QueryProgressStatus = "idle" | "active" | "complete" | "interrupted" | "failed";
+
+/** Read-only snapshot of one actual query execution's progress metadata. */
+export interface QueryProgressSnapshot<P> {
+  /** Frozen opaque identity of the actual query request; absent before execution. */
+  readonly execution?: object;
+
+  /** Number of accepted reports in this execution; terminal snapshots retain it. */
+  readonly reportRevision: number;
+
+  /** Whether this execution accepted a progress value, including `undefined`. */
+  readonly hasValue: boolean;
+
+  /** The latest accepted progress value when `hasValue` is true. */
+  readonly value: P | undefined;
+
+  /**
+   * Current request lifecycle; progress delivery does not imply completion.
+   * Manual writes, adoption, reset, cancellation, and replacement can interrupt
+   * a request without settling its original fetch promise.
+   */
+  readonly status: QueryProgressStatus;
+
+  /**
+   * Original interruption or failure reason. It may itself be `undefined`;
+   * `status` distinguishes a failed execution from one without an error.
+   */
+  readonly error: unknown;
+}
+
+/** One current seed or accepted transition delivered by query progress observation. */
+export interface QueryProgressEvent<P> {
+  /** `current` is the one-time seed; `report` and `lifecycle` are ordered transitions. */
+  readonly kind: "current" | "report" | "lifecycle";
+
+  /** Immutable authoritative progress state at the event's position. */
+  readonly snapshot: QueryProgressSnapshot<P>;
+}
+
+/** Non-coalescing observation of one query store's authoritative progress state. */
+export interface QueryProgressObservation<P> {
+  /**
+   * Capture the latest authoritative snapshot without tracking, retaining, or
+   * activating the query. Unlike the ordinary `progress` readable, this state
+   * includes every accepted report even when reactive propagation coalesces.
+   * @throws {Fault} if the query store or its graph has been disposed.
+   */
+  capture(): QueryProgressSnapshot<P>;
+
+  /**
+   * Subscribe to one current seed followed by each newer report and lifecycle
+   * transition in FIFO, non-reentrant order. Past events are not replayed.
+   * A throwing seed callback removes this subscription and throws synchronously
+   * unless the seed was deferred by an active delivery, in which case the fault
+   * is reported through the graph continuation channel. Later delivery failures
+   * are diagnosed after queued events drain and do not change request settlement.
+   * @throws TypeError if `observer` is not a function.
+   * @throws Fault if the query store or its graph has been disposed.
+   * @param observer - Receives immutable current, report, and lifecycle events.
+   * @returns An idempotent handle that releases this subscription's retention.
+   */
+  subscribe(observer: (event: QueryProgressEvent<P>) => void): Unsubscribe;
+}
+
 /** Input used to declare a query operation in a contract. */
-export interface CreateQueryInput<I, T, K extends string> {
+export interface CreateQueryInput<I, T, K extends string, P = never> {
   /** Human-readable operation name used in diagnostics and test records. */
   readonly name: string;
 
   /**
-   * Backend callback that resolves the authoritative value.
+   * Backend callback that resolves the authoritative value and may publish
+   * assembled progress for the same execution.
    *
    * Aeolia invokes this callback when a member call needs data or when a
    * caller explicitly revalidates. The callback may reject; the graph records
-   * that failure on the keyed store and caller status.
+   * that failure on the keyed store and caller status. Progress reports do not
+   * settle this promise or become the committed query value.
    */
-  readonly fetch: (input: I, options: FetchOptions) => Promise<T>;
+  readonly fetch: (input: I, options: QueryFetchOptions<P>) => Promise<T>;
 
   /**
    * Derives the shared store key for an input.
@@ -462,7 +562,7 @@ export interface CreateQueryInput<I, T, K extends string> {
 
 export function isCreateQueryInput(
   value: unknown,
-): value is CreateQueryInput<unknown, unknown, string> {
+): value is CreateQueryInput<unknown, unknown, string, any> {
   return (
     isNamedDeclaration(value) &&
     "key" in value &&
@@ -482,16 +582,19 @@ export function isCreateQueryInput(
  * The definition only describes callbacks and keying. It does not invoke the
  * backend or create a store until a graph member call uses it.
  */
-export interface QueryDefinition<I, T, K extends string = string> extends CreateQueryInput<
+export interface QueryDefinition<
   I,
   T,
-  K
-> {
+  K extends string = string,
+  P = never,
+> extends CreateQueryInput<I, T, K, P> {
   /** Discriminator identifying this declaration as a query. */
   readonly kind: "query";
 }
 
-export function isQueryDefinition(value: unknown): value is QueryDefinition<unknown, unknown> {
+export function isQueryDefinition(
+  value: unknown,
+): value is QueryDefinition<unknown, unknown, string, any> {
   return isCreateQueryInput(value) && "kind" in value && value.kind === "query";
 }
 
@@ -587,7 +690,7 @@ export interface Affected<I> {
   readonly [affectedBrand]: true;
 
   /** Query whose keyed store is invalidated, revalidated, or predicted. */
-  readonly query: QueryDefinition<any, any, any>;
+  readonly query: QueryDefinition<any, any, any, any>;
 
   /** Maps mutation input to the query input when the affected query needs one. */
   readonly select: (input: I) => unknown;
@@ -791,7 +894,7 @@ export function hasMutationOptionFields(value: unknown): boolean {
 
 /** Any executable query, mutation, or stream declaration. */
 export type OperationDefinition =
-  | QueryDefinition<any, any, any>
+  | QueryDefinition<any, any, any, any>
   | MutationDefinition<any, any>
   | StreamDefinition<any, any, any>;
 
@@ -852,6 +955,14 @@ type BrandedOperationOptions<Options extends object> = Options & {
   readonly [queryOptionsBrand]: true;
 };
 
+type QueryProgressOf<D> = D extends {
+  readonly fetch: (input: any, options: infer Options) => any;
+}
+  ? Options extends { readonly reportProgress: (value: infer P) => void }
+    ? P
+    : never
+  : never;
+
 /**
  * Maps one declaration or nested declaration tree to its graph API member.
  *
@@ -861,19 +972,19 @@ type BrandedOperationOptions<Options extends object> = Options & {
  * an optional second options object overrides matching branded fields.
  */
 export type MemberOf<D> =
-  D extends QueryDefinition<infer I, infer T, any>
-    ? ((input: I, options?: StoreOptions<T>) => QueryStore<T>) &
+  D extends QueryDefinition<infer I, infer T, any, any>
+    ? ((input: I, options?: StoreOptions<T>) => QueryStore<T, QueryProgressOf<D>>) &
         ([I] extends [void | undefined]
-          ? (() => QueryStore<T>) &
+          ? (() => QueryStore<T, QueryProgressOf<D>>) &
               ((
                 options: StoreOptions<T> | BrandedOperationOptions<StoreOptions<T>>,
-              ) => QueryStore<T>)
+              ) => QueryStore<T, QueryProgressOf<D>>)
           : {}) &
         ([I] extends [void | undefined]
           ? (
               options: BrandedOperationOptions<StoreOptions<T>>,
               overrides?: StoreOptions<T>,
-            ) => QueryStore<T>
+            ) => QueryStore<T, QueryProgressOf<D>>
           : {})
     : D extends MutationDefinition<infer I, infer R>
       ? ((input: I, options?: MutationOptions) => Promise<R>) &
@@ -903,7 +1014,7 @@ export type ContractApi<C extends Contract> =
 
 /** Extracts query and stream key patterns from a declaration tree. */
 export type StorePatterns<D> =
-  D extends QueryDefinition<any, any, infer K>
+  D extends QueryDefinition<any, any, infer K, any>
     ? K
     : D extends StreamDefinition<any, infer _T, infer K>
       ? K
@@ -964,7 +1075,7 @@ type KeyedStoreEntry<P extends string, V> = {
 
 /** Flattens a declaration tree into key-pattern/value pairs; mutations yield no pair. */
 export type KeyedStores<D> =
-  D extends QueryDefinition<any, infer T, infer K>
+  D extends QueryDefinition<any, infer T, infer K, any>
     ? KeyedStoreEntry<K, T>
     : D extends StreamDefinition<any, infer T, infer K>
       ? KeyedStoreEntry<K, T>
