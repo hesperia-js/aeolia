@@ -7,6 +7,7 @@ import {
   createGraph,
   createStore,
   defineContract,
+  observeQueryProgress as rootObserveQueryProgress,
   peekStore,
   signal,
   snapshot,
@@ -21,6 +22,7 @@ import {
   createStream,
   bindStream,
   inspectBoundAddress,
+  observeQueryProgress,
   storeKey,
   predictionFor,
   profileEffect,
@@ -447,8 +449,13 @@ function waitForValue(store, predicate, session) {
 }
 
 async function verifyBoundConsumer() {
-  check(bindOperation === rootBindOperation, "Binding constructors differ across package entries");
+  check(
+    bindOperation === rootBindOperation &&
+      observeQueryProgress === rootObserveQueryProgress,
+    "Binding or progress observer differs across package entries",
+  );
   const backend = testBackend();
+  let reportNumberProgress;
   const query = createQuery({
     name: "bound.read",
     key: (input) => input.id,
@@ -462,9 +469,20 @@ async function verifyBoundConsumer() {
   const graph = createGraph({
     contract: defineContract({ namespace: "packed-bound", operations: { query, mutation } }),
   });
+  let originalRead;
+  let originalReadResolved = false;
+  let stopProgress = () => {};
+  let contextRetirement;
   try {
     const context = createBindingContext(graph);
-    const numbers = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+    const numbers = bindOperation(graph, query, {
+      context,
+      profile: {},
+      fetch: (input, call) => {
+        reportNumberProgress = call.reportProgress;
+        return query.fetch(input, call);
+      },
+    });
     const labels = bindOperation(graph, query, {
       context,
       profile: {},
@@ -504,8 +522,115 @@ async function verifyBoundConsumer() {
       number.value.get() === 12 && label.value.get() === "label:12",
       "Refresh lost the profile completion callback",
     );
+
+    const siblingContext = createBindingContext(graph);
+    const observation = rootObserveQueryProgress(number);
+    const progressEvents = [];
+    let retirementFromProgress;
+    stopProgress = observation.subscribe((event) => {
+      progressEvents.push(event);
+      if (event.kind !== "report" || retirementFromProgress !== undefined) return;
+
+      let capture;
+      try {
+        capture = { kind: "captured", snapshot: observation.capture() };
+      } catch (error) {
+        capture = { kind: "threw", error };
+      }
+
+      let result;
+      try {
+        contextRetirement = context.retire();
+        result = { kind: "returned", promise: contextRetirement };
+      } catch (error) {
+        result = { kind: "threw", error };
+      }
+      retirementFromProgress = { event, capture, result };
+    });
+
+    const revalidation = number.revalidate();
+    const revalidationOutcome = revalidation.then(
+      (value) => ({ kind: "resolved", value }),
+      (error) => ({ kind: "rejected", error }),
+    );
+    const activeReads = backend.pending("bound.read");
+    originalRead = activeReads[0];
+    check(activeReads.length === 1, "Progress retirement did not start exactly one original read");
+    check(typeof reportNumberProgress === "function", "Bound query did not expose its reporter");
+
+    const disposedReady = number.ready.then(
+      () => ({ kind: "resolved" }),
+      (error) => ({ kind: "rejected", error }),
+    );
+    const firstProgress = { source: "installed-bound-query", sequence: 1 };
+    reportNumberProgress(firstProgress);
+
+    check(
+      retirementFromProgress?.event.snapshot.value === firstProgress &&
+        retirementFromProgress.capture.kind === "captured" &&
+        retirementFromProgress.capture.snapshot.value === firstProgress,
+      "The public progress observer did not capture the accepted bound report",
+    );
+    check(
+      retirementFromProgress.result.kind === "returned" &&
+        typeof retirementFromProgress.result.promise?.then === "function",
+      "BindingContext.retire did not return from the accepted progress callback",
+    );
+    check(
+      context.retire() === contextRetirement,
+      "Binding context retirement did not return its cached promise",
+    );
+    check(
+      context.active.get() === false && originalRead.aborted,
+      "Context retirement did not deactivate its context and abort the original request",
+    );
+    check(
+      siblingContext.active.get() === true,
+      "Context retirement affected an empty sibling context",
+    );
+
+    const readyOutcome = await disposedReady;
+    check(
+      readyOutcome.kind === "rejected" &&
+        readyOutcome.error instanceof Fault &&
+        readyOutcome.error.kind === "disposed",
+      "A bound query ready read did not retain its disposed Fault after context retirement",
+    );
+    const acceptedReportCount = progressEvents.filter((event) => event.kind === "report").length;
+    check(
+      acceptedReportCount === 1,
+      "The original bound request delivered an unexpected progress report",
+    );
+    await expectPending(
+      contextRetirement,
+      "Binding context retirement completed before its original backend work settled",
+    );
+
+    reportNumberProgress({ source: "installed-bound-query", sequence: 2 });
+    check(
+      progressEvents.filter((event) => event.kind === "report").length === acceptedReportCount,
+      "A late report from the retired bound request was delivered",
+    );
+
+    backend.resolve(originalRead, 13);
+    originalReadResolved = true;
+    const [originalRevalidation] = await Promise.all([revalidationOutcome, contextRetirement]);
+    check(
+      originalRevalidation.kind === "resolved",
+      "The original bound revalidation did not resolve after its backend work settled",
+    );
+    check(
+      progressEvents.filter((event) => event.kind === "report").length === acceptedReportCount,
+      "The retired bound request delivered progress after its original backend work settled",
+    );
   } finally {
+    if (originalRead !== undefined && !originalReadResolved) {
+      backend.resolve(originalRead, 13);
+      originalReadResolved = true;
+    }
+    stopProgress();
     graph.dispose();
+    if (contextRetirement !== undefined) await contextRetirement.catch(() => {});
   }
 }
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   copyFile,
   lstat,
@@ -12,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { chromium } from "playwright";
 
 const root = resolve(import.meta.dir, "../..");
@@ -48,6 +49,93 @@ async function run(args: string[], cwd: string, expectedExit = 0): Promise<strin
   return stdout + stderr;
 }
 
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
+
+type InstalledPeerFact = {
+  name: string;
+  range: string;
+  optional: boolean;
+  lookup: "node_modules-manifest-traversal";
+  status: "resolved" | "unresolved" | "absent";
+  installed: {
+    name: string | undefined;
+    version: string | undefined;
+    realpath: string;
+    symlink: boolean;
+    manifestSha256: string;
+    routing: { exports: unknown; main: unknown; module: unknown; types: unknown };
+  } | null;
+};
+
+async function installedPeerFact(
+  installed: string,
+  name: string,
+  range: string,
+  optional: boolean,
+): Promise<InstalledPeerFact> {
+  const visited = new Set<string>();
+  let directory = installed;
+  while (true) {
+    const modules =
+      directory.split(sep).at(-1) === "node_modules" ? directory : join(directory, "node_modules");
+    const packageRoot = join(modules, ...name.split("/"));
+    if (!visited.has(packageRoot)) {
+      visited.add(packageRoot);
+      const manifestPath = join(packageRoot, "package.json");
+      try {
+        const bytes = await readFile(manifestPath);
+        const peerManifest = JSON.parse(bytes.toString("utf8"));
+        const realPackageRoot = await realpath(packageRoot);
+        return {
+          name,
+          range,
+          optional,
+          lookup: "node_modules-manifest-traversal",
+          status: peerManifest.name === name ? "resolved" : "unresolved",
+          installed: {
+            name: peerManifest.name,
+            version: peerManifest.version,
+            realpath: realPackageRoot,
+            symlink: (await lstat(packageRoot)).isSymbolicLink(),
+            manifestSha256: sha256(bytes),
+            routing: {
+              exports: peerManifest.exports ?? null,
+              main: peerManifest.main ?? null,
+              module: peerManifest.module ?? null,
+              types: peerManifest.types ?? null,
+            },
+          },
+        };
+      } catch (error) {
+        if (!isMissingFile(error)) throw error;
+      }
+    }
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+
+  return {
+    name,
+    range,
+    optional,
+    lookup: "node_modules-manifest-traversal",
+    status: "absent",
+    installed: null,
+  };
+}
+
 try {
   await mkdir(consumer);
   if (suppliedArchive === undefined)
@@ -64,6 +152,7 @@ try {
   await run([process.execPath, "install", "--ignore-scripts", "--offline"], consumer);
   const installed = join(consumer, "node_modules", "aeolia");
   const manifest = await Bun.file(join(installed, "package.json")).json();
+  const installedManifestBytes = await readFile(join(installed, "package.json"));
   assert.equal(
     manifest.name,
     sourceManifest.name,
@@ -74,12 +163,87 @@ try {
     sourceManifest.version,
     "Archive package version does not match this checkout",
   );
-  assert.equal(
-    (await lstat(installed)).isSymbolicLink(),
-    false,
-    "Consumer must install the archive, not a link",
+  const installedIsSymbolicLink = (await lstat(installed)).isSymbolicLink();
+  assert.equal(installedIsSymbolicLink, false, "Consumer must install the archive, not a link");
+  const consumerRealpath = await realpath(consumer);
+  const installedRealpath = await realpath(installed);
+  assert.ok(installedRealpath.startsWith(consumerRealpath + sep));
+
+  const installedDist: { path: string; size: number; sha256: string }[] = [];
+  for await (const path of new Bun.Glob("dist/**/*").scan({ cwd: installed, onlyFiles: true })) {
+    const normalizedPath = path.replaceAll("\\", "/");
+    const bytes = await readFile(join(installed, path));
+    installedDist.push({ path: normalizedPath, size: bytes.byteLength, sha256: sha256(bytes) });
+  }
+  installedDist.sort((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
   );
-  assert.ok((await realpath(installed)).startsWith((await realpath(consumer)) + sep));
+
+  const peerDependencies = manifest.peerDependencies ?? {};
+  const peerMetadata = manifest.peerDependenciesMeta ?? {};
+  const peerResolutions: InstalledPeerFact[] = [];
+  for (const [name, range] of Object.entries(peerDependencies).sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  )) {
+    peerResolutions.push(
+      await installedPeerFact(installed, name, String(range), peerMetadata[name]?.optional === true),
+    );
+  }
+
+  const consumerManifestBytes = await readFile(join(consumer, "package.json"));
+  const consumerManifest = JSON.parse(consumerManifestBytes.toString("utf8"));
+  const lockNames = new Set([
+    "bun.lock",
+    "bun.lockb",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+  ]);
+  const consumerLockFiles: { path: string; size: number; sha256: string }[] = [];
+  for (const name of await readdir(consumer)) {
+    if (!lockNames.has(name)) continue;
+    const bytes = await readFile(join(consumer, name));
+    consumerLockFiles.push({ path: name, size: bytes.byteLength, sha256: sha256(bytes) });
+  }
+  assert.ok(consumerLockFiles.length > 0, "Consumer installation did not retain a lockfile");
+  consumerLockFiles.sort((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+  );
+
+  const archiveBytes = await readFile(archive);
+  console.log(
+    JSON.stringify({
+      kind: "aeolia.installed-consumer.receipt",
+      archive: {
+        suppliedPath: suppliedArchive,
+        temporarySize: archiveBytes.byteLength,
+        temporarySha256: sha256(archiveBytes),
+      },
+      consumer: {
+        realpath: consumerRealpath,
+        manifestSha256: sha256(consumerManifestBytes),
+        dependencies: consumerManifest.dependencies ?? {},
+        lockFiles: consumerLockFiles,
+      },
+      installed: {
+        realpath: installedRealpath,
+        symlink: installedIsSymbolicLink,
+        manifest: {
+          sha256: sha256(installedManifestBytes),
+          name: manifest.name,
+          version: manifest.version,
+          main: manifest.main ?? null,
+          types: manifest.types ?? null,
+          exports: manifest.exports ?? {},
+          peerDependencies,
+          peerDependenciesMeta: peerMetadata,
+        },
+        peerResolutions,
+        distFiles: installedDist,
+      },
+    }),
+  );
 
   const fixtures = await readdir(import.meta.dir);
   const typeFixtures = fixtures.filter((name) => name.endsWith(".types.ts"));
