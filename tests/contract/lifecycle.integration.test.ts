@@ -1142,7 +1142,6 @@ it.each(["Error", "undefined"] as const)(
         () => undefined,
         () => undefined,
       );
-      await ready;
     }
   },
 );
