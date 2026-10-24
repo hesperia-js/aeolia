@@ -392,6 +392,135 @@ describe("query progress", () => {
     graph.dispose();
   });
 
+  it.each(["complete", "failed"] as const)(
+    "preserves accepted-report FIFO when a %s terminal is captured reentrantly",
+    async (terminal) => {
+      const success = { result: "success" } as const;
+      const work = deferred<typeof success>();
+      const failure = new Error("query failed");
+      const nativeThen = Promise.prototype.then;
+      let report!: (value: string) => void;
+      let forwardSettlement: (() => unknown) | undefined;
+      let forwardedDuringReport = false;
+      const query = createQuery<string, typeof success, string, string>({
+        name: "progress.reentrant-terminal-capture",
+        key: (input) => input,
+        fetch: (_input, options) => {
+          report = options.reportProgress;
+          return Object.defineProperty(work.promise, "then", {
+            configurable: true,
+            value: function (
+              this: Promise<typeof success>,
+              onFulfilled: ((value: typeof success) => unknown) | null | undefined,
+              onRejected: ((reason: unknown) => unknown) | null | undefined,
+            ) {
+              const forward = <T>(
+                callback: ((value: T) => unknown) | null | undefined,
+                value: T,
+                fallback: () => unknown,
+              ): unknown => {
+                let forwarded = false;
+                let callbackResult: unknown;
+                const release = (): unknown => {
+                  if (forwarded) return callbackResult;
+                  forwarded = true;
+                  callbackResult = typeof callback === "function" ? callback(value) : fallback();
+                  return callbackResult;
+                };
+                forwardSettlement = release;
+                // The source Promise has settled; forward its outcome during report delivery.
+                report("first");
+                if (!forwarded) release();
+                return callbackResult;
+              };
+
+              return Reflect.apply(nativeThen, this, [
+                (value: typeof success) => forward(onFulfilled, value, () => value),
+                (reason: unknown) =>
+                  forward(onRejected, reason, () => {
+                    throw reason;
+                  }),
+              ]);
+            },
+          });
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({
+          namespace: "progress-reentrant-terminal-capture",
+          operations: { query },
+        }),
+      });
+      const store = graph.api.query("one");
+      const ready = store.ready;
+      const observation = observeQueryProgress(store);
+      const execution = observation.capture().execution;
+      type ProgressEventRecord = [string, number, string, unknown, unknown];
+      const events: ProgressEventRecord[] = [];
+      const deliveredPrefixAtCapture: ProgressEventRecord[][] = [];
+      const capturesDuringReport: Array<ReturnType<typeof observation.capture>> = [];
+      const stop = observation.subscribe(({ kind, snapshot }) => {
+        events.push([
+          kind,
+          snapshot.reportRevision,
+          snapshot.status,
+          snapshot.value,
+          snapshot.error,
+        ]);
+        if (kind === "report" && snapshot.reportRevision === 1) {
+          report("second");
+          report("third");
+          const release = forwardSettlement;
+          if (release !== undefined) {
+            release();
+            forwardedDuringReport = true;
+          }
+          deliveredPrefixAtCapture.push([...events]);
+          capturesDuringReport.push(observation.capture());
+        }
+      });
+
+      if (terminal === "complete") work.resolve(success);
+      else work.reject(failure);
+      const outcome = await Promise.allSettled([ready]);
+
+      expect(forwardedDuringReport).toBe(true);
+      expect(deliveredPrefixAtCapture).toEqual([
+        [
+          ["current", 0, "active", undefined, undefined],
+          ["report", 1, "active", "first", undefined],
+        ],
+      ]);
+      expect(execution).toBeDefined();
+      expect(capturesDuringReport).toHaveLength(1);
+      expect(capturesDuringReport[0]?.execution).toBe(execution);
+      expect(capturesDuringReport[0]).toMatchObject({
+        reportRevision: 3,
+        hasValue: true,
+        value: "third",
+        status: terminal,
+        error: terminal === "failed" ? failure : undefined,
+      });
+      expect(capturesDuringReport[0]?.error).toBe(terminal === "failed" ? failure : undefined);
+      if (terminal === "complete") {
+        expect(outcome[0]?.status).toBe("fulfilled");
+        if (outcome[0]?.status === "fulfilled") expect(outcome[0].value).toBe(success);
+      } else {
+        expect(outcome[0]?.status).toBe("rejected");
+        if (outcome[0]?.status === "rejected") expect(outcome[0].reason).toBe(failure);
+      }
+      expect(events).toEqual([
+        ["current", 0, "active", undefined, undefined],
+        ["report", 1, "active", "first", undefined],
+        ["report", 2, "active", "second", undefined],
+        ["report", 3, "active", "third", undefined],
+        ["lifecycle", 3, terminal, "third", terminal === "failed" ? failure : undefined],
+      ]);
+      stop();
+      graph.dispose();
+    },
+  );
+
   it("retains the active request authority through reentrant landing-time writes", async () => {
     const work = deferred<number>();
     let writeDuringLanding = (): void => undefined;
