@@ -450,8 +450,7 @@ function waitForValue(store, predicate, session) {
 
 async function verifyBoundConsumer() {
   check(
-    bindOperation === rootBindOperation &&
-      observeQueryProgress === rootObserveQueryProgress,
+    bindOperation === rootBindOperation && observeQueryProgress === rootObserveQueryProgress,
     "Binding or progress observer differs across package entries",
   );
   const backend = testBackend();

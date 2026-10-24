@@ -54,12 +54,7 @@ function sha256(bytes: Uint8Array): string {
 }
 
 function isMissingFile(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ENOENT"
-  );
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
 type InstalledPeerFact = {
@@ -186,7 +181,12 @@ try {
     left < right ? -1 : left > right ? 1 : 0,
   )) {
     peerResolutions.push(
-      await installedPeerFact(installed, name, String(range), peerMetadata[name]?.optional === true),
+      await installedPeerFact(
+        installed,
+        name,
+        String(range),
+        peerMetadata[name]?.optional === true,
+      ),
     );
   }
 
