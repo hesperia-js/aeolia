@@ -981,6 +981,172 @@ it("joins original queries after cancellation and prior void graph disposal", as
   }
 });
 
+it.each(["Error", "undefined"] as const)(
+  "resumes prior graph disposal with a %s lifetime-removal failure and reentrant retirement",
+  async (failureKind) => {
+    const failure = new Error("lifetime listener removal failed");
+    const cause = failureKind === "Error" ? failure : undefined;
+    const original = Promise.withResolvers<number>();
+    const projectionPull = Promise.withResolvers<IteratorResult<number>>();
+    const projectionReturn = Promise.withResolvers<IteratorResult<number>>();
+    const pullStarted = Promise.withResolvers<void>();
+    const lifetime = new AbortController();
+    let retireDuringRemoval: (() => Promise<void>) | undefined;
+    let reentrantRetirement: Promise<void> | undefined;
+    let removalCalls = 0;
+    let fetchCalls = 0;
+    let queryAbortCalls = 0;
+    let returnCalls = 0;
+    let querySignal: AbortSignal | undefined;
+    const abortSignal: AbortSignal = {
+      get aborted() {
+        return lifetime.signal.aborted;
+      },
+      get reason() {
+        return lifetime.signal.reason;
+      },
+      get onabort() {
+        return lifetime.signal.onabort;
+      },
+      set onabort(value) {
+        lifetime.signal.onabort = value;
+      },
+      throwIfAborted() {
+        lifetime.signal.throwIfAborted();
+      },
+      addEventListener(type, listener, options) {
+        lifetime.signal.addEventListener(type, listener, options);
+      },
+      removeEventListener(type, listener, options) {
+        lifetime.signal.removeEventListener(type, listener, options);
+        if (type !== "abort") return;
+        removalCalls += 1;
+        if (removalCalls === 1) reentrantRetirement = retireDuringRemoval?.();
+        throw cause;
+      },
+      dispatchEvent(event) {
+        return lifetime.signal.dispatchEvent(event);
+      },
+    };
+    const query = createQuery({
+      name: "prior-disposal.query",
+      key: () => "prior-disposal/query",
+      fetch: (_input: void, options) => {
+        fetchCalls += 1;
+        querySignal = options.abortSignal;
+        options.abortSignal.addEventListener("abort", () => {
+          queryAbortCalls += 1;
+        });
+        return original.promise;
+      },
+    });
+    const stream = createStream({
+      name: "prior-disposal.projection",
+      key: () => "prior-disposal/projection",
+      open: (): AsyncIterable<number> => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              pullStarted.resolve();
+              return projectionPull.promise;
+            },
+            return: () => {
+              returnCalls += 1;
+              return projectionReturn.promise;
+            },
+          };
+        },
+      }),
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "prior-disposal-retirement",
+        operations: { query, stream },
+      }),
+      abortSignal,
+    });
+    retireDuringRemoval = () => graph.retire();
+    let readySettlements = 0;
+    let ready: Promise<void> | undefined;
+    try {
+      const store = graph.api.query();
+      ready = store.ready.then(
+        () => {
+          readySettlements += 1;
+        },
+        () => {
+          readySettlements += 1;
+        },
+      );
+      const projection = project(graph, stream, undefined, { kind: "accumulate", max: 2 });
+      await pullStarted.promise;
+
+      let disposalThrew = false;
+      let disposalCause: unknown;
+      try {
+        graph.dispose();
+      } catch (caught) {
+        disposalThrew = true;
+        disposalCause = caught;
+      }
+      expect(disposalThrew).toBe(true);
+      expect(disposalCause).toBe(cause);
+
+      const retirement = graph.retire();
+      expect(reentrantRetirement).toBe(retirement);
+      const outcome = retirement.then(
+        () => ({ kind: "fulfilled" as const }),
+        (rejection: unknown) => ({ kind: "rejected" as const, cause: rejection }),
+      );
+      expect(graph.retire()).toBe(retirement);
+
+      expect(removalCalls).toBe(1);
+      expect(fetchCalls).toBe(1);
+      expect(querySignal?.aborted).toBe(true);
+      expect(queryAbortCalls).toBe(1);
+      expect(returnCalls).toBe(1);
+      expect(projection.status.get()).toBe("closed");
+      try {
+        graph.api.query();
+        throw new Error("Expected graph admission to be closed");
+      } catch (admissionCause) {
+        if (!(admissionCause instanceof Fault)) throw admissionCause;
+        expect(admissionCause.kind).toBe("disposed");
+      }
+      await ready;
+      expect(readySettlements).toBe(1);
+      await expectPending(retirement);
+
+      projectionReturn.resolve({ done: true, value: undefined });
+      await expectPending(retirement);
+      projectionPull.resolve({ done: true, value: undefined });
+      await expectPending(retirement);
+      original.resolve(42);
+
+      const result = await outcome;
+      expect(result.kind).toBe("rejected");
+      if (result.kind !== "rejected") throw new Error("Expected the retained cleanup failure");
+      expect(result.cause).toBe(cause);
+      expect(removalCalls).toBe(1);
+      expect(returnCalls).toBe(1);
+    } finally {
+      original.resolve(42);
+      projectionPull.resolve({ done: true, value: undefined });
+      projectionReturn.resolve({ done: true, value: undefined });
+      try {
+        graph.dispose();
+      } catch {
+        // Retirement retains the lifetime-removal cause.
+      }
+      await graph.retire().then(
+        () => undefined,
+        () => undefined,
+      );
+      await ready;
+    }
+  },
+);
+
 it.each(["single Error", "single undefined", "multiple"] as const)(
   "retains cleanup causes in attempt order for %s after graph-owned work finishes",
   async (mode) => {

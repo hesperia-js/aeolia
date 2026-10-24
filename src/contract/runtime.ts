@@ -201,6 +201,63 @@ export interface GraphRuntime<C extends Contract> extends Graph<C> {
   readonly __runtime: GraphRuntimeState<C>;
 }
 
+export type GraphDisposalPhase =
+  | "observation"
+  | "contexts"
+  | "reset-reject"
+  | "reset-abort"
+  | "lifetime"
+  | "collection"
+  | "projections"
+  | "stores"
+  | "controllers"
+  | "fault-channel"
+  | "fault-observers"
+  | "complete";
+
+export interface GraphStoreDisposalProgress {
+  readonly runtime: StoreRuntime<unknown>;
+  timerAttempted: boolean;
+  stopsCaptured: boolean;
+  livenessStops?: Unsubscribe[];
+  livenessIndex: number;
+  readStops?: Unsubscribe[];
+  readIndex: number;
+  stopsCleared: boolean;
+  streamCaptured: boolean;
+  stream?: StreamSession<unknown>;
+  streamAttempted: boolean;
+  publicationAttempted: boolean;
+}
+
+export interface GraphDisposalProgress {
+  phase: GraphDisposalPhase;
+  readonly revisions: Map<StoreRuntime<unknown>, ValueRevision>;
+  contexts?: BindingContextRuntime[];
+  contextIndex: number;
+  resetOperationCaptured: boolean;
+  resetOperation?: GraphResetOperation;
+  resetRejectAttempted: boolean;
+  resetAbortAttempted: boolean;
+  stopAbortCaptured: boolean;
+  stopAbort?: Unsubscribe;
+  stopAbortAttempted: boolean;
+  collectionTimerCaptured: boolean;
+  collectionTimer?: TimerHandle;
+  collectionTimerAttempted: boolean;
+  projections?: GraphProjection[];
+  projectionIndex: number;
+  stores?: GraphStoreDisposalProgress[];
+  storeIndex: number;
+  controllers?: AbortController[];
+  controllerIndex: number;
+  faultChannelUnregistered: boolean;
+  faultObserversCleared: boolean;
+  active: boolean;
+  complete: boolean;
+  resumeWork?: PhysicalWork;
+}
+
 export interface GraphRuntimeState<C extends Contract> {
   readonly retirement: RetirementOwner;
   readonly graph: GraphRuntime<C>;
@@ -217,6 +274,7 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly activeControllers: Set<AbortController>;
   readonly projections: Set<GraphProjection>;
   readonly collectionHeap: CollectionCandidate[];
+  disposal?: GraphDisposalProgress;
   stopAbort?: Unsubscribe;
   collectionTimer?: TimerHandle;
   sweepScheduled: boolean;

@@ -48,6 +48,7 @@ import {
 } from "./registry.ts";
 import type {
   BindingContextRuntime,
+  GraphDisposalProgress,
   GraphRuntime,
   GraphRuntimeState,
   RealmStoreState,
@@ -704,24 +705,98 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   }
 }
 
+function createGraphDisposalProgress<C extends Contract>(
+  state: GraphRuntimeState<C>,
+): GraphDisposalProgress {
+  return {
+    phase: "observation",
+    revisions: new Map(
+      [...state.stores.values()].map(
+        (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
+      ),
+    ),
+    contextIndex: 0,
+    resetOperationCaptured: false,
+    resetRejectAttempted: false,
+    resetAbortAttempted: false,
+    stopAbortCaptured: false,
+    stopAbortAttempted: false,
+    collectionTimerCaptured: false,
+    collectionTimerAttempted: false,
+    projectionIndex: 0,
+    storeIndex: 0,
+    controllerIndex: 0,
+    faultChannelUnregistered: false,
+    faultObserversCleared: false,
+    active: false,
+    complete: false,
+  };
+}
+
+function releaseGraphDisposalProgress(progress: GraphDisposalProgress): void {
+  progress.revisions.clear();
+  progress.contexts = undefined;
+  progress.resetOperation = undefined;
+  progress.stopAbort = undefined;
+  progress.collectionTimer = undefined;
+  progress.projections = undefined;
+  progress.stores = undefined;
+  progress.controllers = undefined;
+  progress.phase = "complete";
+  progress.complete = true;
+}
+
 function disposeGraph<C extends Contract>(
   state: GraphRuntimeState<C>,
   physical?: PhysicalWork,
 ): void {
-  if (state.disposed) return;
+  if (physical === undefined && state.disposed) return;
+  let progress = state.disposal;
+  if (progress?.complete) return;
+  if (progress?.active) {
+    if (physical !== undefined && progress.resumeWork === undefined)
+      progress.resumeWork = beginPhysicalWork(state.retirement, "cleanup");
+    return;
+  }
   const work = physical ?? beginPhysicalWork(state.retirement, "cleanup");
   try {
-    disposeGraphContents(state, physical !== undefined);
+    if (progress === undefined) {
+      progress = createGraphDisposalProgress(state);
+      state.disposal = progress;
+      state.disposed = true;
+    }
+    progress.active = true;
+    disposeGraphContents(state, progress, physical !== undefined);
   } catch (cause) {
     recordCleanupFailure(work, cause);
     throw cause;
   } finally {
+    if (progress !== undefined) {
+      progress.active = false;
+      const resumeWork = progress.resumeWork;
+      if (resumeWork !== undefined) {
+        progress.resumeWork = undefined;
+        if (!progress.complete) {
+          progress.active = true;
+          try {
+            disposeGraphContents(state, progress, true);
+          } catch (cause) {
+            recordCleanupFailure(resumeWork, cause);
+            reportContinuationError(state, cause);
+          } finally {
+            progress.active = false;
+          }
+        }
+        finishPhysicalWork(resumeWork);
+      }
+    }
     finishPhysicalWork(work);
   }
 }
 
 function disposeGraphContents<C extends Contract>(
   state: GraphRuntimeState<C>,
+  progress: GraphDisposalProgress,
   retiring: boolean,
 ): void {
   const attempt = (action: () => void, alreadyOwned = false): void => {
@@ -736,75 +811,227 @@ function disposeGraphContents<C extends Contract>(
       reportContinuationError(state, cause);
     }
   };
-  const revisions = new Map(
-    [...state.stores.values()].map(
-      (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
-    ),
-  );
-  state.disposed = true;
-  try {
-    physicalCleanup(state.retirement, () =>
-      reactiveInternal.batch(() => {
-        for (const [runtime, revision] of revisions) {
-          runtime.valueRevision = revision;
-          retireObservation(runtime);
+
+  while (!progress.complete) {
+    switch (progress.phase) {
+      case "observation": {
+        progress.phase = "contexts";
+        try {
+          physicalCleanup(state.retirement, () =>
+            reactiveInternal.batch(() => {
+              for (const [runtime, revision] of progress.revisions) {
+                runtime.valueRevision = revision;
+                retireObservation(runtime);
+              }
+            }),
+          );
+        } catch (error) {
+          reportContinuationError(state, error);
         }
-      }),
-    );
-  } catch (error) {
-    reportContinuationError(state, error);
-  }
-  for (const context of [...state.bindingContexts])
-    attempt(() => disposeBindingContextRuntime(context), true);
-  attempt(() => state.resetOperation?.reject(new Fault("disposed", [])));
-  attempt(() => state.resetOperation?.abort(new Fault("disposed", [])));
-  state.resetOperation = undefined;
-  attempt(() => state.stopAbort?.());
-  state.stopAbort = undefined;
-  if (state.collectionTimer != null) clearTimeout(state.collectionTimer);
-  state.collectionTimer = undefined;
-  state.collectionHeap.length = 0;
-  for (const projection of Array.from(state.projections)) {
-    try {
-      projection.dispose();
-    } catch (error) {
-      reportContinuationError(state, error);
-    }
-  }
-  state.projections.clear();
-  for (const runtime of state.stores.values()) {
-    if (runtime.timer != null) clearTimeout(runtime.timer);
-    runtime.timer = undefined;
-    for (const stop of runtime.livenessStops) attempt(stop);
-    for (const stop of runtime.readStops) attempt(stop);
-    runtime.livenessStops.length = 0;
-    runtime.readStops.length = 0;
-    const stream = runtime.stream;
-    if (stream != null && !stream.ended) {
-      try {
-        endStream(runtime, stream, "closed");
-      } catch (error) {
-        reportContinuationError(state, error);
+        break;
       }
-    }
-    runtime.disposed = true;
-    runtime.incarnation = undefined;
-    runtime.collectionIndex = -1;
-    try {
-      physicalCleanup(runtime.binding?.context.retirement ?? state.retirement, () =>
-        reactiveInternal.batch(() => {
-          runtime.presence.set(false);
-          runtime.lifecycle.update((value) => value + 1);
-        }),
-      );
-    } catch (error) {
-      reportContinuationError(state, error);
+      case "contexts": {
+        progress.contexts ??= [...state.bindingContexts];
+        const context = progress.contexts[progress.contextIndex];
+        if (context !== undefined) {
+          progress.contextIndex += 1;
+          attempt(() => disposeBindingContextRuntime(context), true);
+          break;
+        }
+        progress.contexts = undefined;
+        progress.phase = "reset-reject";
+        break;
+      }
+      case "reset-reject": {
+        if (!progress.resetOperationCaptured) {
+          progress.resetOperation = state.resetOperation;
+          progress.resetOperationCaptured = true;
+        }
+        if (!progress.resetRejectAttempted) {
+          progress.resetRejectAttempted = true;
+          const operation = progress.resetOperation;
+          if (operation !== undefined) attempt(() => operation.reject(new Fault("disposed", [])));
+        }
+        progress.phase = "reset-abort";
+        break;
+      }
+      case "reset-abort": {
+        if (!progress.resetAbortAttempted) {
+          progress.resetAbortAttempted = true;
+          const operation = progress.resetOperation;
+          if (operation !== undefined) attempt(() => operation.abort(new Fault("disposed", [])));
+        }
+        state.resetOperation = undefined;
+        progress.resetOperation = undefined;
+        progress.phase = "lifetime";
+        break;
+      }
+      case "lifetime": {
+        if (!progress.stopAbortCaptured) {
+          progress.stopAbort = state.stopAbort;
+          progress.stopAbortCaptured = true;
+        }
+        if (!progress.stopAbortAttempted) {
+          progress.stopAbortAttempted = true;
+          const stop = progress.stopAbort;
+          state.stopAbort = undefined;
+          if (stop !== undefined) attempt(stop);
+        }
+        progress.stopAbort = undefined;
+        progress.phase = "collection";
+        break;
+      }
+      case "collection": {
+        if (!progress.collectionTimerCaptured) {
+          progress.collectionTimer = state.collectionTimer;
+          progress.collectionTimerCaptured = true;
+        }
+        if (!progress.collectionTimerAttempted) {
+          progress.collectionTimerAttempted = true;
+          const timer = progress.collectionTimer;
+          if (timer != null) attempt(() => clearTimeout(timer));
+        }
+        state.collectionTimer = undefined;
+        state.collectionHeap.length = 0;
+        progress.collectionTimer = undefined;
+        progress.phase = "projections";
+        break;
+      }
+      case "projections": {
+        progress.projections ??= Array.from(state.projections);
+        const projection = progress.projections[progress.projectionIndex];
+        if (projection !== undefined) {
+          progress.projectionIndex += 1;
+          try {
+            projection.dispose();
+          } catch (error) {
+            reportContinuationError(state, error);
+          }
+          break;
+        }
+        state.projections.clear();
+        progress.projections = undefined;
+        progress.phase = "stores";
+        break;
+      }
+      case "stores": {
+        progress.stores ??= Array.from(state.stores.values(), (runtime) => ({
+          runtime,
+          timerAttempted: false,
+          stopsCaptured: false,
+          livenessIndex: 0,
+          readIndex: 0,
+          stopsCleared: false,
+          streamCaptured: false,
+          streamAttempted: false,
+          publicationAttempted: false,
+        }));
+        const store = progress.stores[progress.storeIndex];
+        if (store === undefined) {
+          progress.stores = undefined;
+          progress.phase = "controllers";
+          break;
+        }
+        const runtime = store.runtime;
+        if (!store.timerAttempted) {
+          store.timerAttempted = true;
+          const timer = runtime.timer;
+          if (timer != null) attempt(() => clearTimeout(timer));
+        }
+        runtime.timer = undefined;
+        if (!store.stopsCaptured) {
+          store.livenessStops = [...runtime.livenessStops];
+          store.readStops = [...runtime.readStops];
+          store.stopsCaptured = true;
+        }
+        const livenessStop = store.livenessStops?.[store.livenessIndex];
+        if (livenessStop !== undefined) {
+          store.livenessIndex += 1;
+          attempt(livenessStop);
+          break;
+        }
+        const readStop = store.readStops?.[store.readIndex];
+        if (readStop !== undefined) {
+          store.readIndex += 1;
+          attempt(readStop);
+          break;
+        }
+        if (!store.stopsCleared) {
+          store.stopsCleared = true;
+          runtime.livenessStops.length = 0;
+          runtime.readStops.length = 0;
+          store.livenessStops = undefined;
+          store.readStops = undefined;
+        }
+        if (!store.streamCaptured) {
+          store.stream = runtime.stream;
+          store.streamCaptured = true;
+        }
+        if (!store.streamAttempted) {
+          store.streamAttempted = true;
+          const stream = store.stream;
+          if (stream != null && !stream.ended) {
+            try {
+              endStream(runtime, stream, "closed");
+            } catch (error) {
+              reportContinuationError(state, error);
+            }
+          }
+        }
+        store.stream = undefined;
+        runtime.disposed = true;
+        runtime.incarnation = undefined;
+        runtime.collectionIndex = -1;
+        if (!store.publicationAttempted) {
+          store.publicationAttempted = true;
+          try {
+            physicalCleanup(runtime.binding?.context.retirement ?? state.retirement, () =>
+              reactiveInternal.batch(() => {
+                runtime.presence.set(false);
+                runtime.lifecycle.update((value) => value + 1);
+              }),
+            );
+          } catch (error) {
+            reportContinuationError(state, error);
+          }
+        }
+        progress.storeIndex += 1;
+        break;
+      }
+      case "controllers": {
+        progress.controllers ??= Array.from(state.activeControllers);
+        const controller = progress.controllers[progress.controllerIndex];
+        if (controller !== undefined) {
+          progress.controllerIndex += 1;
+          attempt(() => controller.abort());
+          break;
+        }
+        state.activeControllers.clear();
+        progress.controllers = undefined;
+        progress.phase = "fault-channel";
+        break;
+      }
+      case "fault-channel": {
+        if (!progress.faultChannelUnregistered) {
+          progress.faultChannelUnregistered = true;
+          attempt(() => __unregisterFaultChannel(state.graph));
+        }
+        progress.phase = "fault-observers";
+        break;
+      }
+      case "fault-observers": {
+        if (!progress.faultObserversCleared) {
+          progress.faultObserversCleared = true;
+          state.faultObservers.clear();
+        }
+        releaseGraphDisposalProgress(progress);
+        break;
+      }
+      case "complete":
+        releaseGraphDisposalProgress(progress);
+        break;
     }
   }
-  for (const controller of Array.from(state.activeControllers)) attempt(() => controller.abort());
-  state.activeControllers.clear();
-  __unregisterFaultChannel(state.graph);
-  state.faultObservers.clear();
 }
 
 /**
