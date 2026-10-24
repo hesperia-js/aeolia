@@ -102,6 +102,21 @@ function reportRequestOutcome(
   request.resolveOutcome(outcome);
 }
 
+function mayPublishSettledProgress<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
+  const state = runtime.graph.__runtime;
+  return (
+    request.settled &&
+    runtime.activeRequest === request &&
+    !request.superseded &&
+    request.generation === runtime.generation &&
+    request.resetEpoch === state.resetEpoch &&
+    request.incarnation === runtime.incarnation &&
+    !runtime.disposed &&
+    !state.disposed &&
+    runtime.binding?.context.disposed !== true
+  );
+}
+
 export function settleQuerySuccess<T>(
   runtime: StoreRuntime<T>,
   request: QueryRequest,
@@ -109,7 +124,17 @@ export function settleQuerySuccess<T>(
 ): void {
   reportRequestOutcome(request, { ok: true });
   const state = runtime.graph.__runtime;
-  const current = finishRequest(runtime, request);
+  let current: boolean;
+  try {
+    current = finishRequest(runtime, request);
+  } catch (finishError) {
+    try {
+      if (mayPublishSettledProgress(runtime, request)) completeQueryProgress(runtime, request);
+    } catch (progressError) {
+      reportContinuationError(state, progressError);
+    }
+    throw finishError;
+  }
   const wasActive = runtime.activeRequest === request;
   if (wasActive) runtime.activeRequest = undefined;
   if (!current || runtime.disposed || !wasActive) {
@@ -144,7 +169,20 @@ export function settleQueryFailure<T>(
 ): void {
   reportRequestOutcome(request, { ok: false, error: reason });
   const state = runtime.graph.__runtime;
-  const current = finishRequest(runtime, request);
+  let current: boolean;
+  try {
+    current = finishRequest(runtime, request);
+  } catch (finishError) {
+    try {
+      if (mayPublishSettledProgress(runtime, request)) {
+        if (request.controller.signal.aborted) interruptQueryProgress(runtime, request, reason);
+        else failQueryProgress(runtime, request, reason);
+      }
+    } catch (progressError) {
+      reportContinuationError(state, progressError);
+    }
+    throw finishError;
+  }
   const wasActive = runtime.activeRequest === request;
   if (wasActive) runtime.activeRequest = undefined;
   if (!current || runtime.disposed || !wasActive) {
