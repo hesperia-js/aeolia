@@ -1014,10 +1014,18 @@ it.each(["Error", "undefined"] as const)(
       throwIfAborted() {
         lifetime.signal.throwIfAborted();
       },
-      addEventListener(type, listener, options) {
+      addEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ) {
         lifetime.signal.addEventListener(type, listener, options);
       },
-      removeEventListener(type, listener, options) {
+      removeEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ) {
         lifetime.signal.removeEventListener(type, listener, options);
         if (type !== "abort") return;
         removalCalls += 1;
