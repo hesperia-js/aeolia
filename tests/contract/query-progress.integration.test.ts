@@ -33,6 +33,68 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
+type PromiseOutcome<T> =
+  | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly status: "rejected"; readonly reason: unknown };
+
+function observeOutcome<T>(promise: Promise<T>): Promise<PromiseOutcome<T>> {
+  return promise.then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (reason: unknown) => ({ status: "rejected" as const, reason }),
+  );
+}
+
+function throwingRemovalSignal(
+  controller: AbortController,
+  cleanupCause: unknown,
+  onRemove?: () => void,
+): {
+  readonly signal: AbortSignal;
+  readonly state: {
+    addCalls: number;
+    removeCalls: number;
+    removedRegisteredListener: boolean;
+  };
+} {
+  const state = { addCalls: 0, removeCalls: 0, removedRegisteredListener: false };
+  let registeredListener: EventListenerOrEventListenerObject | null = null;
+  const nativeAdd = controller.signal.addEventListener.bind(controller.signal);
+  const nativeRemove = controller.signal.removeEventListener.bind(controller.signal);
+  const signal = new Proxy(controller.signal, {
+    get(target, property) {
+      if (property === "addEventListener")
+        return (
+          type: string,
+          listener: EventListenerOrEventListenerObject | null,
+          options?: boolean | AddEventListenerOptions,
+        ) => {
+          nativeAdd(type, listener, options);
+          if (type === "abort") {
+            state.addCalls += 1;
+            registeredListener = listener;
+          }
+        };
+      if (property === "removeEventListener")
+        return (
+          type: string,
+          listener: EventListenerOrEventListenerObject | null,
+          options?: boolean | EventListenerOptions,
+        ) => {
+          nativeRemove(type, listener, options);
+          if (type !== "abort") return;
+          state.removeCalls += 1;
+          if (listener !== null && listener === registeredListener)
+            state.removedRegisteredListener = true;
+          onRemove?.();
+          throw cleanupCause;
+        };
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { signal, state };
+}
+
 beforeEach(() => {
   jest.useFakeTimers();
   jest.setSystemTime(0);
@@ -520,6 +582,314 @@ describe("query progress", () => {
       graph.dispose();
     },
   );
+
+  it.each(["complete", "failed"] as const)(
+    "terminalizes a %s query execution when caller-listener cleanup throws",
+    async (terminal) => {
+      type Value = { readonly value: string };
+      const initial: Value = { value: "initial" };
+      const success: Value = { value: "source success" };
+      const sourceCause = new Error("query source failed");
+      const cleanupCause = new Error("caller listener removal failed");
+      const work = deferred<Value>();
+      const sourceOutcome = observeOutcome(work.promise);
+      let workSettled = false;
+      let fetchCalls = 0;
+      let report: ((value: string) => void) | undefined;
+      const query = createQuery<string, Value, string, string>({
+        name: "progress.cleanup-terminal",
+        key: (input) => input,
+        fetch: (_input, options) => {
+          fetchCalls += 1;
+          report = options.reportProgress;
+          return work.promise;
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({ namespace: "progress-cleanup-terminal", operations: { query } }),
+      });
+      const store = graph.api.query("one", { initial });
+      const fetchCallsBeforeRevalidation = fetchCalls;
+      const controller = new AbortController();
+      const callerSignal = throwingRemovalSignal(controller, cleanupCause);
+      const observation = observeQueryProgress(store);
+      const events: Array<{
+        readonly kind: string;
+        readonly snapshot: ReturnType<typeof observation.capture>;
+      }> = [];
+      let stop: () => void = () => undefined;
+      let retirementWasCached = false;
+
+      try {
+        const continuation = store.revalidate({ abortSignal: callerSignal.signal });
+        const continuationOutcome = observeOutcome(continuation);
+        const execution = observation.capture().execution;
+        stop = observation.subscribe(({ kind, snapshot }) => {
+          events.push({ kind, snapshot });
+        });
+        report?.("partial");
+        const beforeSourceSettlement = observation.capture();
+
+        workSettled = true;
+        if (terminal === "complete") work.resolve(success);
+        else work.reject(sourceCause);
+        const [sourceResult, continuationResult] = await Promise.all([
+          sourceOutcome,
+          continuationOutcome,
+        ]);
+        const terminalSnapshot = observation.capture();
+        const terminalEvents = events.slice();
+        const ordinaryValue = store.value.peek();
+        const ordinaryError = store.error.peek();
+        const registeredListenerWasRemoved = callerSignal.state.removedRegisteredListener;
+        const callerSignalWasAborted = controller.signal.aborted;
+        stop();
+
+        const retirement = graph.retire();
+        const retirementOutcome = await observeOutcome(retirement);
+        retirementWasCached = graph.retire() === retirement;
+
+        expect(fetchCallsBeforeRevalidation).toBe(0);
+        expect(fetchCalls).toBe(1);
+        expect(callerSignal.state.addCalls).toBe(1);
+        expect(callerSignal.state.removeCalls).toBe(1);
+        expect(registeredListenerWasRemoved).toBe(true);
+        expect(callerSignalWasAborted).toBe(false);
+        expect(beforeSourceSettlement).toMatchObject({
+          execution,
+          status: "active",
+          reportRevision: 1,
+          hasValue: true,
+          value: "partial",
+          error: undefined,
+        });
+        expect(sourceResult.status).toBe(terminal === "complete" ? "fulfilled" : "rejected");
+        if (sourceResult.status === "fulfilled") expect(sourceResult.value).toBe(success);
+        else expect(sourceResult.reason).toBe(sourceCause);
+        expect(continuationResult.status).toBe("rejected");
+        if (continuationResult.status === "rejected")
+          expect(continuationResult.reason).toBe(cleanupCause);
+        expect(retirementOutcome.status).toBe("rejected");
+        if (retirementOutcome.status === "rejected")
+          expect(retirementOutcome.reason).toBe(cleanupCause);
+        expect(retirementWasCached).toBe(true);
+        expect(ordinaryValue).toBe(initial);
+        expect(ordinaryError).toBeUndefined();
+        expect(terminalSnapshot).toMatchObject({
+          execution,
+          reportRevision: 1,
+          hasValue: true,
+          value: "partial",
+        });
+        expect(terminalSnapshot.status).toBe(terminal);
+        expect(terminalSnapshot.error).toBe(terminal === "failed" ? sourceCause : undefined);
+        expect(
+          terminalEvents.map(({ kind, snapshot }) => [
+            kind,
+            snapshot.execution,
+            snapshot.reportRevision,
+            snapshot.status,
+            snapshot.value,
+            snapshot.error,
+          ]),
+        ).toEqual([
+          ["current", execution, 0, "active", undefined, undefined],
+          ["report", execution, 1, "active", "partial", undefined],
+          [
+            "lifecycle",
+            execution,
+            1,
+            terminal,
+            "partial",
+            terminal === "failed" ? sourceCause : undefined,
+          ],
+        ]);
+      } finally {
+        if (!workSettled) {
+          workSettled = true;
+          if (terminal === "complete") work.resolve(success);
+          else work.reject(sourceCause);
+        }
+        stop();
+        await graph.retire().then(
+          () => undefined,
+          () => undefined,
+        );
+      }
+    },
+  );
+
+  it("keeps a replacement execution current when caller cleanup reenters revalidation", async () => {
+    type Value = { readonly value: string };
+    const initial: Value = { value: "initial" };
+    const firstResult: Value = { value: "first result" };
+    const secondResult: Value = { value: "second result" };
+    const cleanupCause = new Error("first caller listener removal failed");
+    const firstWork = deferred<Value>();
+    const secondWork = deferred<Value>();
+    const firstSourceOutcome = observeOutcome(firstWork.promise);
+    const secondSourceOutcome = observeOutcome(secondWork.promise);
+    let firstWorkSettled = false;
+    let secondWorkSettled = false;
+    let fetchCalls = 0;
+    let firstReport: ((value: string) => void) | undefined;
+    let secondReport: ((value: string) => void) | undefined;
+    let replacementOutcome: Promise<PromiseOutcome<void>> | undefined;
+    let replacementStartCause: unknown;
+    let replacementStarts = 0;
+    const query = createQuery<string, Value, string, string>({
+      name: "progress.cleanup-reentrant-replacement",
+      key: (input) => input,
+      fetch: (_input, options) => {
+        fetchCalls += 1;
+        if (fetchCalls === 1) {
+          firstReport = options.reportProgress;
+          return firstWork.promise;
+        }
+        secondReport = options.reportProgress;
+        return secondWork.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "progress-cleanup-reentrant-replacement",
+        operations: { query },
+      }),
+    });
+    const store = graph.api.query("one", { initial });
+    let startReplacement = (): void => undefined;
+    const controller = new AbortController();
+    const callerSignal = throwingRemovalSignal(controller, cleanupCause, () => startReplacement());
+    const observation = observeQueryProgress(store);
+    const events: Array<{
+      readonly kind: string;
+      readonly snapshot: ReturnType<typeof observation.capture>;
+    }> = [];
+    let stop: () => void = () => undefined;
+    let retirementWasCached = false;
+
+    try {
+      stop = observation.subscribe(({ kind, snapshot }) => {
+        events.push({ kind, snapshot });
+      });
+      startReplacement = () => {
+        replacementStarts += 1;
+        try {
+          replacementOutcome = observeOutcome(store.revalidate());
+        } catch (cause) {
+          replacementStartCause = cause;
+        }
+      };
+      const firstContinuation = store.revalidate({ abortSignal: callerSignal.signal });
+      const firstContinuationOutcome = observeOutcome(firstContinuation);
+      const firstExecution = observation.capture().execution;
+      firstReport?.("first progress");
+
+      firstWorkSettled = true;
+      firstWork.resolve(firstResult);
+      const [firstSource, firstContinuationResult] = await Promise.all([
+        firstSourceOutcome,
+        firstContinuationOutcome,
+      ]);
+      const replacementBeforeSettlement = observation.capture();
+      const eventsBeforeSettlement = events.slice();
+      const ordinaryValueBeforeSettlement = store.value.peek();
+      const ordinaryErrorBeforeSettlement = store.error.peek();
+      firstReport?.("late first progress");
+      const afterLateFirstReport = observation.capture();
+      const eventsAfterLateReport = events.slice();
+
+      secondReport?.("replacement progress");
+      secondWorkSettled = true;
+      secondWork.resolve(secondResult);
+      const [secondSource, secondContinuationResult] = await Promise.all([
+        secondSourceOutcome,
+        replacementOutcome ?? Promise.resolve({ status: "missing" as const }),
+      ]);
+      const finalSnapshot = observation.capture();
+      const finalEvents = events.slice();
+      const ordinaryValueAfterSettlement = store.value.peek();
+      const ordinaryErrorAfterSettlement = store.error.peek();
+      const registeredListenerWasRemoved = callerSignal.state.removedRegisteredListener;
+      stop();
+
+      const retirement = graph.retire();
+      const retirementOutcome = await observeOutcome(retirement);
+      retirementWasCached = graph.retire() === retirement;
+
+      expect(callerSignal.state.addCalls).toBe(1);
+      expect(callerSignal.state.removeCalls).toBe(1);
+      expect(registeredListenerWasRemoved).toBe(true);
+      expect(replacementStarts).toBe(1);
+      expect(replacementStartCause).toBeUndefined();
+      expect(fetchCalls).toBe(2);
+      expect(firstExecution).toBeDefined();
+      expect(firstSource.status).toBe("fulfilled");
+      if (firstSource.status === "fulfilled") expect(firstSource.value).toBe(firstResult);
+      expect(firstContinuationResult.status).toBe("rejected");
+      if (firstContinuationResult.status === "rejected")
+        expect(firstContinuationResult.reason).toBe(cleanupCause);
+      expect(replacementBeforeSettlement.execution).toBeDefined();
+      expect(replacementBeforeSettlement.execution).not.toBe(firstExecution);
+      expect(replacementBeforeSettlement).toMatchObject({
+        status: "active",
+        reportRevision: 0,
+        hasValue: false,
+        value: undefined,
+        error: undefined,
+      });
+      expect(afterLateFirstReport).toMatchObject({
+        execution: replacementBeforeSettlement.execution,
+        status: "active",
+        reportRevision: 0,
+        hasValue: false,
+        value: undefined,
+      });
+      const oldTerminalEvents = (records: typeof events) =>
+        records.filter(
+          ({ kind, snapshot }) =>
+            kind === "lifecycle" &&
+            snapshot.execution === firstExecution &&
+            snapshot.status !== "active",
+        );
+      expect(oldTerminalEvents(eventsBeforeSettlement)).toEqual([]);
+      expect(oldTerminalEvents(eventsAfterLateReport)).toEqual([]);
+      expect(oldTerminalEvents(finalEvents)).toEqual([]);
+      expect(ordinaryValueBeforeSettlement).toBe(initial);
+      expect(ordinaryErrorBeforeSettlement).toBeUndefined();
+      expect(secondSource.status).toBe("fulfilled");
+      if (secondSource.status === "fulfilled") expect(secondSource.value).toBe(secondResult);
+      expect(secondContinuationResult.status).toBe("fulfilled");
+      expect(finalSnapshot).toMatchObject({
+        execution: replacementBeforeSettlement.execution,
+        status: "complete",
+        reportRevision: 1,
+        hasValue: true,
+        value: "replacement progress",
+        error: undefined,
+      });
+      expect(ordinaryValueAfterSettlement).toBe(secondResult);
+      expect(ordinaryErrorAfterSettlement).toBeUndefined();
+      expect(retirementOutcome.status).toBe("rejected");
+      if (retirementOutcome.status === "rejected")
+        expect(retirementOutcome.reason).toBe(cleanupCause);
+      expect(retirementWasCached).toBe(true);
+    } finally {
+      if (!firstWorkSettled) {
+        firstWorkSettled = true;
+        firstWork.resolve(firstResult);
+      }
+      if (!secondWorkSettled) {
+        secondWorkSettled = true;
+        secondWork.resolve(secondResult);
+      }
+      stop();
+      await graph.retire().then(
+        () => undefined,
+        () => undefined,
+      );
+    }
+  });
 
   it("retains the active request authority through reentrant landing-time writes", async () => {
     const work = deferred<number>();
