@@ -630,13 +630,18 @@ it("caches write-restricted retirement failures before and after prior graph dis
   }
 
   const priorGraph = createGraph({
-    contract: defineContract({ namespace: "retirement-prior-disposal-precondition", operations: {} }),
+    contract: defineContract({
+      namespace: "retirement-prior-disposal-precondition",
+      operations: {},
+    }),
   });
   const context = createBindingContext(priorGraph);
   let disposalThrew = false;
   let disposalCause: unknown;
   let retirementOutcome:
-    | Promise<{ readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }>
+    | Promise<
+        { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }
+      >
     | undefined;
   try {
     try {
@@ -646,7 +651,8 @@ it("caches write-restricted retirement failures before and after prior graph dis
       disposalCause = cause;
     }
     expect(disposalThrew).toBe(true);
-    if (!(disposalCause instanceof Fault)) throw new Error("Expected the first write restriction fault");
+    if (!(disposalCause instanceof Fault))
+      throw new Error("Expected the first write restriction fault");
     expect(disposalCause.kind).toBe("write-forbidden");
     expect(context.active.get()).toBe(true);
     expect(() => priorGraph.at("closed")).toThrow("disposed");
@@ -670,7 +676,8 @@ it("caches write-restricted retirement failures before and after prior graph dis
     expect(result.cause.errors).toHaveLength(2);
     expect(result.cause.errors[0]).toBe(disposalCause);
     const laterCause = result.cause.errors[1];
-    if (!(laterCause instanceof Fault)) throw new Error("Expected the later native precondition fault");
+    if (!(laterCause instanceof Fault))
+      throw new Error("Expected the later native precondition fault");
     expect(laterCause.kind).toBe("write-forbidden");
   } finally {
     try {
@@ -690,7 +697,9 @@ it("retires a context skipped by prior write-restricted graph disposal", async (
   let disposalThrew = false;
   let disposalCause: unknown;
   let retirementOutcome:
-    | Promise<{ readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }>
+    | Promise<
+        { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }
+      >
     | undefined;
   try {
     expect(context.active.get()).toBe(true);
@@ -1441,7 +1450,9 @@ it("drains later contexts when context.active reenters graph retirement and join
   const secondContext = createBindingContext(graph);
   let retirement: Promise<void> | undefined;
   let retirementOutcome:
-    | Promise<{ readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }>
+    | Promise<
+        { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }
+      >
     | undefined;
   let firstReady: Promise<void> | undefined;
   let secondReady: Promise<void> | undefined;
