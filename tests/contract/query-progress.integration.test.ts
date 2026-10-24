@@ -273,9 +273,11 @@ describe("query progress", () => {
     const ready = store.ready;
     const observation = observeQueryProgress(store);
     const directSeedError = new Error("direct seed failed");
-    expect(() => observation.subscribe(() => {
-      throw directSeedError;
-    })).toThrow(directSeedError);
+    expect(() =>
+      observation.subscribe(() => {
+        throw directSeedError;
+      }),
+    ).toThrow(directSeedError);
 
     const stopThrowing = observation.subscribe(({ kind, snapshot }) => {
       if (kind === "report" && snapshot.reportRevision === 1) {

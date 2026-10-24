@@ -269,8 +269,8 @@ function bindQueryOperation<Q extends AnyQuery, V>(
     (value !== undefined && !isValueOptions(value))
   )
     throw new TypeError("Invalid query binding configuration");
-  const execution: QueryDefinition<QueryInput<Q>, V, QueryKey<Q>, QueryProgress<Q>> =
-    Object.freeze({
+  const execution: QueryDefinition<QueryInput<Q>, V, QueryKey<Q>, QueryProgress<Q>> = Object.freeze(
+    {
       kind: "query",
       name: definition.name,
       key: definition.key,
@@ -281,7 +281,8 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       revalidateAfterMs: definition.revalidateAfterMs,
       snapshot: value?.snapshot ?? definition.snapshot,
       equals: value?.equals,
-    });
+    },
+  );
   assertContextOpen(context);
   let profiles = context.bindings.get(definition);
   if (profiles?.has(profile)) throw new TypeError("Query binding is already registered");

@@ -31,8 +31,7 @@ export function nextGeneration(current: number, minimum = current): Generation {
 export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation): Generation {
   const previousGeneration = runtime.generation;
   const owner = runtime.queryProgressAuthority;
-  const activeProgressRequest =
-    owner?.current.status === "active" ? owner.request : undefined;
+  const activeProgressRequest = owner?.current.status === "active" ? owner.request : undefined;
   const request = activeProgressRequest ?? runtime.activeRequest;
   const generation = nextGeneration(runtime.generation, minimum);
   runtime.generation = generation;
@@ -142,9 +141,7 @@ export function publishObservation<T>(
   }
 }
 
-export type KeyedDefinition<T> =
-  | QueryDefinition<any, T, any, any>
-  | StreamDefinition<any, T, any>;
+export type KeyedDefinition<T> = QueryDefinition<any, T, any, any> | StreamDefinition<any, T, any>;
 
 export function optionConflict(
   runtime: StoreRuntime<unknown>,

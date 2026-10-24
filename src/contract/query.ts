@@ -243,9 +243,7 @@ export function makeQueryStore<T, P = never>(
  * @throws TypeError if the value is not an Aeolia query store.
  * @throws Fault if the store or graph is disposed.
  */
-export function observeQueryProgress<T, P>(
-  store: QueryStore<T, P>,
-): QueryProgressObservation<P> {
+export function observeQueryProgress<T, P>(store: QueryStore<T, P>): QueryProgressObservation<P> {
   const runtime = queryRuntimeByStore.get(store);
   if (runtime === undefined) throw new TypeError("The value is not an Aeolia query store");
   return queryProgressObservation<unknown, P>(runtime);

@@ -142,9 +142,7 @@ function sameExecution(
   authorityState: QueryProgressAuthority,
   request: QueryRequest | undefined,
 ): boolean {
-  return (
-    request !== undefined && authorityState.current.execution === request.progressIdentity
-  );
+  return request !== undefined && authorityState.current.execution === request.progressIdentity;
 }
 
 function seedIsCurrent<T>(
@@ -161,10 +159,7 @@ function seedIsCurrent<T>(
       owner.current.execution === undefined &&
       owner.current.status === event.snapshot.status
     );
-  if (
-    owner.current.execution !== event.snapshot.execution
-  )
-    return false;
+  if (owner.current.execution !== event.snapshot.execution) return false;
   if (request === undefined)
     return (
       owner.request === undefined &&
@@ -172,8 +167,7 @@ function seedIsCurrent<T>(
       owner.current.status === event.snapshot.status
     );
   if (owner.request !== request) return false;
-  if (event.snapshot.status === "interrupted")
-    return owner.current.status === "interrupted";
+  if (event.snapshot.status === "interrupted") return owner.current.status === "interrupted";
   if (
     request.generation !== runtime.generation ||
     request.resetEpoch !== runtime.graph.__runtime.resetEpoch ||
@@ -193,10 +187,7 @@ function deferContinuationError(owner: QueryProgressAuthority, error: unknown): 
   owner.continuationErrors.push(error);
 }
 
-function deliveryIsCurrent<T>(
-  runtime: StoreRuntime<T>,
-  delivery: QueryProgressDelivery,
-): boolean {
+function deliveryIsCurrent<T>(runtime: StoreRuntime<T>, delivery: QueryProgressDelivery): boolean {
   const owner = authority(runtime);
   const { event, request } = delivery;
   if (runtime.disposed || runtime.graph.__runtime.disposed) return false;
@@ -210,8 +201,7 @@ function deliveryIsCurrent<T>(
     );
   if (!sameExecution(owner, request)) return false;
 
-  if (event.snapshot.status === "interrupted")
-    return owner.current.status === "interrupted";
+  if (event.snapshot.status === "interrupted") return owner.current.status === "interrupted";
 
   if (
     request!.generation !== runtime.generation ||
@@ -402,10 +392,7 @@ export function queryProgressObservation<T, P>(
 }
 
 /** Begins a fresh progress epoch when a real request becomes current. @internal */
-export function beginQueryProgress<T>(
-  runtime: StoreRuntime<T>,
-  request: QueryRequest,
-): void {
+export function beginQueryProgress<T>(runtime: StoreRuntime<T>, request: QueryRequest): void {
   if (!currentRequest(runtime, request)) return;
   publish(
     runtime,
@@ -443,10 +430,7 @@ export function reportQueryProgress<T, P>(
 }
 
 /** Marks the current request complete after its full fetch promise succeeds. @internal */
-export function completeQueryProgress<T>(
-  runtime: StoreRuntime<T>,
-  request: QueryRequest,
-): void {
+export function completeQueryProgress<T>(runtime: StoreRuntime<T>, request: QueryRequest): void {
   if (!ownsSnapshot(runtime, request)) return;
   const current = authority(runtime).current;
   if (current.status !== "active") return;
@@ -504,10 +488,7 @@ export function interruptQueryProgress<T>(
   const current = runtime.queryProgressAuthority?.current;
   if (current?.execution !== request.progressIdentity || current.status !== "active") return;
   if (options?.authorityChanged === true) {
-    if (
-      !runtime.requests.has(request) &&
-      runtime.queryProgressAuthority?.request !== request
-    )
+    if (!runtime.requests.has(request) && runtime.queryProgressAuthority?.request !== request)
       return;
   } else if (runtime.activeRequest !== request && !ownsSnapshot(runtime, request)) return;
   publish(
