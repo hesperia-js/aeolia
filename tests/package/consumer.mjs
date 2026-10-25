@@ -56,6 +56,7 @@ export async function verifyConsumer() {
   await verifyTransferConsumer();
   await verifyBoundConsumer();
   await verifyBoundStreamConsumer();
+  await verifyAcquisitionConsumer();
   const count = signal(2);
   const doubled = computed(() => count.get() * 2);
   const signalValues = [];
@@ -168,6 +169,76 @@ export async function verifyConsumer() {
     stop();
     graph.dispose();
   }
+}
+
+async function verifyAcquisitionConsumer() {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "acquisition.read",
+    acquisition: "fetch",
+    key: (input) => `acquisition/${input.id}`,
+    fetch: backend.respond("acquisition.read"),
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "packed-acquisition", operations: { query } }),
+  });
+
+  try {
+    const binding = bindOperation(graph, query, {
+      context: createBindingContext(graph),
+      profile: {},
+      fetch: query.fetch,
+    });
+    await verifyWarmFetchAcquisition(backend, "raw", 0, () => graph.api.query({ id: "raw" }));
+    await verifyWarmFetchAcquisition(backend, "bound", 2, () => binding.member({ id: "bound" }));
+  } finally {
+    for (const call of backend.pending("acquisition.read"))
+      backend.resolve(call, "cleanup");
+    graph.dispose();
+  }
+}
+
+async function verifyWarmFetchAcquisition(backend, label, previousCalls, acquire) {
+  const name = "acquisition.read";
+  const totalCalls = () => backend.calls.filter((call) => call.name === name).length;
+  const initialValue = `${label}:initial`;
+  const completedValue = `${label}:completed`;
+
+  const first = acquire();
+  const initialCalls = backend.pending(name);
+  check(totalCalls() === previousCalls + 1, `The ${label} query did not call its callback`);
+  check(initialCalls.length === 1, `The ${label} query did not start one request`);
+  backend.resolve(initialCalls[0], initialValue);
+  check((await first.ready) === initialValue, `The ${label} query lost its initial value`);
+
+  const refreshing = acquire();
+  const pending = backend.pending(name);
+  check(totalCalls() === previousCalls + 2, `Warm ${label} acquisition skipped its callback`);
+  check(pending.length === 1, `Warm ${label} acquisition did not start one request`);
+  check(refreshing.value.get() === initialValue, `Warm ${label} acquisition cleared its landing`);
+  check(
+    refreshing.pending.get() && refreshing.status.get() === "revalidating",
+    `Warm ${label} acquisition did not expose its current request`,
+  );
+
+  const joined = acquire();
+  check(totalCalls() === previousCalls + 2, `The ${label} query did not join current work`);
+  check(
+    joined.value.get() === initialValue &&
+      joined.pending.get() &&
+      joined.status.get() === "revalidating",
+    `The joined ${label} query did not retain its landing and request state`,
+  );
+  await Promise.all([
+    expectPending(refreshing.ready, `The ${label} query readiness skipped its current request`),
+    expectPending(joined.ready, `The joined ${label} readiness skipped its current request`),
+  ]);
+
+  backend.resolve(pending[0], completedValue);
+  check(
+    (await refreshing.ready) === completedValue && (await joined.ready) === completedValue,
+    `The ${label} query did not publish its completed value to every caller`,
+  );
 }
 
 async function verifyTransferConsumer() {
