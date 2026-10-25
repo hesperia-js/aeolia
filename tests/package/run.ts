@@ -288,9 +288,8 @@ try {
   const guardLines = sourceLines.flatMap((line, index) =>
     line.trim() === invalidInputGuard ? [index] : [],
   );
-  assert.equal(
-    guardLines.length,
-    1,
+  assert.ok(
+    guardLines.length === 1 && guardLines[0] !== undefined,
     "Locate the unique invalid-input guard for the source-map check",
   );
   const guardThrowIndex = guardLines[0] + 1;
