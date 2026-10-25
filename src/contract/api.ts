@@ -12,6 +12,7 @@ import type {
   MutationDefinition,
   NoCollision,
   OperationTree,
+  QueryAcquisition,
   QueryDefinition,
   StoreDefinition,
   StreamDefinition,
@@ -19,7 +20,8 @@ import type {
 import { affectedBrand } from "./symbols.ts";
 import {
   isCreateStoreInput,
-  isCreateQueryInput,
+  captureQueryAcquisition,
+  isCreateQueryInputWithAcquisition,
   isCreateStreamInput,
   isCreateMutationInput,
   isAffectSpec,
@@ -64,13 +66,14 @@ export function createStore<T, N extends string>(
 /**
  * Declares a query operation for use in a contract.
  *
- * @param input - Query name, key function, backend callback, and value
- * configuration.
+ * @param input - Query name, key function, backend callback, acquisition
+ * behavior, and value configuration.
  * Zero-parameter key and fetch callbacks infer a no-input query. Callbacks
  * with optional parameters remain input-bearing; a declared input in either
  * callback also keeps the query input-bearing.
  * @returns A shallow-frozen inert query definition.
- * @throws TypeError if declaration fields or callback types are malformed.
+ * @throws TypeError if declaration fields, acquisition, or callback types are
+ * malformed.
  * @example
  * ```ts
  * import { createQuery } from "aeolia";
@@ -102,8 +105,15 @@ export function createQuery<I, T, K extends string, P = never>(
 export function createQuery<I, T, K extends string, P = never>(
   input: CreateQueryInput<I, T, K, P>,
 ): QueryDefinition<I, T, K, P> {
-  if (!isCreateQueryInput(input)) throw new TypeError("Invalid query declaration.");
-  return Object.freeze({ ...input, kind: "query" as const });
+  let acquisition: QueryAcquisition;
+  try {
+    acquisition = captureQueryAcquisition(input);
+  } catch {
+    throw new TypeError("Invalid query declaration.");
+  }
+  if (!isCreateQueryInputWithAcquisition(input, acquisition))
+    throw new TypeError("Invalid query declaration.");
+  return Object.freeze({ ...input, acquisition, kind: "query" as const });
 }
 
 /**

@@ -22,6 +22,7 @@ import {
   isMutationOptions,
   isStoreOptions,
   isCancellationOptions,
+  captureQueryAcquisition,
   isStoreDefinition,
   isOperationDefinition,
 } from "./types.ts";
@@ -444,7 +445,9 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
       api[property] = () => getOrCreateStore(state, storeKey(value.name), value).store;
     } else if (isOperationDefinition(value)) {
       if (value.kind === "query") {
-        state.queryDefinitions.add(value);
+        const definition = value as QueryDefinition<unknown, unknown, any, any>;
+        const acquisition = captureQueryAcquisition(definition);
+        state.queryDefinitions.set(definition, acquisition);
         api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) => {
           assertGraphOpen(state);
           const physical = beginPhysicalWork(state.retirement, "acquisition");
@@ -453,9 +456,10 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
             const call = normalizeQueryCall(input, options, args.length > 1);
             return makeQueryStore(
               state,
-              value as QueryDefinition<unknown, unknown, any, any>,
+              definition,
               call.input,
               call.options,
+              acquisition,
             );
           } finally {
             finishPhysicalWork(physical);
@@ -1068,7 +1072,7 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
       ? {}
       : { onUnobservedFault: options.onUnobservedFault }),
     stores: new Map(),
-    queryDefinitions: new Set(),
+    queryDefinitions: new Map(),
     mutationDefinitions: new Set(),
     bindingContexts: new Set(),
     declaredStores: new Map(),

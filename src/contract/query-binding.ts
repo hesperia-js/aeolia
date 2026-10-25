@@ -197,7 +197,8 @@ function captureTarget<Q extends AnyQuery, V>(
 /**
  * Registers a real query execution for one context/query/profile association.
  * @param graph - Graph containing the exact original query declaration.
- * @param definition - Original declaration; key/input/freshness semantics are preserved.
+ * @param definition - Original declaration; key, input, freshness, and
+ * acquisition semantics are preserved.
  * @param configuration - Captured completion callback and result-specific value policy.
  * @returns A binding that acquires native stores only when its member is called.
  * @throws TypeError for foreign/malformed/duplicate configuration, or Fault for a disposed lifetime.
@@ -250,7 +251,8 @@ function bindQueryOperation<Q extends AnyQuery, V>(
     throw new TypeError("Invalid query binding configuration");
   const contextHandle = configuration.context;
   const context = contexts.get(contextHandle);
-  if (context === undefined || context.state !== state || !state.queryDefinitions.has(definition))
+  const acquisition = state.queryDefinitions.get(definition);
+  if (context === undefined || context.state !== state || acquisition === undefined)
     throw new TypeError("Query binding requires its exact graph, context and declaration");
   assertContextOpen(context);
   const profile = configuration.profile;
@@ -274,6 +276,7 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       kind: "query",
       name: definition.name,
       key: definition.key,
+      acquisition,
       fetch: async (
         input: QueryInput<Q>,
         options: QueryFetchOptions<QueryProgress<Q>>,
@@ -316,7 +319,7 @@ function bindQueryOperation<Q extends AnyQuery, V>(
         throw new TypeError("Initial value conflicts with query binding configuration");
       const options = selectedOptions as StoreOptions<V> | undefined;
       assertContextOpen(context);
-      return makeQueryStore(state, execution, call.input, options, binding, value);
+      return makeQueryStore(state, execution, call.input, options, acquisition, binding, value);
     } finally {
       finishPhysicalWork(physical);
     }

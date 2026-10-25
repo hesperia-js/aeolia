@@ -1,4 +1,5 @@
 import type {
+  QueryAcquisition,
   QueryDefinition,
   QueryProgressObservation,
   QueryStore,
@@ -119,6 +120,7 @@ export function makeQueryStore<T, P = never>(
   query: QueryDefinition<any, T, any, P>,
   input: unknown,
   options: StoreOptions<T> | undefined,
+  acquisition: QueryAcquisition,
   binding?: QueryBindingRuntime,
   bindingDefaults?: Pick<ValueOptions<NoInfer<T>>, "initial">,
 ): QueryStore<T, P> {
@@ -217,7 +219,8 @@ export function makeQueryStore<T, P = never>(
         reportFault: (fault) => graphFault(state, fault),
       });
       const stale = queryIsStale(caller);
-      if (stale) void startQuery(runtime, caller, false, caller.abortSignal, runtime.failing);
+      if (acquisition === "fetch" || stale)
+        void startQuery(runtime, caller, false, caller.abortSignal, runtime.failing);
       else armStoreTimer(runtime);
       touch(runtime);
       return queryStore;

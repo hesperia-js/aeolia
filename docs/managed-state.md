@@ -78,6 +78,31 @@ const graph = createGraph({ contract });
 const item = graph.api.items("one");
 ```
 
+### Query acquisition
+
+The optional `acquisition` field controls whether a fresh landing can satisfy a
+query member call. It accepts `"cache"` or `"fetch"`. Omission and `undefined`
+mean `"cache"`. When present, `acquisition` must be an own data property.
+Accessors, inherited properties, and other values cause a synchronous
+`TypeError`.
+
+With `"cache"`, a member call reuses a fresh landing. With `"fetch"`, Aeolia
+enters the ordinary request path even when a landing is fresh. The
+call joins an existing current request and remains subject to cancellation,
+reset checks, and the shared automatic-recovery allowance. An exhausted
+recovery allowance still blocks another automatic request; call `revalidate()`
+to retry explicitly. The callback may satisfy a request from a native cache,
+so `"fetch"` does not guarantee network traffic. While the request runs, the
+prior committed value remains available through `value`. Status is
+`"revalidating"` and `pending` is `true`. `ready` waits for the request to
+settle. Raw calls with the same key share one request. Later callers join a
+current request, and the initiating call's callback remains responsible for
+its result.
+
+`createQuery` captures and normalizes the policy on its frozen result. A graph
+captures a structural query definition's policy when it registers that
+definition. Later changes to the source object do not change the graph's policy.
+
 A query member call starts a fetch when needed. To wait for committed data
 without starting another request, read the query's `ready` getter:
 

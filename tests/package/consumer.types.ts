@@ -39,6 +39,7 @@ import {
   type CreateStreamInput,
   type DefineContractInput,
   type FetchOptions,
+  type QueryAcquisition,
   type QueryFetchOptions,
   type QueryProgressEvent,
   type QueryProgressObservation,
@@ -76,13 +77,16 @@ import {
 import type {
   BindingContext as ContractBindingContext,
   Graph as ContractGraph,
+  QueryAcquisition as ContractQueryAcquisition,
 } from "aeolia/contract";
 import { testBackend } from "aeolia/testing";
 
 const backend = testBackend();
 const store = createStore({ name: "draft", initial: 0 });
+const queryAcquisition: QueryAcquisition = "fetch";
 const query = createQuery({
   name: "items.get",
+  acquisition: queryAcquisition,
   key: (input: { readonly id: string }) => `items/${input.id}`,
   fetch: backend.respond<{ readonly id: string }, { readonly id: string }>("items.get"),
 });
@@ -193,6 +197,8 @@ const collidingContract = defineContract({
 });
 
 function typecheckOnly(): void {
+  const contractQueryAcquisition: ContractQueryAcquisition = queryAcquisition;
+  void contractQueryAcquisition;
   const signalOptions: Signal.SignalOptions<number> = {
     [Signal.subtle.watched]() {
       void (this satisfies Signal<number>);

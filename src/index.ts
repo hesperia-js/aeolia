@@ -44,6 +44,7 @@ export type {
   OpenOptions,
   OperationDefinition,
   OperationTree,
+  QueryAcquisition,
   QueryDefinition,
   CreateQueryInput,
   QueryStore,

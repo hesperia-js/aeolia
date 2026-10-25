@@ -90,6 +90,63 @@ function trackedCallerSignal(onLink: () => void) {
 }
 
 describe("context-bound query entries", () => {
+  it("uses captured fetch acquisition on a bound clone while joining current work", async () => {
+    const backend = testBackend();
+    const cachedQuery = createQuery({
+      name: "cached-count",
+      key: (input: { id: string }) => `cached/${input.id}`,
+      fetch: backend.respond<{ id: string }, { count: number }>("cached-count"),
+    });
+    const query = {
+      kind: "query" as const,
+      name: "fetching-count",
+      acquisition: "fetch" as "cache" | "fetch",
+      key: (input: { id: string }) => `fetching/${input.id}`,
+      fetch: backend.respond<{ id: string }, { count: number }>("fetching-count"),
+    };
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "fetch-acquisition",
+        operations: { cached: cachedQuery, fetching: query },
+      }),
+    });
+    query.acquisition = "cache";
+
+    try {
+      const cached = graph.api.cached({ id: "one" });
+      backend.resolve(backend.calls[0]!, { count: 1 });
+      await expect(cached.ready).resolves.toEqual({ count: 1 });
+      const cachedAgain = graph.api.cached({ id: "one" });
+      expect(backend.calls).toHaveLength(1);
+      await expect(cachedAgain.ready).resolves.toEqual({ count: 1 });
+
+      const binding = bindOperation(graph, query, {
+        context: createBindingContext(graph),
+        profile: {},
+        fetch: async (input, options) => (await query.fetch(input, options)).count,
+      });
+      const first = binding.member({ id: "one" });
+      backend.resolve(backend.calls[1]!, { count: 2 });
+      await expect(first.ready).resolves.toBe(2);
+
+      const second = binding.member({ id: "one" });
+      expect(backend.calls).toHaveLength(3);
+      expect(second.value.get()).toBe(2);
+      expect(second.status.get()).toBe("revalidating");
+      const joined = binding.member({ id: "one" });
+      expect(backend.calls).toHaveLength(3);
+      expect(joined.pending.get()).toBe(true);
+      expect(joined.status.get()).toBe("revalidating");
+      expect(joined.value.get()).toBe(2);
+
+      backend.resolve(backend.calls[2]!, { count: 3 });
+      await expect(second.ready).resolves.toBe(3);
+      await expect(joined.ready).resolves.toBe(3);
+    } finally {
+      graph.dispose();
+    }
+  });
+
   it("removes the caller link when authored registration consumes the last generation", async () => {
     const source = fixture();
     const target = fixture();

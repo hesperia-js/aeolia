@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   affects,
+  createGraph,
   defineContract,
   createMutation,
   createQuery,
@@ -10,6 +11,7 @@ import {
   type CallContext,
   type FetchOptions,
 } from "../../src/contract/index.ts";
+import { testBackend } from "../../src/testing.ts";
 
 test("contract definitions preserve kinds and reject duplicate names globally", () => {
   const query = createQuery({
@@ -105,6 +107,99 @@ test("creation functions retain ownership of definition discriminants", () => {
   expect(createQuery(queryInput).kind).toBe("query");
   expect(createStream(streamInput).kind).toBe("stream");
   expect(createMutation(mutationInput).kind).toBe("mutation");
+});
+
+test("query declarations capture and validate acquisition policy", () => {
+  const input = {
+    name: "acquisition.query",
+    acquisition: "fetch" as "cache" | "fetch",
+    key: () => "acquisition",
+    fetch: async () => 1,
+  };
+  const query = createQuery(input);
+  input.acquisition = "cache";
+  expect(query.acquisition).toBe("fetch");
+  const defaultQuery = createQuery({
+    name: "default.query",
+    key: () => "default",
+    fetch: async () => 1,
+  });
+  expect(defaultQuery.acquisition).toBe("cache");
+  expect(
+    createQuery({
+      name: "undefined.query",
+      acquisition: undefined,
+      key: () => "undefined",
+      fetch: async () => 1,
+    }).acquisition,
+  ).toBe("cache");
+
+  let getterCalled = false;
+  const accessor = Object.defineProperty(
+    {
+      name: "accessor.query",
+      key: () => "accessor",
+      fetch: async () => 1,
+    },
+    "acquisition",
+    {
+      get() {
+        getterCalled = true;
+        return "fetch";
+      },
+    },
+  );
+  expect(() => createQuery(accessor as never)).toThrow(TypeError);
+  expect(getterCalled).toBe(false);
+
+  const inherited = Object.assign(
+    Object.create({ acquisition: "fetch" }),
+    {
+      name: "inherited.query",
+      key: () => "inherited",
+      fetch: async () => 1,
+    },
+  );
+  expect(() => createQuery(inherited as never)).toThrow(TypeError);
+
+  for (const acquisition of [false, null, "network"] as const) {
+    expect(() =>
+      createQuery({
+        name: "invalid.query",
+        acquisition,
+        key: () => "invalid",
+        fetch: async () => 1,
+      } as never),
+    ).toThrow(TypeError);
+  }
+});
+
+test("a graph retains the acquisition captured from a structural query", async () => {
+  const backend = testBackend();
+  const query = {
+    kind: "query" as const,
+    name: "structural.acquisition",
+    acquisition: "fetch" as "cache" | "fetch",
+    key: (input: string) => input,
+    fetch: backend.respond<string, number>("structural.acquisition"),
+  };
+  const graph = createGraph({
+    contract: defineContract({ namespace: "structural-acquisition", operations: { query } }),
+  });
+  query.acquisition = "cache";
+
+  try {
+    const first = graph.api.query("structural-key");
+    backend.resolve(backend.calls[0]!, 1);
+    await expect(first.ready).resolves.toBe(1);
+
+    const second = graph.api.query("structural-key");
+    expect(backend.calls).toHaveLength(2);
+    backend.resolve(backend.calls[1]!, 2);
+    await expect(second.ready).resolves.toBe(2);
+  } finally {
+    graph.dispose();
+  }
 });
 
 test("contract validation rejects aliases, cycles, and orphan affected queries", () => {

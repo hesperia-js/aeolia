@@ -509,6 +509,9 @@ export interface QueryProgressObservation<P> {
   subscribe(observer: (event: QueryProgressEvent<P>) => void): Unsubscribe;
 }
 
+/** Acquisition behavior for query member calls. */
+export type QueryAcquisition = "cache" | "fetch";
+
 /** Input used to declare a query operation in a contract. */
 export interface CreateQueryInput<I, T, K extends string, P = never> {
   /** Human-readable operation name used in diagnostics and test records. */
@@ -533,6 +536,29 @@ export interface CreateQueryInput<I, T, K extends string, P = never> {
    * The key must be non-empty.
    */
   readonly key: (input: I) => K;
+
+  /**
+   * Controls whether a fresh committed value can satisfy a member call.
+   *
+   * `"cache"` reuses a fresh landing. `"fetch"` enters the ordinary request
+   * path even when a landing is fresh and joins any current same-key request.
+   * It remains subject to recovery limits. A raw same-key request keeps the
+   * callback from the call that started it. Later callers join its result. A
+   * prior committed value remains available through `value` while the fetch
+   * runs, and `ready` waits for the request to settle. The callback may satisfy
+   * the request from a native cache, so this option does not promise network
+   * traffic. Omission and `undefined` mean `"cache"`.
+   *
+   * When present, this must be an own data property whose value is
+   * `undefined`, `"cache"`, or `"fetch"`. Accessors, inherited properties, and
+   * other values cause a synchronous `TypeError`.
+   *
+   * Aeolia captures this policy when `createQuery` runs, or when a graph
+   * registers a structural query definition.
+   *
+   * @defaultValue `"cache"`
+   */
+  readonly acquisition?: QueryAcquisition;
 
   /**
    * Default freshness window for query callers, in milliseconds.
@@ -560,8 +586,35 @@ export interface CreateQueryInput<I, T, K extends string, P = never> {
   readonly equals?: (a: NoInfer<T>, b: NoInfer<T>) => boolean;
 }
 
-export function isCreateQueryInput(
+/** @internal Captures and normalizes the own data field on a validated query declaration. */
+export function captureQueryAcquisition(value: unknown): QueryAcquisition {
+  if (!isObject(value)) throw new TypeError("Invalid query acquisition.");
+
+  let descriptor: PropertyDescriptor | undefined;
+  let inherited = false;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(value, "acquisition");
+    inherited = descriptor === undefined && "acquisition" in value;
+  } catch {
+    throw new TypeError("Invalid query acquisition.");
+  }
+
+  if (descriptor === undefined) {
+    if (inherited) throw new TypeError("Invalid query acquisition.");
+    return "cache";
+  }
+  if (!Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid query acquisition.");
+
+  const acquisition: unknown = descriptor.value;
+  if (acquisition === undefined || acquisition === "cache") return "cache";
+  if (acquisition === "fetch") return acquisition;
+  throw new TypeError("Invalid query acquisition.");
+}
+
+/** @internal Validates the remaining declaration fields using a captured policy. */
+export function isCreateQueryInputWithAcquisition(
   value: unknown,
+  acquisition: QueryAcquisition,
 ): value is CreateQueryInput<unknown, unknown, string, any> {
   return (
     isNamedDeclaration(value) &&
@@ -572,8 +625,21 @@ export function isCreateQueryInput(
     (!("revalidateAfterMs" in value) ||
       value.revalidateAfterMs === undefined ||
       typeof value.revalidateAfterMs === "number") &&
-    matchesOptions(value, valueSemanticsChecks)
+    matchesOptions(value, valueSemanticsChecks) &&
+    (acquisition === "cache" || acquisition === "fetch")
   );
+}
+
+export function isCreateQueryInput(
+  value: unknown,
+): value is CreateQueryInput<unknown, unknown, string, any> {
+  let acquisition: QueryAcquisition;
+  try {
+    acquisition = captureQueryAcquisition(value);
+  } catch {
+    return false;
+  }
+  return isCreateQueryInputWithAcquisition(value, acquisition);
 }
 
 /**

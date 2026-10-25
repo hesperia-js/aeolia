@@ -4,6 +4,7 @@ import type {
   Graph,
   MutationDefinition,
   CallContext,
+  QueryAcquisition,
   QueryDefinition,
   QueryProgressEvent,
   QueryProgressSnapshot,
@@ -306,7 +307,7 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly maxPredictions: number;
   readonly onUnobservedFault?: (error: unknown) => void;
   readonly stores: Map<string | StoreIdentity, StoreRuntime<unknown>>;
-  readonly queryDefinitions: Set<QueryDefinition<any, any, any, any>>;
+  readonly queryDefinitions: Map<QueryDefinition<any, any, any, any>, QueryAcquisition>;
   readonly mutationDefinitions: Set<MutationDefinition<any, any>>;
   readonly bindingContexts: Set<BindingContextRuntime>;
   readonly declaredStores: Map<string, StoreDefinition<unknown>>;
