@@ -176,17 +176,38 @@ test("query declarations capture and validate acquisition policy", () => {
 
 test("a graph retains the acquisition captured from a structural query", async () => {
   const backend = testBackend();
-  const query = {
+  const definition = {
     kind: "query" as const,
     name: "structural.acquisition",
     acquisition: "fetch" as "cache" | "fetch",
     key: (input: string) => input,
     fetch: backend.respond<string, number>("structural.acquisition"),
   };
-  const graph = createGraph({
-    contract: defineContract({ namespace: "structural-acquisition", operations: { query } }),
+  let descriptorReads = 0;
+  const query = new Proxy(definition, {
+    getOwnPropertyDescriptor(target, property) {
+      if (property === "acquisition") {
+        descriptorReads += 1;
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: descriptorReads === 1 ? "fetch" : "cache",
+        };
+      }
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
   });
-  query.acquisition = "cache";
+  const operations = {
+    get query() {
+      descriptorReads = 0;
+      return query;
+    },
+  };
+  const graph = createGraph({
+    contract: defineContract({ namespace: "structural-acquisition", operations }),
+  });
+  definition.acquisition = "cache";
 
   try {
     const first = graph.api.query("structural-key");

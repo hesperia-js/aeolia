@@ -23,6 +23,7 @@ import {
   isStoreOptions,
   isCancellationOptions,
   captureQueryAcquisition,
+  isCreateQueryInputWithAcquisition,
   isStoreDefinition,
   isOperationDefinition,
 } from "./types.ts";
@@ -443,10 +444,10 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
   for (const [property, value] of Object.entries(tree)) {
     if (isStoreDefinition(value)) {
       api[property] = () => getOrCreateStore(state, storeKey(value.name), value).store;
-    } else if (isOperationDefinition(value)) {
-      if (value.kind === "query") {
+    } else if (isObject(value) && "kind" in value && value.kind === "query") {
+      const acquisition = captureQueryAcquisition(value);
+      if (isCreateQueryInputWithAcquisition(value, acquisition) && value.kind === "query") {
         const definition = value as QueryDefinition<unknown, unknown, any, any>;
-        const acquisition = captureQueryAcquisition(definition);
         state.queryDefinitions.set(definition, acquisition);
         api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) => {
           assertGraphOpen(state);
@@ -465,7 +466,11 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
             finishPhysicalWork(physical);
           }
         };
-      } else if (value.kind === "mutation") {
+      } else if (value !== null && typeof value === "object") {
+        api[property] = buildApi(state, value as OperationTree);
+      }
+    } else if (isOperationDefinition(value)) {
+      if (value.kind === "mutation") {
         state.mutationDefinitions.add(value);
         api[property] = (...args: [input?: unknown, options?: MutationOptions]) => {
           assertGraphOpen(state);
