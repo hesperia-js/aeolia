@@ -192,8 +192,7 @@ async function verifyAcquisitionConsumer() {
     await verifyWarmFetchAcquisition(backend, "raw", 0, () => graph.api.query({ id: "raw" }));
     await verifyWarmFetchAcquisition(backend, "bound", 2, () => binding.member({ id: "bound" }));
   } finally {
-    for (const call of backend.pending("acquisition.read"))
-      backend.resolve(call, "cleanup");
+    for (const call of backend.pending("acquisition.read")) backend.resolve(call, "cleanup");
     graph.dispose();
   }
 }
