@@ -284,11 +284,22 @@ try {
 
   const error = await run(["node", "--enable-source-maps", "mapped-error.mjs"], consumer, 1);
   const sourceLines = (await readFile(join(root, "src/contract/api.ts"), "utf8")).split(/\r?\n/);
-  const throwLine =
-    sourceLines.findIndex((line) =>
-      line.includes('throw new TypeError("Invalid query declaration.")'),
-    ) + 1;
-  assert.ok(throwLine > 0, "Locate the deliberate declaration error for the source-map check");
+  const invalidInputGuard = "if (!isCreateQueryInputWithAcquisition(input, acquisition))";
+  const guardLines = sourceLines.flatMap((line, index) =>
+    line.trim() === invalidInputGuard ? [index] : [],
+  );
+  assert.equal(
+    guardLines.length,
+    1,
+    "Locate the unique invalid-input guard for the source-map check",
+  );
+  const guardThrowIndex = guardLines[0] + 1;
+  assert.equal(
+    sourceLines[guardThrowIndex]?.trim(),
+    'throw new TypeError("Invalid query declaration.");',
+    "The invalid-input guard must throw on the following source line",
+  );
+  const throwLine = guardThrowIndex + 1;
   assert.match(error, /TypeError: Invalid query declaration\./);
   assert.ok(
     error.replaceAll("\\", "/").includes(`/src/contract/api.ts:${throwLine}:`),
