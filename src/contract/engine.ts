@@ -455,13 +455,7 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
           try {
             const [input, options] = args;
             const call = normalizeQueryCall(input, options, args.length > 1);
-            return makeQueryStore(
-              state,
-              definition,
-              call.input,
-              call.options,
-              acquisition,
-            );
+            return makeQueryStore(state, definition, call.input, call.options, acquisition);
           } finally {
             finishPhysicalWork(physical);
           }

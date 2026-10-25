@@ -152,14 +152,11 @@ test("query declarations capture and validate acquisition policy", () => {
   expect(() => createQuery(accessor as never)).toThrow(TypeError);
   expect(getterCalled).toBe(false);
 
-  const inherited = Object.assign(
-    Object.create({ acquisition: "fetch" }),
-    {
-      name: "inherited.query",
-      key: () => "inherited",
-      fetch: async () => 1,
-    },
-  );
+  const inherited = Object.assign(Object.create({ acquisition: "fetch" }), {
+    name: "inherited.query",
+    key: () => "inherited",
+    fetch: async () => 1,
+  });
   expect(() => createQuery(inherited as never)).toThrow(TypeError);
 
   for (const acquisition of [false, null, "network"] as const) {
