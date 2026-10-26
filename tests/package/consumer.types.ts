@@ -198,6 +198,11 @@ const collidingContract = defineContract({
 
 function typecheckOnly(): void {
   const contractQueryAcquisition: ContractQueryAcquisition = queryAcquisition;
+  // @ts-expect-error QueryAcquisition accepts only its published cache/fetch policies.
+  const unsupportedAcquisition: QueryAcquisition = "network";
+  // @ts-expect-error The returned query declaration keeps its acquisition policy readonly.
+  query.acquisition = "fetch";
+  void unsupportedAcquisition;
   void contractQueryAcquisition;
   const signalOptions: Signal.SignalOptions<number> = {
     [Signal.subtle.watched]() {
