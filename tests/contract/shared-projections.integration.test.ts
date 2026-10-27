@@ -174,11 +174,20 @@ it("starts a positioned shared projection at the next event when it joins during
     const firstDelivered = until(first.value, (value) => value === 1);
     backend.emit("positioned-shared-join", { position: 5, value: 1 });
     await firstDelivered;
-    expect(lateAtJoin).toMatchObject({ value: 0, hasPosition: false, position: undefined, revision: 0 });
-    if (late === undefined || lateAtJoin === undefined) throw new Error("The projection did not join during delivery");
+    expect(lateAtJoin).toMatchObject({
+      value: 0,
+      hasPosition: false,
+      position: undefined,
+      revision: 0,
+    });
+    if (late === undefined || lateAtJoin === undefined)
+      throw new Error("The projection did not join during delivery");
     expect(isPositionedCheckpointCurrent(lateAtJoin)).toBe(true);
     expect(capturePositionedProjection<number, number>(first)).toMatchObject({
-      value: 1, hasPosition: true, position: 5, revision: 1,
+      value: 1,
+      hasPosition: true,
+      position: 5,
+      revision: 1,
     });
     const secondDelivered = until(late.value, (value) => value === 2);
     backend.emit("positioned-shared-join", { position: 6, value: 2 });
@@ -186,7 +195,10 @@ it("starts a positioned shared projection at the next event when it joins during
     expect(first.value.get()).toBe(3);
     expect(late.value.get()).toBe(2);
     expect(capturePositionedProjection<number, number>(late)).toMatchObject({
-      value: 2, hasPosition: true, position: 6, revision: 1,
+      value: 2,
+      hasPosition: true,
+      position: 6,
+      revision: 1,
     });
     expect(isPositionedCheckpointCurrent(lateAtJoin)).toBe(false);
     expect(backend.calls).toHaveLength(1);

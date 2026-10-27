@@ -134,19 +134,42 @@ function positionedChannel() {
   return { source, emit };
 }
 
-class PositionedProvider implements PositionedStreamSource<PositionedInput, number, number, object> {
-  readonly opens: Array<{ room: string; hasAfter: boolean; after: number | undefined; hasReader: boolean }> = [];
+class PositionedProvider implements PositionedStreamSource<
+  PositionedInput,
+  number,
+  number,
+  object
+> {
+  readonly opens: Array<{
+    room: string;
+    hasAfter: boolean;
+    after: number | undefined;
+    hasReader: boolean;
+  }> = [];
   readonly currentChecks: Array<{ after: number; seed: unknown }> = [];
   readonly acknowledgements: Array<{ reader: object; receipt: PositionedFoldReceipt<number> }> = [];
   validationOverride: unknown = undefined;
   validationCalls = 0;
   currentCheckHook: (() => void) | undefined = undefined;
-  readonly #reservations = new WeakMap<object, { input: PositionedInput; after: number; checkpoint: PositionedCheckpoint | undefined; seed: unknown }>();
+  readonly #reservations = new WeakMap<
+    object,
+    {
+      input: PositionedInput;
+      after: number;
+      checkpoint: PositionedCheckpoint | undefined;
+      seed: unknown;
+    }
+  >();
   readonly #readerEmitters = new WeakMap<object, (event: PositionedEvent) => void>();
   readonly #liveEmitters = new Map<string, (event: PositionedEvent) => void>();
   readonly #releaseCounts = new WeakMap<object, number>();
 
-  reserve(input: PositionedInput, after: number, checkpoint: PositionedCheckpoint | undefined, seed: unknown): object {
+  reserve(
+    input: PositionedInput,
+    after: number,
+    checkpoint: PositionedCheckpoint | undefined,
+    seed: unknown,
+  ): object {
     const reader = Object.freeze({});
     this.#reservations.set(reader, { input, after, checkpoint, seed });
     return reader;
@@ -168,7 +191,10 @@ class PositionedProvider implements PositionedStreamSource<PositionedInput, numb
     return this.#releaseCounts.get(reader) ?? 0;
   }
 
-  open(input: PositionedInput, options: PositionedStreamOpenOptions<number, object>): AsyncIterable<PositionedEvent> {
+  open(
+    input: PositionedInput,
+    options: PositionedStreamOpenOptions<number, object>,
+  ): AsyncIterable<PositionedEvent> {
     const channel = positionedChannel();
     const hasAfter = Object.hasOwn(options, "after");
     const hasReader = Object.hasOwn(options, "reader");
@@ -197,12 +223,7 @@ class PositionedProvider implements PositionedStreamSource<PositionedInput, numb
     );
   }
 
-  isReaderCurrent(
-    input: PositionedInput,
-    reader: object,
-    after: number,
-    seed: unknown,
-  ): boolean {
+  isReaderCurrent(input: PositionedInput, reader: object, after: number, seed: unknown): boolean {
     this.currentChecks.push({ after, seed });
     this.currentCheckHook?.();
     const reservation = this.#reservations.get(reader);
@@ -214,7 +235,11 @@ class PositionedProvider implements PositionedStreamSource<PositionedInput, numb
     );
   }
 
-  acknowledge(_input: PositionedInput, reader: object, receipt: PositionedFoldReceipt<number>): void {
+  acknowledge(
+    _input: PositionedInput,
+    reader: object,
+    receipt: PositionedFoldReceipt<number>,
+  ): void {
     this.acknowledgements.push({ reader, receipt });
   }
 
@@ -270,13 +295,7 @@ async function createAccumulationRestoreFixture(
     const checkpoint = capturePositionedProjection<readonly number[], number>(source);
     reader = provider.reserve(input, 5, checkpoint, seed);
     attempt = () =>
-      preparePositionedRestore(
-        targetGraph.api.events,
-        input,
-        checkpoint,
-        reader,
-        { value: seed },
-      );
+      preparePositionedRestore(targetGraph.api.events, input, checkpoint, reader, { value: seed });
   } else {
     reader = provider.reserve(input, 5, undefined, seed);
     attempt = () =>
@@ -652,29 +671,37 @@ describe("stream projections", () => {
     const sourceGraph = positionedGraph(stream, "positioned-source");
     const targetGraph = positionedGraph(stream, "positioned-target");
     const input = Object.freeze({ room: "one" });
-    const policy = { kind: "reduce" as const, initial: 0, step: (sum: number, item: number) => sum + item };
+    const policy = {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (sum: number, item: number) => sum + item,
+    };
     const source = projectPositioned(sourceGraph.api.events, input, policy);
     try {
       expect(provider.opens[0]?.hasAfter).toBe(false);
       provider.emitLive(input, { position: 5, value: 2 });
       await flush();
       const checkpoint = capturePositionedProjection<number, number>(source);
-      expect(checkpoint).toMatchObject({ value: 2, hasPosition: true, position: 5, resumable: true });
+      expect(checkpoint).toMatchObject({
+        value: 2,
+        hasPosition: true,
+        position: 5,
+        resumable: true,
+      });
       expect(isPositionedCheckpointCurrent(checkpoint)).toBe(true);
 
       const seed = 20;
       const reader = provider.reserve(input, 5, checkpoint, seed);
-      const restore = preparePositionedRestore(
-        targetGraph.api.events,
-        input,
-        checkpoint,
-        reader,
-        { value: seed },
-      );
+      const restore = preparePositionedRestore(targetGraph.api.events, input, checkpoint, reader, {
+        value: seed,
+      });
       expect(provider.opens).toHaveLength(1);
       expect(restore.projection.value.get()).toBe(seed);
       expect(capturePositionedProjection<number, number>(restore.projection)).toMatchObject({
-        value: seed, hasPosition: true, position: 5, resumable: true,
+        value: seed,
+        hasPosition: true,
+        position: 5,
+        resumable: true,
       });
 
       restore.activate();
@@ -708,7 +735,9 @@ describe("stream projections", () => {
     const targetGraph = positionedGraph(stream, "positioned-validator-target");
     const input = Object.freeze({ room: "one" });
     const source = projectPositioned(sourceGraph.api.events, input, {
-      kind: "reduce", initial: 0, step: (sum, item) => sum + item,
+      kind: "reduce",
+      initial: 0,
+      step: (sum, item) => sum + item,
     });
     try {
       provider.emitLive(input, { position: 5, value: 2 });
@@ -807,7 +836,9 @@ describe("stream projections", () => {
       },
     });
     const reader = provider.reserve(input, 5, undefined, seed);
-    provider.currentCheckHook = () => { armed = true; };
+    provider.currentCheckHook = () => {
+      armed = true;
+    };
     try {
       expect(() =>
         preparePositionedSeedRestore(
@@ -876,7 +907,11 @@ describe("stream projections", () => {
       expect(providerB.opens).toHaveLength(0);
       expect(restore.projection.value.get()).toBe(decodedValue);
       expect(capturePositionedProjection(restore.projection)).toMatchObject({
-        value: decodedValue, hasPosition: true, position: 5, revision: 0, resumable: true,
+        value: decodedValue,
+        hasPosition: true,
+        position: 5,
+        revision: 0,
+        resumable: true,
       });
       restore.activate();
       const resumedOpen = providerB.opens[0];
@@ -928,7 +963,15 @@ describe("stream projections", () => {
       expect(afterFailure.position).toBe(1);
       expect(afterFailure.value.total).toBe(77);
       expect(afterFailure.resumable).toBe(false);
-      expect(() => preparePositionedRestore(graph.api.events, input, afterFailure, {}, { value: afterFailure.value })).toThrow(TypeError);
+      expect(() =>
+        preparePositionedRestore(
+          graph.api.events,
+          input,
+          afterFailure,
+          {},
+          { value: afterFailure.value },
+        ),
+      ).toThrow(TypeError);
       expect(provider.opens).toHaveLength(1);
     } finally {
       source.close();
@@ -941,7 +984,10 @@ describe("stream projections", () => {
     const stream = positionedDefinition(provider);
     const faults: unknown[] = [];
     const graph = createGraph({
-      contract: defineContract({ namespace: "positioned-observer-failure", operations: { events: stream } }),
+      contract: defineContract({
+        namespace: "positioned-observer-failure",
+        operations: { events: stream },
+      }),
       onUnobservedFault: (error) => faults.push(error),
     });
     const input = Object.freeze({ room: "one" });
@@ -961,11 +1007,23 @@ describe("stream projections", () => {
       expect(projection.value.get()).toBe(1);
       expect(faults).toEqual([notificationFailure]);
       const first = capturePositionedProjection<number, number>(projection);
-      expect(first).toMatchObject({ value: 1, hasPosition: true, position: 5, revision: 1, resumable: true });
+      expect(first).toMatchObject({
+        value: 1,
+        hasPosition: true,
+        position: 5,
+        revision: 1,
+        resumable: true,
+      });
       provider.emitLive(input, { position: 6, value: 3 });
       await flush();
       const second = capturePositionedProjection<number, number>(projection);
-      expect(second).toMatchObject({ value: 1, hasPosition: true, position: 6, revision: 2, resumable: true });
+      expect(second).toMatchObject({
+        value: 1,
+        hasPosition: true,
+        position: 6,
+        revision: 2,
+        resumable: true,
+      });
       expect(isPositionedCheckpointCurrent(first)).toBe(false);
       expect(positionedFoldReceipt(projection)).toMatchObject({ position: 6, revision: 2 });
       expect(faults).toEqual([notificationFailure]);
@@ -1000,8 +1058,12 @@ describe("stream projections", () => {
       expect(isPositionedCheckpointCurrent(beforeClose)).toBe(false);
       const afterReset = capturePositionedProjection<number, number>(projection);
       expect(afterReset).toMatchObject({
-        status: "closed", value: 0, error: undefined, hasPosition: false,
-        position: undefined, resumable: false,
+        status: "closed",
+        value: 0,
+        error: undefined,
+        hasPosition: false,
+        position: undefined,
+        resumable: false,
       });
       expect(isPositionedCheckpointCurrent(afterReset)).toBe(true);
       expect(provider.opens).toHaveLength(1);

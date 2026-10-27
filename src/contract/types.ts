@@ -825,7 +825,11 @@ export interface PositionedStreamSource<Input, Value, Position, Reader> {
     seed: unknown,
   ) => boolean;
   /** Acknowledges one authentic native successful-fold receipt. */
-  readonly acknowledge: (input: Input, reader: Reader, receipt: PositionedFoldReceipt<Position>) => void;
+  readonly acknowledge: (
+    input: Input,
+    reader: Reader,
+    receipt: PositionedFoldReceipt<Position>,
+  ) => void;
   /** Releases this provider reader once when its native owner is discarded or closed. */
   readonly releaseReader: (input: Input, reader: Reader) => void;
 }
@@ -864,7 +868,9 @@ export type NativeStreamDefinition<
   Key extends string = string,
   Position = unknown,
   Reader = unknown,
-> = StreamDefinition<Input, Value, Key> | PositionedStreamDefinition<Input, Value, Key, Position, Reader>;
+> =
+  | StreamDefinition<Input, Value, Key>
+  | PositionedStreamDefinition<Input, Value, Key, Position, Reader>;
 
 export function isCreatePositionedStreamInput(
   value: unknown,
@@ -872,7 +878,9 @@ export function isCreatePositionedStreamInput(
   if (!isNamedDeclaration(value) || !isObject(value) || typeof value.key !== "function")
     return false;
   if (!("source" in value) || !isObject(value.source)) return false;
-  const source = value.source as Partial<PositionedStreamSource<unknown, unknown, unknown, unknown>>;
+  const source = value.source as Partial<
+    PositionedStreamSource<unknown, unknown, unknown, unknown>
+  >;
   return (
     typeof source.open === "function" &&
     typeof source.validateReader === "function" &&
@@ -1251,11 +1259,11 @@ export type MemberOf<D> =
           >
         : D extends StreamDefinition<infer I, infer T, any>
           ? (input: I, options?: ValueOptions<T>) => StreamStore<T>
-        : D extends StoreDefinition<infer T, any>
-          ? () => Store<T>
-          : D extends OperationTree
-            ? { readonly [K in keyof D]: MemberOf<D[K]> }
-            : never;
+          : D extends StoreDefinition<infer T, any>
+            ? () => Store<T>
+            : D extends OperationTree
+              ? { readonly [K in keyof D]: MemberOf<D[K]> }
+              : never;
 
 /** The recursively generated API shape exposed by {@link Graph.api}. */
 export type ContractApi<C extends Contract> =
@@ -1268,12 +1276,12 @@ export type StorePatterns<D> =
     : D extends PositionedStreamDefinition<any, any, infer K, any, any>
       ? K
       : D extends StreamDefinition<any, infer _T, infer K>
-      ? K
-      : D extends StoreDefinition<any, any> | MutationDefinition<any, any>
-        ? never
-        : D extends object
-          ? { readonly [P in keyof D]: StorePatterns<D[P]> }[keyof D]
-          : never;
+        ? K
+        : D extends StoreDefinition<any, any> | MutationDefinition<any, any>
+          ? never
+          : D extends object
+            ? { readonly [P in keyof D]: StorePatterns<D[P]> }[keyof D]
+            : never;
 
 /** Extracts declared store names from a declaration tree. */
 export type StoreNames<D> =
@@ -1331,14 +1339,14 @@ export type KeyedStores<D> =
     : D extends PositionedStreamDefinition<any, infer T, infer K, any, any>
       ? KeyedStoreEntry<K, T>
       : D extends StreamDefinition<any, infer T, infer K>
-      ? KeyedStoreEntry<K, T>
-      : D extends StoreDefinition<infer T, infer N>
-        ? KeyedStoreEntry<N, T>
-        : D extends MutationDefinition<any, any>
-          ? never
-          : D extends object
-            ? { readonly [P in keyof D]: KeyedStores<D[P]> }[keyof D]
-            : never;
+        ? KeyedStoreEntry<K, T>
+        : D extends StoreDefinition<infer T, infer N>
+          ? KeyedStoreEntry<N, T>
+          : D extends MutationDefinition<any, any>
+            ? never
+            : D extends object
+              ? { readonly [P in keyof D]: KeyedStores<D[P]> }[keyof D]
+              : never;
 
 /**
  * Resolves a known contract key to the value type of its matching store.

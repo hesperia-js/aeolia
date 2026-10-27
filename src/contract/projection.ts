@@ -237,11 +237,17 @@ interface PositionedProjectionRuntime {
 const positionedProjectionByHandle = new WeakMap<object, ProjectionRuntime<unknown, unknown>>();
 const positionedCheckpointByHandle = new WeakMap<
   object,
-  { readonly runtime: ProjectionRuntime<unknown, unknown>; readonly tuple: PositionedProjectionTuple<unknown, unknown> }
+  {
+    readonly runtime: ProjectionRuntime<unknown, unknown>;
+    readonly tuple: PositionedProjectionTuple<unknown, unknown>;
+  }
 >();
 const positionedReceiptByHandle = new WeakMap<
   object,
-  { readonly runtime: ProjectionRuntime<unknown, unknown>; readonly tuple: PositionedProjectionTuple<unknown, unknown> }
+  {
+    readonly runtime: ProjectionRuntime<unknown, unknown>;
+    readonly tuple: PositionedProjectionTuple<unknown, unknown>;
+  }
 >();
 
 interface ProjectionRuntime<T, V> {
@@ -714,9 +720,7 @@ function positionedMemberRecord(member: unknown): PositionedMemberRecord {
   throw new TypeError("The value is not an authentic positioned stream member or binding");
 }
 
-function capturePositionedPolicy<T, V>(
-  policy: ProjectionPolicy<T, V>,
-): ProjectionPolicy<T, V> {
+function capturePositionedPolicy<T, V>(policy: ProjectionPolicy<T, V>): ProjectionPolicy<T, V> {
   const kind = policy.kind;
   if (kind === "reduce") {
     const initial = policy.initial;
@@ -754,10 +758,7 @@ function newPositionedState(
   input: unknown,
   runtime: ProjectionRuntime<any, any>,
 ): PositionedProjectionRuntime {
-  const value =
-    runtime.policy.kind === "reduce"
-      ? runtime.policy.initial
-      : ([] as unknown[]);
+  const value = runtime.policy.kind === "reduce" ? runtime.policy.initial : ([] as unknown[]);
   const positioned: PositionedProjectionRuntime = {
     graphState: record.graphState,
     graphEpoch: record.graphState.resetEpoch,
@@ -809,20 +810,15 @@ function writePositionedTuple<T, V>(
   let committed = false;
   try {
     reactiveInternal.batch(() => {
-      const landed = reactiveInternal.guardedWrite(
-        runtime.valueCell,
-        next.value,
-        current,
-        () => {
-          positioned.tuple = next;
-          if (receipt !== undefined) {
-            positioned.latestReceipt = receipt;
-            positionedReceiptByHandle.set(receipt, { runtime: runtime as any, tuple: next as any });
-          }
-          onCommit?.();
-          committed = true;
-        },
-      );
+      const landed = reactiveInternal.guardedWrite(runtime.valueCell, next.value, current, () => {
+        positioned.tuple = next;
+        if (receipt !== undefined) {
+          positioned.latestReceipt = receipt;
+          positionedReceiptByHandle.set(receipt, { runtime: runtime as any, tuple: next as any });
+        }
+        onCommit?.();
+        committed = true;
+      });
       if (!landed && !committed) return;
       runtime.statusCell.set(next.status);
       runtime.errorCell.set(next.error);
@@ -835,8 +831,7 @@ function writePositionedTuple<T, V>(
 }
 function releasePositionedReader<T, V>(runtime: ProjectionRuntime<T, V>): void {
   const positioned = runtime.positioned;
-  if (positioned === undefined || !positioned.readerPresent || positioned.readerReleased)
-    return;
+  if (positioned === undefined || !positioned.readerPresent || positioned.readerReleased) return;
   positioned.readerReleased = true;
   try {
     positioned.provider.releaseReader(positioned.input, positioned.reader);
@@ -853,7 +848,12 @@ function finishPositioned<T, V>(
   abortReason?: unknown,
 ): void {
   const positioned = runtime.positioned;
-  if (positioned === undefined || positioned.transitioning || source !== runtime.source || source.retired)
+  if (
+    positioned === undefined ||
+    positioned.transitioning ||
+    source !== runtime.source ||
+    source.retired
+  )
     return;
   positioned.transitioning = true;
   runtime.closed = true;
@@ -864,9 +864,7 @@ function finishPositioned<T, V>(
   const state = graphRuntimeByGraph.get(runtime.graph as object);
   const resetEpoch = state?.resetEpoch;
   const current = (): boolean =>
-    runtime.source === source &&
-    state?.resetEpoch === resetEpoch &&
-    positioned.transitioning;
+    runtime.source === source && state?.resetEpoch === resetEpoch && positioned.transitioning;
   const work = beginPhysicalWork(source.retirement, "cleanup");
   const terminalStatus: ProjectionStatus = failed ? "failed" : "closed";
   let cleanup: (() => void) | undefined;
@@ -960,8 +958,7 @@ function acceptPositioned<T, V>(
     try {
       nextValue = policy.step(previous.value as V, item);
     } catch (error) {
-      if (isCurrentGeneration(runtime, controller, generation))
-        failPositioned(runtime, error);
+      if (isCurrentGeneration(runtime, controller, generation)) failPositioned(runtime, error);
       return;
     }
   } else {
@@ -1254,7 +1251,10 @@ function makeSharedProjection<T, V>(
         runtime.positioned!.key = store.key;
         runtime.positioned!.hasKey = true;
       }
-      positionedProjectionByHandle.set(projection, runtime as unknown as ProjectionRuntime<unknown, unknown>);
+      positionedProjectionByHandle.set(
+        projection,
+        runtime as unknown as ProjectionRuntime<unknown, unknown>,
+      );
     }
   }
   runtime.restartSource = () => attachSharedProjection(runtime, store, source);
@@ -1296,8 +1296,7 @@ function attachSharedProjection<T, V>(
         }
         acceptPositioned(runtime, event.value as T, event.position, controller, generation);
       } else accept(runtime, event.value as T, controller, generation);
-    }
-    else if (event.kind === "gap")
+    } else if (event.kind === "gap")
       fail(runtime, new Error("Aeolia projection stream reported a gap"));
     else finish(runtime, event.failed, event.reason);
   };
@@ -1360,7 +1359,10 @@ export function projectPositioned<Input, Event, Position, Reader, Value>(
       record.binding?.context.retirement,
     );
     newPositionedState(record, input, runtime);
-    positionedProjectionByHandle.set(projection, runtime as unknown as ProjectionRuntime<unknown, unknown>);
+    positionedProjectionByHandle.set(
+      projection,
+      runtime as unknown as ProjectionRuntime<unknown, unknown>,
+    );
     runtime.restartSource = () => openIndependent(runtime, graph, record.definition, input);
     openIndependent(runtime, graph, record.definition, input, true);
     return projection;
@@ -1509,7 +1511,9 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
   if (target.binding !== undefined) assertBindingContextOpen(target.binding.context);
   else assertGraphOpen(target.graphState);
   if (target.provider.validateReader(input, reader, after, checkpoint, seedValue) !== true)
-    throw new TypeError("Provider reader is not an admitted reservation for this position and seed");
+    throw new TypeError(
+      "Provider reader is not an admitted reservation for this position and seed",
+    );
   if (!targetCurrent()) throw new TypeError("Target graph changed during provider validation");
   if (target.provider.isReaderCurrent(input, reader, after, seedValue) !== true)
     throw new TypeError("Provider reader reservation is no longer current");
@@ -1517,7 +1521,9 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
     throw new TypeError("Positioned checkpoint or target graph changed during provider validation");
   assertPositionedAccumulationSeedWithinMax(sourcePolicy, seedValue);
   if (!isPositionedCheckpointCurrent(checkpoint) || !targetCurrent())
-    throw new TypeError("Positioned checkpoint or target graph changed while checking restore seed maximum");
+    throw new TypeError(
+      "Positioned checkpoint or target graph changed while checking restore seed maximum",
+    );
   if (target.binding !== undefined) assertBindingContextOpen(target.binding.context);
   else assertGraphOpen(target.graphState);
 
@@ -1549,7 +1555,10 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
     resumable: sourceTuple.resumable,
   };
   const seedTuple = positioned.tuple;
-  positionedProjectionByHandle.set(projection, runtime as unknown as ProjectionRuntime<unknown, unknown>);
+  positionedProjectionByHandle.set(
+    projection,
+    runtime as unknown as ProjectionRuntime<unknown, unknown>,
+  );
   const seedEpoch = targetEpoch;
   const seedGeneration = runtime.source.generation;
   let committed = false;
@@ -1573,15 +1582,10 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
     positioned.tuple === (committed ? seeded : seedTuple);
   try {
     reactiveInternal.batch(() => {
-      const landed = reactiveInternal.guardedWrite(
-        runtime.valueCell,
-        seeded.value,
-        current,
-        () => {
-          positioned.tuple = seeded;
-          committed = true;
-        },
-      );
+      const landed = reactiveInternal.guardedWrite(runtime.valueCell, seeded.value, current, () => {
+        positioned.tuple = seeded;
+        committed = true;
+      });
       if (!landed && !committed && !current())
         throw new TypeError("Graph changed while seeding positioned restore");
       runtime.statusCell.set(seeded.status);
@@ -1641,7 +1645,8 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
     if (!activationCurrent())
       return discardAndThrow(new TypeError("Positioned restoration is no longer current"));
     phase = "active";
-    runtime.restartSource = () => openIndependent(runtime, target.graphState.graph, target.definition, input);
+    runtime.restartSource = () =>
+      openIndependent(runtime, target.graphState.graph, target.definition, input);
     positioned.openingRequest = { after, reader };
     if (positioned.tuple.status !== "open") {
       const opened: PositionedProjectionTuple<V, Position> = {
@@ -1649,13 +1654,17 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
         status: "open",
         error: undefined,
       };
-      writePositionedTuple(runtime, opened, () =>
-        runtime.source === activationSource &&
-        target.graphState.resetEpoch === positioned.graphEpoch &&
-        !target.graphState.disposed &&
-        target.binding?.context.disposed !== true &&
-        !positioned.transitioning &&
-        !runtime.closed);
+      writePositionedTuple(
+        runtime,
+        opened,
+        () =>
+          runtime.source === activationSource &&
+          target.graphState.resetEpoch === positioned.graphEpoch &&
+          !target.graphState.disposed &&
+          target.binding?.context.disposed !== true &&
+          !positioned.transitioning &&
+          !runtime.closed,
+      );
     }
     openIndependent(runtime, target.graphState.graph, target.definition, input);
     return projection;
@@ -1719,14 +1728,17 @@ export function preparePositionedSeedRestore<Input, Event, Position, Reader, Val
   if (target.binding !== undefined) assertBindingContextOpen(target.binding.context);
   else assertGraphOpen(target.graphState);
   const capturedPolicy = capturePositionedPolicy(policy);
-  if (!targetCurrent()) throw new TypeError("Target graph changed while capturing positioned policy");
+  if (!targetCurrent())
+    throw new TypeError("Target graph changed while capturing positioned policy");
   if (seed === null || typeof seed !== "object" || Array.isArray(seed))
     throw new TypeError("Invalid positioned restore seed");
   const afterDescriptor = Object.getOwnPropertyDescriptor(seed, "after");
   const valueDescriptor = Object.getOwnPropertyDescriptor(seed, "value");
   if (
-    afterDescriptor === undefined || !("value" in afterDescriptor) ||
-    valueDescriptor === undefined || !("value" in valueDescriptor)
+    afterDescriptor === undefined ||
+    !("value" in afterDescriptor) ||
+    valueDescriptor === undefined ||
+    !("value" in valueDescriptor)
   )
     throw new TypeError("Positioned restore seed requires own data properties");
   const after = afterDescriptor.value as Position;
@@ -1735,7 +1747,8 @@ export function preparePositionedSeedRestore<Input, Event, Position, Reader, Val
   if (!targetCurrent()) throw new TypeError("Target graph changed while reading positioned seed");
   const keyForInput = target.definition.key;
   const targetKey = storeKey(Reflect.apply(keyForInput, target.definition, [input]));
-  if (!targetCurrent()) throw new TypeError("Target graph changed while resolving positioned input");
+  if (!targetCurrent())
+    throw new TypeError("Target graph changed while resolving positioned input");
   if (target.binding !== undefined) assertBindingContextOpen(target.binding.context);
   else assertGraphOpen(target.graphState);
   if (target.provider.validateReader(input, reader, after, undefined, seedValue) !== true)
@@ -1770,7 +1783,10 @@ export function preparePositionedSeedRestore<Input, Event, Position, Reader, Val
     resumable: true,
   };
   const seedTuple = positioned.tuple;
-  positionedProjectionByHandle.set(projection, runtime as unknown as ProjectionRuntime<unknown, unknown>);
+  positionedProjectionByHandle.set(
+    projection,
+    runtime as unknown as ProjectionRuntime<unknown, unknown>,
+  );
   const seedEpoch = targetEpoch;
   const seedGeneration = runtime.source.generation;
   let committed = false;
@@ -1786,7 +1802,8 @@ export function preparePositionedSeedRestore<Input, Event, Position, Reader, Val
     if (target.provider.isReaderCurrent(input, reader, after, seedValue) !== true)
       throw new TypeError("Target reader changed before positioned seed landing");
     assertPositionedAccumulationSeedWithinMax(capturedPolicy, seedValue);
-    if (!nativeCurrent()) throw new TypeError("Target changed while checking positioned seed maximum");
+    if (!nativeCurrent())
+      throw new TypeError("Target changed while checking positioned seed maximum");
     reactiveInternal.batch(() => {
       const landed = reactiveInternal.guardedWrite(
         runtime.valueCell,
@@ -1852,7 +1869,8 @@ export function preparePositionedSeedRestore<Input, Event, Position, Reader, Val
     )
       return discardAndThrow(new TypeError("Positioned restoration is no longer current"));
     phase = "active";
-    runtime.restartSource = () => openIndependent(runtime, target.graphState.graph, target.definition, input);
+    runtime.restartSource = () =>
+      openIndependent(runtime, target.graphState.graph, target.definition, input);
     positioned.openingRequest = { after, reader };
     openIndependent(runtime, target.graphState.graph, target.definition, input);
     return projection;
@@ -1903,12 +1921,14 @@ export function acknowledgePositionedFold<Value>(
   const tuple = positioned.tuple;
   const graphEpoch = positioned.graphState.resetEpoch;
   const reader = positioned.reader;
-  if (positioned.provider.isReaderCurrent(
-    positioned.input,
-    reader,
-    positioned.readerAfter,
-    positioned.restoreSeed,
-  ) !== true)
+  if (
+    positioned.provider.isReaderCurrent(
+      positioned.input,
+      reader,
+      positioned.readerAfter,
+      positioned.restoreSeed,
+    ) !== true
+  )
     throw new TypeError("Provider reader reservation is no longer current");
   if (
     positionedProjectionByHandle.get(projection as object) !== runtime ||

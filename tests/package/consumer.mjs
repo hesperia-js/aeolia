@@ -246,12 +246,23 @@ class ConsumerPositionedSource {
 
   validateReader(input, reader, after, checkpoint, seed) {
     const reservation = this.#reservations.get(reader);
-    return reservation !== undefined && reservation.input === input && reservation.after === after && reservation.checkpoint === checkpoint && reservation.seed === seed;
+    return (
+      reservation !== undefined &&
+      reservation.input === input &&
+      reservation.after === after &&
+      reservation.checkpoint === checkpoint &&
+      reservation.seed === seed
+    );
   }
 
   isReaderCurrent(input, reader, after, seed) {
     const reservation = this.#reservations.get(reader);
-    return reservation !== undefined && reservation.input === input && reservation.after === after && reservation.seed === seed;
+    return (
+      reservation !== undefined &&
+      reservation.input === input &&
+      reservation.after === after &&
+      reservation.seed === seed
+    );
   }
 
   acknowledge(_input, reader, receipt) {
@@ -271,7 +282,9 @@ function waitForPositionedValue(projection, predicate) {
   let stop = () => {};
   let matched = false;
   let resolveValue;
-  const result = new Promise((resolve) => { resolveValue = resolve; });
+  const result = new Promise((resolve) => {
+    resolveValue = resolve;
+  });
   const unsubscribe = subscribe(projection.value, (value) => {
     if (matched || !predicate(value)) return;
     matched = true;
@@ -292,7 +305,10 @@ async function verifyPositionedConsumer() {
       source: providerA,
     });
     const graphA = createGraph({
-      contract: defineContract({ namespace: "positioned-consumer-a", operations: { events: definitionA } }),
+      contract: defineContract({
+        namespace: "positioned-consumer-a",
+        operations: { events: definitionA },
+      }),
     });
     const inputA = { id: "one" };
     const source = projectPositioned(graphA.api.events, inputA, {
@@ -301,12 +317,18 @@ async function verifyPositionedConsumer() {
       step: (accumulator, event) => ({ total: accumulator.total + event }),
     });
     try {
-      check(providerA.opens.length === 1 && !providerA.opens[0].hasAfter, "A live positioned open included a restore boundary");
+      check(
+        providerA.opens.length === 1 && !providerA.opens[0].hasAfter,
+        "A live positioned open included a restore boundary",
+      );
       const firstFold = waitForPositionedValue(source, (value) => value.total === 2);
       providerA.emitLive(inputA, { position: 5, value: 2 });
       await firstFold;
       const checkpoint = capturePositionedProjection(source);
-      check(checkpoint.hasPosition && checkpoint.position === 5 && checkpoint.resumable, "A did not capture its successful positioned fold");
+      check(
+        checkpoint.hasPosition && checkpoint.position === 5 && checkpoint.resumable,
+        "A did not capture its successful positioned fold",
+      );
       return { after: checkpoint.position, value: { total: checkpoint.value.total } };
     } finally {
       source.close();
@@ -321,7 +343,10 @@ async function verifyPositionedConsumer() {
     source: providerB,
   });
   const graphB = createGraph({
-    contract: defineContract({ namespace: "positioned-consumer-b", operations: { events: definitionB } }),
+    contract: defineContract({
+      namespace: "positioned-consumer-b",
+      operations: { events: definitionB },
+    }),
   });
   const inputB = { id: "one" };
   const seed = persisted.value;
@@ -340,16 +365,31 @@ async function verifyPositionedConsumer() {
       reader,
     );
     check(providerB.opens.length === 0, "Dormant B opened before activation");
-    check(restore.projection.value.get() === seed, "B did not install the decoded accumulator seed");
+    check(
+      restore.projection.value.get() === seed,
+      "B did not install the decoded accumulator seed",
+    );
     const resumedFold = waitForPositionedValue(restore.projection, (value) => value.total === 5);
     restore.activate();
-    check(providerB.opens.length === 1 && providerB.opens[0].hasAfter && providerB.opens[0].after === 5 && providerB.opens[0].hasReader, "B did not open after its admitted boundary");
+    check(
+      providerB.opens.length === 1 &&
+        providerB.opens[0].hasAfter &&
+        providerB.opens[0].after === 5 &&
+        providerB.opens[0].hasReader,
+      "B did not open after its admitted boundary",
+    );
     providerB.emitReader(reader, { position: 6, value: 3 });
     await resumedFold;
     const receipt = positionedFoldReceipt(restore.projection);
-    check(receipt !== undefined && receipt.position === 6, "B did not issue a successful-fold receipt");
+    check(
+      receipt !== undefined && receipt.position === 6,
+      "B did not issue a successful-fold receipt",
+    );
     acknowledgePositionedFold(restore.projection, receipt);
-    check(providerB.acknowledgements.length === 1 && providerB.acknowledgements[0].receipt === receipt, "B did not acknowledge the native receipt");
+    check(
+      providerB.acknowledgements.length === 1 && providerB.acknowledgements[0].receipt === receipt,
+      "B did not acknowledge the native receipt",
+    );
     restore.discard();
     check(providerB.releaseCount(reader) === 1, "B did not release its reader exactly once");
   } finally {

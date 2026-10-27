@@ -143,7 +143,12 @@ export interface GraphProjection {
 }
 
 export type StreamEvent<T> =
-  | { readonly kind: "value"; readonly value: T; readonly hasPosition?: boolean; readonly position?: unknown }
+  | {
+      readonly kind: "value";
+      readonly value: T;
+      readonly hasPosition?: boolean;
+      readonly position?: unknown;
+    }
   | { readonly kind: "gap" }
   | { readonly kind: "close"; readonly failed: boolean; readonly reason?: unknown };
 
@@ -339,7 +344,10 @@ export interface BindingContextRuntime {
   readonly handle: BindingContext;
   readonly activeCell: WritableSignal<boolean>;
   readonly bindings: Map<QueryDefinition<any, any, any, any>, Map<object, QueryBindingRuntime>>;
-  readonly streamBindings: Map<NativeStreamDefinition<any, any, any, any, any>, Map<object, StreamBindingRuntime>>;
+  readonly streamBindings: Map<
+    NativeStreamDefinition<any, any, any, any, any>,
+    Map<object, StreamBindingRuntime>
+  >;
   readonly mutations: Map<MutationDefinition<any, any>, Map<object, MutationBindingRuntime>>;
   readonly mutationControllers: Set<AbortController>;
   /** Independent native projections opened through this context stream bindings. */

@@ -23,8 +23,10 @@ import { assertGraphOpen } from "./faults.ts";
 import { streamMember } from "./stream.ts";
 
 type AnyStream = NativeStreamDefinition<any, any, any, any, any>;
-type StreamValue<S extends AnyStream> = S extends NativeStreamDefinition<any, infer V, any, any, any> ? V : never;
-type StreamInput<S extends AnyStream> = S extends NativeStreamDefinition<infer I, any, any, any, any> ? I : never;
+type StreamValue<S extends AnyStream> =
+  S extends NativeStreamDefinition<any, infer V, any, any, any> ? V : never;
+type StreamInput<S extends AnyStream> =
+  S extends NativeStreamDefinition<infer I, any, any, any, any> ? I : never;
 declare const streamSessionIdentityBrand: unique symbol;
 declare const streamBindingHandleBrand: unique symbol;
 

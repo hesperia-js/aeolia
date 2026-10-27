@@ -141,7 +141,9 @@ export function publishObservation<T>(
   }
 }
 
-export type KeyedDefinition<T> = QueryDefinition<any, T, any, any> | NativeStreamDefinition<any, T, any, any, any>;
+export type KeyedDefinition<T> =
+  | QueryDefinition<any, T, any, any>
+  | NativeStreamDefinition<any, T, any, any, any>;
 
 export function optionConflict(
   runtime: StoreRuntime<unknown>,

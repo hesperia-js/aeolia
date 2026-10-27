@@ -163,7 +163,9 @@ export const rawStreamMemberByFunction = new WeakMap<
   object,
   {
     readonly state: GraphRuntimeState<any>;
-    readonly definition: StreamDefinition<any, any, any> | PositionedStreamDefinition<any, any, any, any, any>;
+    readonly definition:
+      | StreamDefinition<any, any, any>
+      | PositionedStreamDefinition<any, any, any, any, any>;
   }
 >();
 export const streamBindingByHandle = new WeakMap<object, StreamBindingRuntime>();
@@ -186,7 +188,6 @@ export const positionedOpenRequestByOpenOptions = new WeakMap<
   object,
   { readonly after?: unknown; readonly reader?: unknown }
 >();
-
 
 export function bindingAddress(binding: StoreBindingRuntime, key: string): BindingAddressRuntime {
   let address = binding.addresses.get(key);

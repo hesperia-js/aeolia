@@ -33,7 +33,11 @@ import {
   isQueryDefinition,
 } from "./types.ts";
 import { validateContract } from "./validation.ts";
-import { positionedStreamSourceByDefinition, positionedPositionWriterByOpenOptions, positionedOpenRequestByOpenOptions } from "./registry.ts";
+import {
+  positionedStreamSourceByDefinition,
+  positionedPositionWriterByOpenOptions,
+  positionedOpenRequestByOpenOptions,
+} from "./registry.ts";
 export { createGraph } from "./engine.ts";
 export { storeKey } from "./identity.ts";
 
@@ -199,12 +203,22 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
   const capturedSource = Object.freeze({
     open: (value: Input, options: PositionedStreamOpenOptions<Position, Reader>) =>
       Reflect.apply(openSource, sourceInput, [value, options]),
-    validateReader: (value: Input, reader: Reader, after: Position, checkpoint: import("./types.ts").PositionedProjectionCheckpoint<unknown, Position> | undefined, seed: unknown) =>
-      Reflect.apply(validateSourceReader, sourceInput, [value, reader, after, checkpoint, seed]),
+    validateReader: (
+      value: Input,
+      reader: Reader,
+      after: Position,
+      checkpoint:
+        | import("./types.ts").PositionedProjectionCheckpoint<unknown, Position>
+        | undefined,
+      seed: unknown,
+    ) => Reflect.apply(validateSourceReader, sourceInput, [value, reader, after, checkpoint, seed]),
     isReaderCurrent: (value: Input, reader: Reader, after: Position, seed: unknown) =>
       Reflect.apply(currentSourceReader, sourceInput, [value, reader, after, seed]),
-    acknowledge: (value: Input, reader: Reader, receipt: import("./types.ts").PositionedFoldReceipt<Position>) =>
-      Reflect.apply(acknowledgeSourceReader, sourceInput, [value, reader, receipt]),
+    acknowledge: (
+      value: Input,
+      reader: Reader,
+      receipt: import("./types.ts").PositionedFoldReceipt<Position>,
+    ) => Reflect.apply(acknowledgeSourceReader, sourceInput, [value, reader, receipt]),
     releaseReader: (value: Input, reader: Reader) =>
       Reflect.apply(releaseSourceReader, sourceInput, [value, reader]),
   });
@@ -220,15 +234,22 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
   const open = (value: Input, options: import("./types.ts").OpenOptions): AsyncIterable<Value> => {
     const request = positionedOpenRequestByOpenOptions.get(options);
     const positionedOptions: PositionedStreamOpenOptions<Position, Reader> =
-      request === undefined
-        ? { ...options }
-        : { ...options, ...request };
+      request === undefined ? { ...options } : { ...options, ...request };
     const events = Reflect.apply(capturedSource.open, capturedSource, [value, positionedOptions]);
-    if (events === null || typeof events !== "object" || typeof events[Symbol.asyncIterator] !== "function")
+    if (
+      events === null ||
+      typeof events !== "object" ||
+      typeof events[Symbol.asyncIterator] !== "function"
+    )
       throw new TypeError("Positioned stream open must return an AsyncIterable.");
     return (async function* (): AsyncGenerator<Value> {
       for await (const event of events as AsyncIterable<PositionedStreamEvent<Position, Value>>) {
-        if (event === null || typeof event !== "object" || !("position" in event) || !("value" in event))
+        if (
+          event === null ||
+          typeof event !== "object" ||
+          !("position" in event) ||
+          !("value" in event)
+        )
           throw new TypeError("Positioned stream event requires a position and value.");
         positionedPositionWriterByOpenOptions.get(options)?.(event.position);
         yield event.value;

@@ -489,7 +489,9 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
         if (definition.kind === "positioned-stream") {
           if (!positionedStreamSourceByDefinition.has(definition))
             throw new TypeError("Positioned stream must be created by createPositionedStream");
-          state.positionedDefinitions.add(definition as PositionedStreamDefinition<any, any, any, any, any>);
+          state.positionedDefinitions.add(
+            definition as PositionedStreamDefinition<any, any, any, any, any>,
+          );
         }
         const member = (input: unknown, options?: ValueOptions<unknown>) =>
           streamMember(state, definition, input, options, undefined, member);

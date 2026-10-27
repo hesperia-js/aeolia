@@ -822,7 +822,10 @@ it("refuses an exhausted later stream session before clearing the retained impor
 });
 
 it("revoking a bound context closes its positioned projections and releases dormant readers", async () => {
-  const reservations = new WeakMap<object, { input: Input; after: number; checkpoint: object; seed: unknown }>();
+  const reservations = new WeakMap<
+    object,
+    { input: Input; after: number; checkpoint: object; seed: unknown }
+  >();
   const releaseCounts = new WeakMap<object, number>();
   let liveEmit: ((event: { position: number; value: number }) => void) | undefined;
   let opens = 0;
@@ -833,7 +836,9 @@ it("revoking a bound context closes its positioned projections and releases dorm
       open: () => {
         opens += 1;
         const queued: Array<{ position: number; value: number }> = [];
-        const waiters: Array<(result: IteratorResult<{ position: number; value: number }>) => void> = [];
+        const waiters: Array<
+          (result: IteratorResult<{ position: number; value: number }>) => void
+        > = [];
         liveEmit = (event) => {
           const waiter = waiters.shift();
           if (waiter === undefined) queued.push(event);
@@ -844,8 +849,11 @@ it("revoking a bound context closes its positioned projections and releases dorm
             return {
               next() {
                 const event = queued.shift();
-                if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
-                return new Promise<IteratorResult<{ position: number; value: number }>>((resolve) => waiters.push(resolve));
+                if (event !== undefined)
+                  return Promise.resolve({ done: false as const, value: event });
+                return new Promise<IteratorResult<{ position: number; value: number }>>((resolve) =>
+                  waiters.push(resolve),
+                );
               },
               return() {
                 return Promise.resolve({ done: true as const, value: undefined });
@@ -856,11 +864,22 @@ it("revoking a bound context closes its positioned projections and releases dorm
       },
       validateReader: (input, reader, after, checkpoint, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined && reservation.input === input && reservation.after === after && reservation.checkpoint === checkpoint && reservation.seed === seed;
+        return (
+          reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.checkpoint === checkpoint &&
+          reservation.seed === seed
+        );
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined && reservation.input === input && reservation.after === after && reservation.seed === seed;
+        return (
+          reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
       },
       acknowledge: () => undefined,
       releaseReader: (_input, reader) => {
@@ -903,7 +922,11 @@ it("revoking a bound context closes its positioned projections and releases dorm
     reader = reserve(2, checkpoint, 4);
     restore = preparePositionedRestore(binding, input, checkpoint, reader, { value: 4 });
     expect(opens).toBe(1);
-    expect(isPositionedCheckpointCurrent(capturePositionedProjection<number, number>(restore.projection))).toBe(true);
+    expect(
+      isPositionedCheckpointCurrent(
+        capturePositionedProjection<number, number>(restore.projection),
+      ),
+    ).toBe(true);
     context.dispose();
     expect(projection.status.get()).toBe("closed");
     expect(restore.projection.status.get()).toBe("closed");
