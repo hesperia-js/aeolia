@@ -1422,6 +1422,7 @@ export function isPositionedCheckpointCurrent<Value, Position>(
   const positioned = runtime?.positioned;
   return (
     captured !== undefined &&
+    runtime !== undefined &&
     positioned !== undefined &&
     positioned.tuple === captured.tuple &&
     !positioned.transitioning &&

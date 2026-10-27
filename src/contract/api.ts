@@ -233,7 +233,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
     throw new TypeError("Invalid positioned stream declaration.");
   const open = (value: Input, options: import("./types.ts").OpenOptions): AsyncIterable<Value> => {
     const request = positionedOpenRequestByOpenOptions.get(options);
-    const positionedOptions: PositionedStreamOpenOptions<Position, Reader> =
+    const positionedOptions: PositionedStreamOpenOptions<unknown, unknown> =
       request === undefined ? { ...options } : { ...options, ...request };
     const events = Reflect.apply(capturedSource.open, capturedSource, [value, positionedOptions]);
     if (

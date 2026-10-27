@@ -875,7 +875,12 @@ export type NativeStreamDefinition<
 export function isCreatePositionedStreamInput(
   value: unknown,
 ): value is CreatePositionedStreamInput<unknown, unknown, string, unknown, unknown> {
-  if (!isNamedDeclaration(value) || !isObject(value) || typeof value.key !== "function")
+  if (
+    !isNamedDeclaration(value) ||
+    !isObject(value) ||
+    !("key" in value) ||
+    typeof value.key !== "function"
+  )
     return false;
   if (!("source" in value) || !isObject(value.source)) return false;
   const source = value.source as Partial<
