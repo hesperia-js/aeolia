@@ -16,6 +16,9 @@ import {
   acknowledgePositionedFold,
   subscribe,
   type Graph,
+  type AccumulatePolicy,
+  type PositionedRestoration,
+  type Projection,
   type StreamDefinition,
   type PositionedStreamSource,
   type PositionedStreamEvent,
@@ -136,6 +139,8 @@ class PositionedProvider implements PositionedStreamSource<PositionedInput, numb
   readonly currentChecks: Array<{ after: number; seed: unknown }> = [];
   readonly acknowledgements: Array<{ reader: object; receipt: PositionedFoldReceipt<number> }> = [];
   validationOverride: unknown = undefined;
+  validationCalls = 0;
+  currentCheckHook: (() => void) | undefined = undefined;
   readonly #reservations = new WeakMap<object, { input: PositionedInput; after: number; checkpoint: PositionedCheckpoint | undefined; seed: unknown }>();
   readonly #readerEmitters = new WeakMap<object, (event: PositionedEvent) => void>();
   readonly #liveEmitters = new Map<string, (event: PositionedEvent) => void>();
@@ -180,6 +185,7 @@ class PositionedProvider implements PositionedStreamSource<PositionedInput, numb
     checkpoint: PositionedCheckpoint | undefined,
     seed: unknown,
   ): boolean {
+    this.validationCalls += 1;
     if (this.validationOverride !== undefined) return this.validationOverride as boolean;
     const reservation = this.#reservations.get(reader);
     return (
@@ -198,6 +204,7 @@ class PositionedProvider implements PositionedStreamSource<PositionedInput, numb
     seed: unknown,
   ): boolean {
     this.currentChecks.push({ after, seed });
+    this.currentCheckHook?.();
     const reservation = this.#reservations.get(reader);
     return (
       reservation !== undefined &&
@@ -224,13 +231,77 @@ function positionedDefinition(provider: PositionedProvider) {
   });
 }
 
-function positionedGraph(stream: ReturnType<typeof positionedDefinition>, namespace: string): Graph {
+function positionedGraph(stream: ReturnType<typeof positionedDefinition>, namespace: string) {
   return createGraph({
     contract: defineContract({ namespace, operations: { events: stream } }),
     idleMs: 10,
   });
 }
 
+type AccumulationRestorePath = "same-runtime" | "fresh-target";
+
+interface AccumulationRestoreFixture {
+  readonly provider: PositionedProvider;
+  readonly targetGraph: ReturnType<typeof positionedGraph>;
+  readonly input: PositionedInput;
+  readonly reader: object;
+  attempt(): PositionedRestoration<readonly number[]>;
+  cleanup(): void;
+}
+
+async function createAccumulationRestoreFixture(
+  path: AccumulationRestorePath,
+  seed: number[],
+): Promise<AccumulationRestoreFixture> {
+  const provider = new PositionedProvider();
+  const stream = positionedDefinition(provider);
+  const targetGraph = positionedGraph(stream, "positioned-" + path + "-target");
+  const input = Object.freeze({ room: "one" });
+  const policy: AccumulatePolicy = { kind: "accumulate", max: 1, onOverflow: "drop-oldest" };
+  let sourceGraph: ReturnType<typeof positionedGraph> | undefined;
+  let source: Projection<readonly number[]> | undefined;
+  let reader: object;
+  let attempt: () => PositionedRestoration<readonly number[]>;
+  if (path === "same-runtime") {
+    sourceGraph = positionedGraph(stream, "positioned-same-runtime-source");
+    source = projectPositioned(sourceGraph.api.events, input, policy);
+    provider.emitLive(input, { position: 5, value: 1 });
+    await flush();
+    const checkpoint = capturePositionedProjection<readonly number[], number>(source);
+    reader = provider.reserve(input, 5, checkpoint, seed);
+    attempt = () =>
+      preparePositionedRestore(
+        targetGraph.api.events,
+        input,
+        checkpoint,
+        reader,
+        { value: seed },
+      );
+  } else {
+    reader = provider.reserve(input, 5, undefined, seed);
+    attempt = () =>
+      preparePositionedSeedRestore(
+        targetGraph.api.events,
+        input,
+        policy,
+        { after: 5, value: seed },
+        reader,
+      );
+  }
+  return {
+    provider,
+    targetGraph,
+    input,
+    reader,
+    attempt,
+    cleanup() {
+      source?.close();
+      sourceGraph?.dispose();
+      targetGraph.dispose();
+      if (provider.releaseCount(reader) === 0) provider.releaseReader(input, reader);
+    },
+  };
+}
 describe("stream projections", () => {
   for (const restartFrom of ["query abort", "old iterator cleanup"] as const) {
     it(`preserves a replacement projection generation created during ${restartFrom}`, async () => {
@@ -654,6 +725,106 @@ describe("stream projections", () => {
       source.close();
       sourceGraph.dispose();
       targetGraph.dispose();
+    }
+  });
+
+  for (const path of ["same-runtime", "fresh-target"] as const) {
+    it("rejects oversized accumulation seeds before provider admission on " + path, async () => {
+      const fixture = await createAccumulationRestoreFixture(path, [2, 3]);
+      try {
+        expect(() => fixture.attempt()).toThrow(TypeError);
+        expect(fixture.provider.validationCalls).toBe(0);
+        expect(fixture.provider.currentChecks).toHaveLength(0);
+        expect(fixture.provider.opens).toHaveLength(path === "same-runtime" ? 1 : 0);
+        expect(fixture.provider.releaseCount(fixture.reader)).toBe(0);
+      } finally {
+        fixture.cleanup();
+      }
+    });
+  }
+
+  for (const path of ["same-runtime", "fresh-target"] as const) {
+    it("accepts a borrowed exact-bound seed and applies drop-oldest on " + path, async () => {
+      const seed = [2];
+      const fixture = await createAccumulationRestoreFixture(path, seed);
+      try {
+        const restoration = fixture.attempt();
+        expect(restoration.projection.value.get()).toBe(seed);
+        expect(fixture.provider.opens).toHaveLength(path === "same-runtime" ? 1 : 0);
+        restoration.activate();
+        const resumedOpen = fixture.provider.opens[fixture.provider.opens.length - 1];
+        if (resumedOpen === undefined) throw new Error("The admitted reader did not open");
+        expect(resumedOpen).toMatchObject({ hasAfter: true, after: 5, hasReader: true });
+        fixture.provider.emitReader(fixture.reader, { position: 6, value: 9 });
+        await flush();
+        expect(restoration.projection.value.get()).toEqual([9]);
+        restoration.discard();
+        expect(fixture.provider.releaseCount(fixture.reader)).toBe(1);
+      } finally {
+        fixture.cleanup();
+      }
+    });
+  }
+
+  for (const path of ["same-runtime", "fresh-target"] as const) {
+    it("rechecks borrowed seed bounds after provider callback growth on " + path, async () => {
+      const seed = [2];
+      const fixture = await createAccumulationRestoreFixture(path, seed);
+      fixture.provider.currentCheckHook = () => {
+        fixture.provider.currentCheckHook = undefined;
+        seed.push(3);
+      };
+      try {
+        expect(() => fixture.attempt()).toThrow(TypeError);
+        expect(seed).toEqual([2, 3]);
+        expect(fixture.provider.validationCalls).toBeGreaterThan(0);
+        expect(fixture.provider.currentChecks.length).toBeGreaterThan(0);
+        expect(fixture.provider.opens).toHaveLength(path === "same-runtime" ? 1 : 0);
+        expect(fixture.provider.releaseCount(fixture.reader)).toBe(0);
+      } finally {
+        fixture.cleanup();
+      }
+    });
+  }
+
+  it("rechecks target currentness after a reentrant seed-length read", () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const graph = positionedGraph(stream, "positioned-seed-length-reentry");
+    const input = Object.freeze({ room: "one" });
+    const policy: AccumulatePolicy = { kind: "accumulate", max: 1, onOverflow: "drop-oldest" };
+    let armed = false;
+    let invalidatedDuringLengthRead = false;
+    const seed = new Proxy([7], {
+      get(target, property, receiver) {
+        if (property === "length" && armed) {
+          armed = false;
+          invalidatedDuringLengthRead = true;
+          graph.dispose();
+          return 1;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const reader = provider.reserve(input, 5, undefined, seed);
+    provider.currentCheckHook = () => { armed = true; };
+    try {
+      expect(() =>
+        preparePositionedSeedRestore(
+          graph.api.events,
+          input,
+          policy,
+          { after: 5, value: seed },
+          reader,
+        ),
+      ).toThrow(TypeError);
+      expect(invalidatedDuringLengthRead).toBe(true);
+      expect(provider.currentChecks.length).toBeGreaterThan(0);
+      expect(provider.opens).toHaveLength(0);
+      expect(provider.releaseCount(reader)).toBe(0);
+    } finally {
+      graph.dispose();
+      if (provider.releaseCount(reader) === 0) provider.releaseReader(input, reader);
     }
   });
 

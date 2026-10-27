@@ -737,6 +737,18 @@ function capturePositionedPolicy<T, V>(
   });
 }
 
+function assertPositionedAccumulationSeedWithinMax<T, V>(
+  policy: ProjectionPolicy<T, V>,
+  seedValue: unknown,
+): void {
+  if (policy.kind !== "accumulate") return;
+  if (!Array.isArray(seedValue))
+    throw new TypeError("Accumulated positioned restores require an array seed");
+  const length = seedValue.length;
+  if (!Number.isSafeInteger(length) || length < 0 || length > policy.max)
+    throw new TypeError("Accumulated positioned restore seed exceeds its maximum");
+}
+
 function newPositionedState(
   record: PositionedMemberRecord,
   input: unknown,
@@ -1431,10 +1443,13 @@ export function isPositionedCheckpointCurrent<Value, Position>(
  * @param reader - Reservation returned by the provider's real admission step.
  * @param seedOptions - Optional target value already decoded by Hesperia. The
  * provider validator authenticates its relation to this capture before native
- * dormant issuance; native does not clone or inspect the payload.
+ * dormant issuance. Accumulation seeds must be arrays no longer than the captured
+ * policy maximum. Native borrows their identity and elements without cloning;
+ * later caller mutation is not monitored.
  * @returns Dormant one-shot projection seeded without source open or prefix fold.
  * @throws TypeError when source, graph, binding, capture, or reader provenance
- * does not match, or the provider reservation is stale.
+ * does not match, the provider reservation is stale, or an accumulation seed
+ * exceeds its captured maximum.
  */
 export function preparePositionedRestore<Input, Value, Position, Reader, V>(
   member: PositionedStreamAccess<Input, Value, Position, Reader>,
@@ -1468,6 +1483,7 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
     throw new TypeError("Positioned checkpoint does not match the native source definition");
   if (target.binding !== undefined) assertBindingContextOpen(target.binding.context);
   else assertGraphOpen(target.graphState);
+  const sourcePolicy = sourcePositioned.policy;
   const after = captured.tuple.position as Position;
   const seedValue =
     seedOptions === undefined
@@ -1480,8 +1496,9 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
             throw new TypeError("Positioned restore seed must be an own data property");
           return descriptor.value as V;
         })();
-  if (sourcePositioned.policy.kind === "accumulate" && !Array.isArray(seedValue))
-    throw new TypeError("Accumulated positioned restores require an array seed");
+  assertPositionedAccumulationSeedWithinMax(sourcePolicy, seedValue);
+  if (!targetCurrent() || !isPositionedCheckpointCurrent(checkpoint))
+    throw new TypeError("Positioned checkpoint or target graph changed while reading restore seed");
   const keyForInput = target.definition.key;
   const targetKey = storeKey(Reflect.apply(keyForInput, target.definition, [input]));
   if (!targetCurrent()) throw new TypeError("Target graph changed while resolving restore input");
@@ -1498,13 +1515,16 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
     throw new TypeError("Provider reader reservation is no longer current");
   if (!isPositionedCheckpointCurrent(checkpoint) || !targetCurrent())
     throw new TypeError("Positioned checkpoint or target graph changed during provider validation");
+  assertPositionedAccumulationSeedWithinMax(sourcePolicy, seedValue);
+  if (!isPositionedCheckpointCurrent(checkpoint) || !targetCurrent())
+    throw new TypeError("Positioned checkpoint or target graph changed while checking restore seed maximum");
   if (target.binding !== undefined) assertBindingContextOpen(target.binding.context);
   else assertGraphOpen(target.graphState);
 
   const sourceTuple = captured.tuple as PositionedProjectionTuple<V, Position>;
   const { runtime, projection } = initializeProjection<Value, V>(
     target.graphState.graph,
-    sourcePositioned.policy,
+    sourcePolicy,
     target.binding?.context.retirement,
   );
   const positioned = newPositionedState(target, input, runtime);
@@ -1660,10 +1680,14 @@ export function preparePositionedRestore<Input, Value, Position, Reader, V>(
  * @param member - Exact raw member or native binding in the target graph.
  * @param input - Target input used for the existing stream key and provider admission.
  * @param policy - Explicit target projection policy; native does not infer it from wire data.
- * @param seed - Decoded accumulator value and opaque provider boundary.
+ * @param seed - Decoded accumulator value and opaque provider boundary. An
+ * accumulated seed must be an array no longer than the captured policy maximum;
+ * native borrows its identity and elements without cloning;
+ * later caller mutation is not monitored.
  * @param reader - Reader already reserved by this target provider.
  * @returns Dormant one-shot projection with no source open or prefix refold.
- * @throws TypeError when target provenance, policy, seed, key, or reader admission is invalid.
+ * @throws TypeError when target provenance, policy, seed, key, reader admission,
+ * or accumulation maximum is invalid.
  */
 export function preparePositionedSeedRestore<Input, Event, Position, Reader>(
   member: PositionedStreamAccess<Input, Event, Position, Reader>,
@@ -1707,8 +1731,7 @@ export function preparePositionedSeedRestore<Input, Event, Position, Reader, Val
     throw new TypeError("Positioned restore seed requires own data properties");
   const after = afterDescriptor.value as Position;
   const seedValue = valueDescriptor.value as Value;
-  if (capturedPolicy.kind === "accumulate" && !Array.isArray(seedValue))
-    throw new TypeError("Accumulated positioned restores require an array seed");
+  assertPositionedAccumulationSeedWithinMax(capturedPolicy, seedValue);
   if (!targetCurrent()) throw new TypeError("Target graph changed while reading positioned seed");
   const keyForInput = target.definition.key;
   const targetKey = storeKey(Reflect.apply(keyForInput, target.definition, [input]));
@@ -1760,8 +1783,10 @@ export function preparePositionedSeedRestore<Input, Event, Position, Reader, Val
     !positioned.transitioning &&
     positioned.tuple === (committed ? seeded : seedTuple);
   try {
-    if (target.provider.isReaderCurrent(input, reader, after, seedValue) !== true || !nativeCurrent())
+    if (target.provider.isReaderCurrent(input, reader, after, seedValue) !== true)
       throw new TypeError("Target reader changed before positioned seed landing");
+    assertPositionedAccumulationSeedWithinMax(capturedPolicy, seedValue);
+    if (!nativeCurrent()) throw new TypeError("Target changed while checking positioned seed maximum");
     reactiveInternal.batch(() => {
       const landed = reactiveInternal.guardedWrite(
         runtime.valueCell,
