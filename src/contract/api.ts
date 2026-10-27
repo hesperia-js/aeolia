@@ -7,6 +7,7 @@ import type {
   CreateQueryInput,
   CreateStoreInput,
   CreateStreamInput,
+  CreatePositionedStreamInput,
   DefineContractInput,
   FetchOptions,
   MutationDefinition,
@@ -16,6 +17,9 @@ import type {
   QueryDefinition,
   StoreDefinition,
   StreamDefinition,
+  PositionedStreamDefinition,
+  PositionedStreamEvent,
+  PositionedStreamOpenOptions,
 } from "./types.ts";
 import { affectedBrand } from "./symbols.ts";
 import {
@@ -23,11 +27,13 @@ import {
   captureQueryAcquisition,
   isCreateQueryInputWithAcquisition,
   isCreateStreamInput,
+  isCreatePositionedStreamInput,
   isCreateMutationInput,
   isAffectSpec,
   isQueryDefinition,
 } from "./types.ts";
 import { validateContract } from "./validation.ts";
+import { positionedStreamSourceByDefinition, positionedPositionWriterByOpenOptions, positionedOpenRequestByOpenOptions } from "./registry.ts";
 export { createGraph } from "./engine.ts";
 export { storeKey } from "./identity.ts";
 
@@ -144,6 +150,98 @@ export function createStream<I, T, K extends string>(
 ): StreamDefinition<I, T, K> {
   if (!isCreateStreamInput(input)) throw new TypeError("Invalid stream declaration.");
   return Object.freeze({ ...input, kind: "stream" as const });
+}
+
+/**
+ * Declares a provider-positioned stream for contracts and graph members.
+ *
+ * Each yielded position belongs to the provider's ordering domain. A source
+ * must emit strictly after the supplied opening boundary. The factory captures
+ * the provider callbacks; graph registration authenticates the exact returned
+ * definition before exposing its raw member. Position metadata does not add a
+ * store key or change the existing raw/bound namespace rules.
+ *
+ * Reader callbacks must validate and recheck the same provider reservation
+ * synchronously without I/O. Values and positions are borrowed. Native
+ * checkpoints do not clone payloads or prove that a reducer returned an
+ * immutable value.
+ *
+ * @param input - Name, key, ordered source, and existing store value options.
+ * @returns A frozen positioned declaration that remains inert until a graph
+ * member or projection opens it.
+ * @throws TypeError when the declaration or any provider callback is malformed.
+ */
+export function createPositionedStream<Input, Value, Key extends string, Position, Reader>(
+  input: CreatePositionedStreamInput<Input, Value, Key, Position, Reader>,
+): PositionedStreamDefinition<Input, Value, Key, Position, Reader> {
+  if (input === null || typeof input !== "object" || Array.isArray(input))
+    throw new TypeError("Invalid positioned stream declaration.");
+  const name = input.name;
+  const key = input.key;
+  const sourceInput = input.source;
+  const snapshot = input.snapshot;
+  const equals = input.equals;
+  if (sourceInput === null || typeof sourceInput !== "object" || Array.isArray(sourceInput))
+    throw new TypeError("Invalid positioned stream source.");
+  const openSource = sourceInput.open;
+  const validateSourceReader = sourceInput.validateReader;
+  const currentSourceReader = sourceInput.isReaderCurrent;
+  const acknowledgeSourceReader = sourceInput.acknowledge;
+  const releaseSourceReader = sourceInput.releaseReader;
+  if (
+    typeof openSource !== "function" ||
+    typeof validateSourceReader !== "function" ||
+    typeof currentSourceReader !== "function" ||
+    typeof acknowledgeSourceReader !== "function" ||
+    typeof releaseSourceReader !== "function"
+  )
+    throw new TypeError("Positioned stream source callbacks must be functions.");
+  const capturedSource = Object.freeze({
+    open: (value: Input, options: PositionedStreamOpenOptions<Position, Reader>) =>
+      Reflect.apply(openSource, sourceInput, [value, options]),
+    validateReader: (value: Input, reader: Reader, after: Position, checkpoint: import("./types.ts").PositionedProjectionCheckpoint<unknown, Position> | undefined, seed: unknown) =>
+      Reflect.apply(validateSourceReader, sourceInput, [value, reader, after, checkpoint, seed]),
+    isReaderCurrent: (value: Input, reader: Reader, after: Position, seed: unknown) =>
+      Reflect.apply(currentSourceReader, sourceInput, [value, reader, after, seed]),
+    acknowledge: (value: Input, reader: Reader, receipt: import("./types.ts").PositionedFoldReceipt<Position>) =>
+      Reflect.apply(acknowledgeSourceReader, sourceInput, [value, reader, receipt]),
+    releaseReader: (value: Input, reader: Reader) =>
+      Reflect.apply(releaseSourceReader, sourceInput, [value, reader]),
+  });
+  const normalizedInput = {
+    name,
+    key,
+    source: capturedSource,
+    ...(snapshot === undefined ? {} : { snapshot }),
+    ...(equals === undefined ? {} : { equals }),
+  };
+  if (!isCreatePositionedStreamInput(normalizedInput))
+    throw new TypeError("Invalid positioned stream declaration.");
+  const open = (value: Input, options: import("./types.ts").OpenOptions): AsyncIterable<Value> => {
+    const request = positionedOpenRequestByOpenOptions.get(options);
+    const positionedOptions: PositionedStreamOpenOptions<Position, Reader> =
+      request === undefined
+        ? { ...options }
+        : { ...options, ...request };
+    const events = Reflect.apply(capturedSource.open, capturedSource, [value, positionedOptions]);
+    if (events === null || typeof events !== "object" || typeof events[Symbol.asyncIterator] !== "function")
+      throw new TypeError("Positioned stream open must return an AsyncIterable.");
+    return (async function* (): AsyncGenerator<Value> {
+      for await (const event of events as AsyncIterable<PositionedStreamEvent<Position, Value>>) {
+        if (event === null || typeof event !== "object" || !("position" in event) || !("value" in event))
+          throw new TypeError("Positioned stream event requires a position and value.");
+        positionedPositionWriterByOpenOptions.get(options)?.(event.position);
+        yield event.value;
+      }
+    })();
+  };
+  const definition = Object.freeze({
+    ...normalizedInput,
+    kind: "positioned-stream" as const,
+    open,
+  });
+  positionedStreamSourceByDefinition.set(definition, capturedSource as any);
+  return definition as PositionedStreamDefinition<Input, Value, Key, Position, Reader>;
 }
 
 /**

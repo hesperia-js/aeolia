@@ -742,6 +742,159 @@ export function isStreamDefinition(value: unknown): value is StreamDefinition<un
   return isCreateStreamInput(value) && "kind" in value && value.kind === "stream";
 }
 
+/** Native evidence for one successfully installed projected event. */
+declare const positionedFoldReceiptBrand: unique symbol;
+export interface PositionedFoldReceipt<Position> {
+  /** Provider position of the event that was folded. */
+  readonly position: Position;
+  /** Projection generation and successful-fold revision at landing. */
+  readonly generation: number;
+  readonly revision: number;
+  /** Nominal brand; authenticity is checked by native runtime identity. */
+  readonly [positionedFoldReceiptBrand]: true;
+}
+
+/** Non-pulling view of one native positioned projection checkpoint. */
+declare const positionedCheckpointBrand: unique symbol;
+export interface PositionedProjectionCheckpoint<Value, Position> {
+  readonly value: Value;
+  readonly status: "open" | "closed" | "failed";
+  readonly error: unknown;
+  /** False before this projection has folded its first event. */
+  readonly hasPosition: boolean;
+  /** Last provider position actually folded by this projection. */
+  readonly position: Position | undefined;
+  readonly generation: number;
+  readonly revision: number;
+  /** Reducer mutation/failure can make the borrowed value nonresumable. */
+  readonly resumable: boolean;
+  readonly [positionedCheckpointBrand]: true;
+}
+
+/** One provider event with an opaque, provider-defined position. */
+export interface PositionedStreamEvent<Position, Value> {
+  /** Position after this event in the provider's ordering domain. */
+  readonly position: Position;
+  /** Borrowed event value; Aeolia does not clone or freeze it. */
+  readonly value: Value;
+}
+
+/** Options passed to one native-positioned source opening. */
+export interface PositionedStreamOpenOptions<Position, Reader> extends OpenOptions {
+  /** Exclusive start boundary; property presence distinguishes resume from live open. */
+  readonly after?: Position;
+  /** Exact provider reservation validated before a dormant native restore is issued. */
+  readonly reader?: Reader;
+}
+
+/** Decoded projection state admitted for a fresh target graph. */
+export interface PositionedRestoreSeed<Value, Position> {
+  /** Exclusive boundary authenticated by the target provider reservation. */
+  readonly after: Position;
+  /** Borrowed accumulator value decoded and checked by the owning application. */
+  readonly value: Value;
+}
+
+/**
+ * Provider-backed source contract for a positioned stream.
+ *
+ * The returned iterable must emit strictly ordered positions after the supplied boundary.
+ * Reader validation, currentness checks, acknowledgement, and release must be
+ * synchronous, local operations on the same provider opening that owns the
+ * reservation. They must not perform SQL or other external publication.
+ */
+export interface PositionedStreamSource<Input, Value, Position, Reader> {
+  /** Opens a live iterable or a prepared reader after the supplied position. */
+  readonly open: (
+    input: Input,
+    options: PositionedStreamOpenOptions<Position, Reader>,
+  ) => AsyncIterable<PositionedStreamEvent<Position, Value>>;
+  /** Authenticates a provider reservation and target seed before dormant issuance. */
+  readonly validateReader: (
+    input: Input,
+    reader: Reader,
+    after: Position,
+    checkpoint: PositionedProjectionCheckpoint<unknown, Position> | undefined,
+    seed: unknown,
+  ) => boolean;
+  /** Rechecks the admitted target reservation and seed without consulting its source checkpoint. */
+  readonly isReaderCurrent: (
+    input: Input,
+    reader: Reader,
+    after: Position,
+    seed: unknown,
+  ) => boolean;
+  /** Acknowledges one authentic native successful-fold receipt. */
+  readonly acknowledge: (input: Input, reader: Reader, receipt: PositionedFoldReceipt<Position>) => void;
+  /** Releases this provider reader once when its native owner is discarded or closed. */
+  readonly releaseReader: (input: Input, reader: Reader) => void;
+}
+
+/** Input accepted by createPositionedStream. */
+export interface CreatePositionedStreamInput<Input, Value, Key extends string, Position, Reader> {
+  /** Human-readable operation name used in diagnostics. */
+  readonly name: string;
+  /** Derives the existing stream-store key; positioned state adds no key dimension. */
+  readonly key: (input: Input) => Key;
+  /** Provider source captured by the native declaration factory. */
+  readonly source: PositionedStreamSource<Input, Value, Position, Reader>;
+  /** Whether committed store values are eligible for snapshots. */
+  readonly snapshot?: boolean;
+  /** Equality used by the existing stream store. */
+  readonly equals?: (a: NoInfer<Value>, b: NoInfer<Value>) => boolean;
+}
+
+/** Native declaration for an ordered stream whose positions are provider-defined. */
+export interface PositionedStreamDefinition<
+  Input,
+  Value,
+  Key extends string = string,
+  Position = unknown,
+  Reader = unknown,
+> extends CreatePositionedStreamInput<Input, Value, Key, Position, Reader> {
+  /** Discriminator identifying this declaration as a positioned stream. */
+  readonly kind: "positioned-stream";
+  /** Internal stream-store adapter; callers should use the native factory. */
+  readonly open: (input: Input, options: OpenOptions) => AsyncIterable<Value>;
+}
+
+export type NativeStreamDefinition<
+  Input,
+  Value,
+  Key extends string = string,
+  Position = unknown,
+  Reader = unknown,
+> = StreamDefinition<Input, Value, Key> | PositionedStreamDefinition<Input, Value, Key, Position, Reader>;
+
+export function isCreatePositionedStreamInput(
+  value: unknown,
+): value is CreatePositionedStreamInput<unknown, unknown, string, unknown, unknown> {
+  if (!isNamedDeclaration(value) || !isObject(value) || typeof value.key !== "function")
+    return false;
+  if (!("source" in value) || !isObject(value.source)) return false;
+  const source = value.source as Partial<PositionedStreamSource<unknown, unknown, unknown, unknown>>;
+  return (
+    typeof source.open === "function" &&
+    typeof source.validateReader === "function" &&
+    typeof source.isReaderCurrent === "function" &&
+    typeof source.acknowledge === "function" &&
+    typeof source.releaseReader === "function" &&
+    matchesOptions(value, valueSemanticsChecks)
+  );
+}
+
+export function isPositionedStreamDefinition(
+  value: unknown,
+): value is PositionedStreamDefinition<unknown, unknown, string, unknown, unknown> {
+  return (
+    isCreatePositionedStreamInput(value) &&
+    "kind" in value &&
+    value.kind === "positioned-stream" &&
+    "open" in value &&
+    typeof value.open === "function"
+  );
+}
+
 /**
  * A mutation effect bound to one query definition.
  *
@@ -962,7 +1115,8 @@ export function hasMutationOptionFields(value: unknown): boolean {
 export type OperationDefinition =
   | QueryDefinition<any, any, any, any>
   | MutationDefinition<any, any>
-  | StreamDefinition<any, any, any>;
+  | StreamDefinition<any, any, any>
+  | PositionedStreamDefinition<any, any, any, any, any>;
 
 export function isOperationDefinition(value: unknown): value is OperationDefinition {
   if (!isObject(value) || !("kind" in value)) return false;
@@ -973,6 +1127,8 @@ export function isOperationDefinition(value: unknown): value is OperationDefinit
       return isMutationDefinition(value);
     case "stream":
       return isStreamDefinition(value);
+    case "positioned-stream":
+      return isPositionedStreamDefinition(value);
     default:
       return false;
   }
@@ -981,6 +1137,25 @@ export function isOperationDefinition(value: unknown): value is OperationDefinit
 // Tree admission keeps comparator arguments opaque, including never-valued streams.
 type ContractStreamDefinition = Omit<StreamDefinition<any, any, any>, "equals"> & {
   readonly equals?: (a: never, b: never) => boolean;
+};
+type ContractPositionedStreamDefinition = Omit<
+  PositionedStreamDefinition<any, any, any, any, any>,
+  "equals"
+> & {
+  readonly equals?: (a: never, b: never) => boolean;
+};
+
+declare const positionedStreamMemberTypeBrand: unique symbol;
+
+/** Callable graph member whose position and reader types come from its declaration. */
+export type PositionedStreamMember<Input, Value, Position, Reader> = ((
+  input: Input,
+  options?: ValueOptions<Value>,
+) => StreamStore<Value>) & {
+  readonly [positionedStreamMemberTypeBrand]?: {
+    readonly position: Position;
+    readonly reader: Reader;
+  };
 };
 
 /**
@@ -995,6 +1170,7 @@ export type OperationTree = {
   readonly [name: string]:
     | OperationDefinition
     | ContractStreamDefinition
+    | ContractPositionedStreamDefinition
     | StoreDefinition<any>
     | OperationTree;
 };
@@ -1066,8 +1242,15 @@ export type MemberOf<D> =
                 overrides?: MutationOptions,
               ) => Promise<R>
             : {})
-      : D extends StreamDefinition<infer I, infer T, any>
-        ? (input: I, options?: ValueOptions<T>) => StreamStore<T>
+      : D extends PositionedStreamDefinition<infer I, infer T, any, any, any>
+        ? PositionedStreamMember<
+            I,
+            T,
+            D extends PositionedStreamDefinition<any, any, any, infer P, any> ? P : never,
+            D extends PositionedStreamDefinition<any, any, any, any, infer R> ? R : never
+          >
+        : D extends StreamDefinition<infer I, infer T, any>
+          ? (input: I, options?: ValueOptions<T>) => StreamStore<T>
         : D extends StoreDefinition<infer T, any>
           ? () => Store<T>
           : D extends OperationTree
@@ -1082,7 +1265,9 @@ export type ContractApi<C extends Contract> =
 export type StorePatterns<D> =
   D extends QueryDefinition<any, any, infer K, any>
     ? K
-    : D extends StreamDefinition<any, infer _T, infer K>
+    : D extends PositionedStreamDefinition<any, any, infer K, any, any>
+      ? K
+      : D extends StreamDefinition<any, infer _T, infer K>
       ? K
       : D extends StoreDefinition<any, any> | MutationDefinition<any, any>
         ? never
@@ -1094,7 +1279,7 @@ export type StorePatterns<D> =
 export type StoreNames<D> =
   D extends StoreDefinition<any, infer N>
     ? N
-    : D extends OperationDefinition | ContractStreamDefinition
+    : D extends OperationDefinition | ContractStreamDefinition | ContractPositionedStreamDefinition
       ? never
       : D extends object
         ? { readonly [P in keyof D]: StoreNames<D[P]> }[keyof D]
@@ -1104,7 +1289,7 @@ export type StoreNames<D> =
 export type DeclaredStores<D> =
   D extends StoreDefinition<infer T, infer N>
     ? StoreDefinition<T, N>
-    : D extends OperationDefinition | ContractStreamDefinition
+    : D extends OperationDefinition | ContractStreamDefinition | ContractPositionedStreamDefinition
       ? never
       : D extends object
         ? { readonly [P in keyof D]: DeclaredStores<D[P]> }[keyof D]
@@ -1143,7 +1328,9 @@ type KeyedStoreEntry<P extends string, V> = {
 export type KeyedStores<D> =
   D extends QueryDefinition<any, infer T, infer K, any>
     ? KeyedStoreEntry<K, T>
-    : D extends StreamDefinition<any, infer T, infer K>
+    : D extends PositionedStreamDefinition<any, infer T, infer K, any, any>
+      ? KeyedStoreEntry<K, T>
+      : D extends StreamDefinition<any, infer T, infer K>
       ? KeyedStoreEntry<K, T>
       : D extends StoreDefinition<infer T, infer N>
         ? KeyedStoreEntry<N, T>

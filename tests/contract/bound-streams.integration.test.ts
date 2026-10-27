@@ -5,6 +5,12 @@ import {
   createBindingContext,
   createGraph,
   createStream,
+  createPositionedStream,
+  projectPositioned,
+  capturePositionedProjection,
+  preparePositionedRestore,
+  isPositionedCheckpointCurrent,
+  type PositionedRestoration,
   defineContract,
   Fault,
   inspectBoundAddress,
@@ -27,6 +33,13 @@ afterEach(() => {
   jest.useRealTimers();
   ownsFakeTimers = false;
 });
+
+async function flush(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
 async function expectPending(promise: Promise<unknown>): Promise<void> {
   jest.useRealTimers();
@@ -805,5 +818,109 @@ it("refuses an exhausted later stream session before clearing the retained impor
   } finally {
     source.source.graph.dispose();
     target.graph.dispose();
+  }
+});
+
+it("revoking a bound context closes its positioned projections and releases dormant readers", async () => {
+  const reservations = new WeakMap<object, { input: Input; after: number; checkpoint: object; seed: unknown }>();
+  const releaseCounts = new WeakMap<object, number>();
+  let liveEmit: ((event: { position: number; value: number }) => void) | undefined;
+  let opens = 0;
+  const stream = createPositionedStream<Input, number, string, number, object>({
+    name: "bound-positioned",
+    key: (input: Input) => input.room,
+    source: {
+      open: () => {
+        opens += 1;
+        const queued: Array<{ position: number; value: number }> = [];
+        const waiters: Array<(result: IteratorResult<{ position: number; value: number }>) => void> = [];
+        liveEmit = (event) => {
+          const waiter = waiters.shift();
+          if (waiter === undefined) queued.push(event);
+          else waiter({ done: false, value: event });
+        };
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next() {
+                const event = queued.shift();
+                if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
+                return new Promise<IteratorResult<{ position: number; value: number }>>((resolve) => waiters.push(resolve));
+              },
+              return() {
+                return Promise.resolve({ done: true as const, value: undefined });
+              },
+            };
+          },
+        };
+      },
+      validateReader: (input, reader, after, checkpoint, seed) => {
+        const reservation = reservations.get(reader);
+        return reservation !== undefined && reservation.input === input && reservation.after === after && reservation.checkpoint === checkpoint && reservation.seed === seed;
+      },
+      isReaderCurrent: (input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        return reservation !== undefined && reservation.input === input && reservation.after === after && reservation.seed === seed;
+      },
+      acknowledge: () => undefined,
+      releaseReader: (_input, reader) => {
+        releaseCounts.set(reader, (releaseCounts.get(reader) ?? 0) + 1);
+      },
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "bound-positioned", operations: { stream } }),
+  });
+  const context = createBindingContext(graph);
+  const binding = bindStream(graph, stream, graph.api.stream, { context });
+  const input = Object.freeze({ room: "one" });
+  const projection = projectPositioned(binding, input, {
+    kind: "reduce" as const,
+    initial: 0,
+    step: (sum: number, item: number) => sum + item,
+  });
+  const reserve = (after: number, checkpoint: object, seed: unknown): object => {
+    const reader = Object.freeze({});
+    reservations.set(reader, { input, after, checkpoint, seed });
+    return reader;
+  };
+  let reader: object | undefined;
+  let restore: PositionedRestoration<number> | undefined;
+  try {
+    const folded = new Promise<void>((resolve) => {
+      let stop = () => {};
+      stop = subscribe(projection.value, (value) => {
+        if (value !== 4) return;
+        stop();
+        resolve();
+      });
+    });
+    if (liveEmit === undefined) throw new Error("The bound positioned source did not open");
+    liveEmit({ position: 2, value: 4 });
+    await folded;
+    await flush();
+    const checkpoint = capturePositionedProjection<number, number>(projection);
+    reader = reserve(2, checkpoint, 4);
+    restore = preparePositionedRestore(binding, input, checkpoint, reader, { value: 4 });
+    expect(opens).toBe(1);
+    expect(isPositionedCheckpointCurrent(capturePositionedProjection<number, number>(restore.projection))).toBe(true);
+    context.dispose();
+    expect(projection.status.get()).toBe("closed");
+    expect(restore.projection.status.get()).toBe("closed");
+    expect(releaseCounts.get(reader)).toBe(1);
+    expect(isPositionedCheckpointCurrent(checkpoint)).toBe(false);
+    if (liveEmit === undefined) throw new Error("The source emitter was lost");
+    liveEmit({ position: 3, value: 8 });
+    await flush();
+    expect(projection.value.get()).toBe(4);
+    expect(restore.projection.value.get()).toBe(4);
+    expect(opens).toBe(1);
+    restore.discard();
+    expect(releaseCounts.get(reader)).toBe(1);
+  } finally {
+    projection.close();
+    restore?.discard();
+    context.dispose();
+    graph.dispose();
   }
 });

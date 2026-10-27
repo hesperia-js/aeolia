@@ -25,8 +25,15 @@ import {
   createQuery,
   createStore,
   createStream,
+  createPositionedStream,
   queryOptions,
   subscribe,
+  projectPositioned,
+  capturePositionedProjection,
+  preparePositionedRestore,
+  preparePositionedSeedRestore,
+  positionedFoldReceipt,
+  acknowledgePositionedFold,
   observeQueryProgress,
   observeStore,
   peekStore,
@@ -51,6 +58,13 @@ import {
   type StoreNames,
   type DeclaredStores,
   type StreamStore,
+  type PositionedStreamEvent,
+  type PositionedStreamSource,
+  type PositionedStreamOpenOptions,
+  type PositionedProjectionCheckpoint,
+  type PositionedFoldReceipt,
+  type PositionedStreamMember,
+  type PositionedRestoreSeed,
   type Observer,
   type QueryStore,
   type StoreIdentity,
@@ -125,6 +139,93 @@ const stream = createStream({
   key: (input: { readonly id: string }) => `events/${input.id}`,
   open: backend.stream<{ readonly id: string }, { readonly id: string }>("items.events"),
 });
+type PositionedInput = { readonly id: string };
+type PositionedReader = { readonly token: string };
+const positionedSource: PositionedStreamSource<PositionedInput, number, number, PositionedReader> = {
+  open: async function* (_input: PositionedInput, _options: PositionedStreamOpenOptions<number, PositionedReader>) {
+    yield { position: 1, value: 1 } satisfies PositionedStreamEvent<number, number>;
+  },
+  validateReader: (
+    _input: PositionedInput,
+    _reader: PositionedReader,
+    _after: number,
+    _checkpoint: PositionedProjectionCheckpoint<unknown, number> | undefined,
+    _seed: unknown,
+  ) => true,
+  isReaderCurrent: (_input, _reader, _after, _seed) => true,
+  acknowledge: (_input, _reader, _receipt) => undefined,
+  releaseReader: (_input, _reader) => undefined,
+};
+const positionedDefinition = createPositionedStream({
+  name: "items.positioned",
+  key: (input: PositionedInput) => input.id,
+  source: positionedSource,
+});
+const positionedGraph = createGraph({
+  contract: defineContract({ namespace: "positioned-types", operations: { positioned: positionedDefinition } }),
+});
+const neverPositionedDefinition = createPositionedStream<PositionedInput, never, string, number, PositionedReader>({
+  name: "items.never-positioned",
+  key: (input) => input.id,
+  source: {
+    open: async function* (_input: PositionedInput, _options: PositionedStreamOpenOptions<number, PositionedReader>) {},
+    validateReader: () => true,
+    isReaderCurrent: () => true,
+    acknowledge: () => undefined,
+    releaseReader: () => undefined,
+  },
+});
+const neverPositionedGraph = createGraph({
+  contract: defineContract({ namespace: "never-positioned-types", operations: { events: neverPositionedDefinition } }),
+});
+void neverPositionedGraph.api.events;
+const positionedMember: PositionedStreamMember<PositionedInput, number, number, PositionedReader> =
+  positionedGraph.api.positioned;
+const positionedReduce = projectPositioned(positionedMember, { id: "one" }, {
+  kind: "reduce",
+  initial: { total: 0 },
+  step: (accumulator, event) => ({ total: accumulator.total + event }),
+});
+const positionedObjectValue: { total: number } = positionedReduce.value.get();
+const positionedCapture: PositionedProjectionCheckpoint<{ total: number }, number> =
+  capturePositionedProjection<{ total: number }, number>(positionedReduce);
+const positionedReceipt: PositionedFoldReceipt<unknown> | undefined =
+  positionedFoldReceipt(positionedReduce);
+if (positionedReceipt !== undefined) acknowledgePositionedFold(positionedReduce, positionedReceipt);
+const positionedArray = projectPositioned(positionedMember, { id: "one" }, { kind: "accumulate", max: 4 });
+const positionedArrayValue: readonly number[] = positionedArray.value.get();
+const positionedSeed: PositionedRestoreSeed<{ total: number }, number> = { after: 4, value: positionedObjectValue };
+const positionedRestore = preparePositionedSeedRestore(
+  positionedMember,
+  { id: "fresh" },
+  { kind: "reduce", initial: { total: 0 }, step: (accumulator, event) => ({ total: accumulator.total + event }) },
+  positionedSeed,
+  { token: "reader" },
+);
+const restoredPositionedValue: { total: number } = positionedRestore.projection.value.get();
+// @ts-expect-error The raw graph member retains its numeric provider position type.
+preparePositionedSeedRestore(positionedGraph.api.positioned, { id: "wrong-position" }, { kind: "reduce", initial: { total: 0 }, step: (accumulator, event) => ({ total: accumulator.total + event }) }, { after: "wrong-position", value: { total: 0 } }, { token: "reader" });
+// @ts-expect-error The raw graph member retains its provider reader type.
+preparePositionedSeedRestore(positionedGraph.api.positioned, { id: "wrong-reader" }, { kind: "reduce", initial: { total: 0 }, step: (accumulator, event) => ({ total: accumulator.total + event }) }, { after: 4, value: { total: 0 } }, { token: 1 });
+const accumulatedRestore = preparePositionedSeedRestore(
+  positionedMember,
+  { id: "fresh-array" },
+  { kind: "accumulate", max: 4 },
+  { after: 4, value: [1, 2] },
+  { token: "reader" },
+);
+const restoredPositionedArray: readonly number[] = accumulatedRestore.projection.value.get();
+// @ts-expect-error Accumulation restores must seed the event array, not a scalar.
+preparePositionedSeedRestore(positionedMember, { id: "invalid-array" }, { kind: "accumulate", max: 4 }, { after: 4, value: 2 }, { token: "reader" });
+const positionedSameRuntimeRestore = preparePositionedRestore(
+  positionedMember,
+  { id: "same-runtime" },
+  positionedCapture,
+  { token: "reader" },
+  { value: { total: 3 } },
+);
+const sameRuntimeValue: { total: number } = positionedSameRuntimeRestore.projection.value.get();
+void [positionedObjectValue, positionedArrayValue, restoredPositionedValue, restoredPositionedArray, sameRuntimeValue];
 const widenedQuery = createQuery({
   name: "wide.get",
   key: (input: string): string => input,

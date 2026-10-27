@@ -4,11 +4,21 @@ export {
   createQuery,
   createStore,
   createStream,
+  createPositionedStream,
   defineContract,
   createGraph,
   storeKey,
 } from "./api.ts";
-export { project } from "./projection.ts";
+export {
+  project,
+  projectPositioned,
+  capturePositionedProjection,
+  isPositionedCheckpointCurrent,
+  preparePositionedRestore,
+  preparePositionedSeedRestore,
+  positionedFoldReceipt,
+  acknowledgePositionedFold,
+} from "./projection.ts";
 export { queryOptions } from "./query-options.ts";
 export { peekStore } from "./store.ts";
 export { observeStore } from "./observation.ts";
@@ -26,6 +36,8 @@ export type {
 } from "./query-binding.ts";
 export type {
   AccumulatePolicy,
+  PositionedRestoration,
+  PositionedStreamAccess,
   Projection,
   ProjectionPolicy,
   ProjectionStatus,
@@ -79,6 +91,15 @@ export type {
   StorePatterns,
   StoreStatus,
   StreamDefinition,
+  PositionedStreamDefinition,
+  PositionedStreamSource,
+  PositionedStreamEvent,
+  PositionedStreamOpenOptions,
+  CreatePositionedStreamInput,
+  PositionedFoldReceipt,
+  PositionedProjectionCheckpoint,
+  PositionedRestoreSeed,
+  NativeStreamDefinition,
   StreamStatus,
   StreamStore,
   ValueOptions,

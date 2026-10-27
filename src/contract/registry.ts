@@ -6,6 +6,8 @@ import type {
   QueryDefinition,
   StoreCapture,
   StreamDefinition,
+  PositionedStreamDefinition,
+  PositionedStreamSource,
 } from "./types.ts";
 import { Fault } from "../fault.ts";
 import type { QueryBinding, TypedTarget } from "./query-binding.ts";
@@ -161,11 +163,30 @@ export const rawStreamMemberByFunction = new WeakMap<
   object,
   {
     readonly state: GraphRuntimeState<any>;
-    readonly definition: StreamDefinition<any, any, any>;
+    readonly definition: StreamDefinition<any, any, any> | PositionedStreamDefinition<any, any, any, any, any>;
   }
 >();
 export const streamBindingByHandle = new WeakMap<object, StreamBindingRuntime>();
 export const boundStreamByStore = new WeakMap<object, BoundStreamSessionRuntime<unknown>>();
+
+/** Provider callbacks captured by the genuine declaration factory. */
+export const positionedStreamSourceByDefinition = new WeakMap<
+  object,
+  PositionedStreamSource<any, any, any, any>
+>();
+
+/** Native event-position writer attached only to one active source-open call. */
+export const positionedPositionWriterByOpenOptions = new WeakMap<
+  object,
+  (position: unknown) => void
+>();
+
+/** One exact native request for a live or admitted positioned opening. */
+export const positionedOpenRequestByOpenOptions = new WeakMap<
+  object,
+  { readonly after?: unknown; readonly reader?: unknown }
+>();
+
 
 export function bindingAddress(binding: StoreBindingRuntime, key: string): BindingAddressRuntime {
   let address = binding.addresses.get(key);

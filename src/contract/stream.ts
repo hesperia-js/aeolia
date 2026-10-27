@@ -1,7 +1,7 @@
 import type {
   OpenOptions,
   Readable,
-  StreamDefinition,
+  NativeStreamDefinition,
   StreamStore,
   ValueOptions,
   ValueRevision,
@@ -35,6 +35,7 @@ import {
 } from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
 import { publishStreamEvent } from "./stream-events.ts";
+import { positionedPositionWriterByOpenOptions } from "./registry.ts";
 import {
   assertBindingContextOpen,
   boundStreamByStore,
@@ -114,7 +115,13 @@ export async function consumeStream<T>(
           reportContinuationError(runtime.graph.__runtime, error);
       }
       if (!isCurrentSession(runtime, session)) return;
-      publishStreamEvent(runtime, session, { kind: "value", value: result.value });
+      publishStreamEvent(
+        runtime,
+        session,
+        session.hasPosition
+          ? { kind: "value", value: result.value, hasPosition: true, position: session.position }
+          : { kind: "value", value: result.value },
+      );
       if (!isCurrentSession(runtime, session)) return;
       try {
         setStreamStatus(runtime, "live");
@@ -130,7 +137,7 @@ export async function consumeStream<T>(
 
 export function openStream<T>(
   runtime: StoreRuntime<T>,
-  stream: StreamDefinition<any, T, any>,
+  stream: NativeStreamDefinition<any, T, any, any, any>,
   input: unknown,
   key: ReturnType<typeof storeKey>,
   abortSignal: AbortSignal | undefined,
@@ -174,6 +181,7 @@ export function openStream<T>(
       token: {},
       resetEpoch: state.resetEpoch,
       listeners: new Set(),
+      hasPosition: false,
       ended: false,
       emitted: false,
       removeCallerAbort: removeAbort,
@@ -192,7 +200,7 @@ export function openStream<T>(
 function driveStreamSource<T>(
   runtime: StoreRuntime<T>,
   session: StreamSession<T>,
-  stream: StreamDefinition<any, T, any>,
+  stream: NativeStreamDefinition<any, T, any, any, any>,
   input: unknown,
   key: ReturnType<typeof storeKey>,
   abortSignal: AbortSignal | undefined,
@@ -323,6 +331,10 @@ function driveStreamSource<T>(
           }
         },
       };
+      positionedPositionWriterByOpenOptions.set(sourceOptions, (position) => {
+        session.position = position;
+        session.hasPosition = true;
+      });
       iterable = Reflect.apply(open, stream, [input, sourceOptions]);
     } catch (cause) {
       removeAbort();
@@ -405,6 +417,7 @@ function installBoundSession<T>(
       token: Object.freeze({}),
       resetEpoch: runtime.graph.__runtime.resetEpoch,
       listeners: new Set(),
+      hasPosition: false,
       ended: false,
       emitted: false,
       unobservedSince: Date.now(),
@@ -586,7 +599,7 @@ function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): S
 
 function boundMember<T>(
   state: GraphRuntimeState<any>,
-  stream: StreamDefinition<any, T, any>,
+  stream: NativeStreamDefinition<any, T, any, any, any>,
   input: unknown,
   supplied: ValueOptions<T> | undefined,
   binding: StreamBindingRuntime,
@@ -739,10 +752,11 @@ function boundMember<T>(
 
 export function streamMember<T>(
   state: GraphRuntimeState<any>,
-  stream: StreamDefinition<any, T, any>,
+  stream: NativeStreamDefinition<any, T, any, any, any>,
   input: unknown,
   options: ValueOptions<T> | undefined,
   binding?: StreamBindingRuntime,
+  originalMember?: object,
 ): StreamStore<T> {
   if (binding !== undefined) assertBindingContextOpen(binding.context);
   else assertGraphOpen(state);
@@ -772,6 +786,7 @@ export function streamMember<T>(
       runtime.streamSource = {
         stream,
         input,
+        ...(originalMember === undefined ? {} : { member: originalMember }),
         ...(abortSignal === undefined ? {} : { abortSignal }),
       };
       openStream(runtime, stream, input, key, abortSignal);

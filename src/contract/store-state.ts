@@ -2,7 +2,7 @@ import type {
   Generation,
   QueryDefinition,
   StoreDefinition,
-  StreamDefinition,
+  NativeStreamDefinition,
   ValueOptions,
 } from "./types.ts";
 import { Fault } from "../fault.ts";
@@ -141,7 +141,7 @@ export function publishObservation<T>(
   }
 }
 
-export type KeyedDefinition<T> = QueryDefinition<any, T, any, any> | StreamDefinition<any, T, any>;
+export type KeyedDefinition<T> = QueryDefinition<any, T, any, any> | NativeStreamDefinition<any, T, any, any, any>;
 
 export function optionConflict(
   runtime: StoreRuntime<unknown>,

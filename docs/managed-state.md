@@ -799,3 +799,46 @@ invalidate old facts even when the address later appears empty again. Disposed
 contexts throw `Fault`. Raw stream and query option types do not expose
 `expectEmpty`; their existing runtime treatment of unknown extra fields remains
 unchanged. They provide no conditional acquisition guarantee.
+
+## Positioned stream projections
+
+A positioned stream adds an opaque provider position to each source event. Declare one with `createPositionedStream`. The declaration keeps its existing key, store options, graph member and bound-stream behavior. A position does not create another key or store namespace.
+
+```ts
+import { createPositionedStream } from "aeolia";
+import type { PositionedStreamSource } from "aeolia";
+
+type OrderInput = { readonly orderId: string };
+declare const orderEventSource: PositionedStreamSource<
+  OrderInput,
+  { readonly id: string },
+  number,
+  object
+>;
+
+const events = createPositionedStream({
+  name: "orders.events",
+  key: (input: OrderInput) => "orders/" + input.orderId + "/events",
+  source: orderEventSource,
+});
+```
+
+The provider owns the position format and ordering rules. Its `open` callback must emit events strictly after the supplied `after` boundary when a reader is present. A live open omits the `after` and `reader` properties; a restored open supplies them as own properties. The native layer does not compare opaque positions or choose a starting cursor.
+
+Use `projectPositioned(member, input, policy)` to open an independent projection from a genuine raw member or stream binding. Use `project(streamStore, policy)` to attach a projection to a positioned stream's current shared session. Each projection tracks its own successful-fold position. A projection that joins a shared session during event delivery starts without a position and advances on the next event it actually folds.
+
+`capturePositionedProjection(projection)` reads the native fold tuple without opening or pulling the source. It returns the borrowed value, lifecycle status, error, `hasPosition`, position, generation, revision and `resumable` state. Before the first event, `hasPosition` is false. The native layer does not invent a cursor at the provider's current head. A capture is an in-memory native handle, not a serializable authority; use the provider and application protocol to encode and authorize data for another process. `isPositionedCheckpointCurrent(capture)` detects native tuple, epoch, binding and generation changes, but it cannot certify mutations inside borrowed accumulator values. Before encoding or transferring a value, the application must apply its bounded ownership/encoding rules and recheck currentness at the required publication boundary.
+
+A position advances only when the projection successfully installs the value produced by an event. The position and revision advance even when the projected value compares equal to the previous value. Native publication commits this tuple before notifying subscribers. An observer failure after that commit does not undo the fold. `positionedFoldReceipt(projection)` returns the latest successful-fold receipt, or `undefined` before the first successful fold; `acknowledgePositionedFold` rejects a foreign or stale-generation receipt.
+
+A reducer failure marks the projection failed and makes its capture nonresumable. A reducer can mutate its borrowed accumulator before throwing, so the last visible value may no longer match the last successful position. Do not resume a failed projection from that value. Aeolia does not clone or freeze events, positions, reducer inputs or accumulator values.
+
+Use `preparePositionedRestore` when the target uses the same native declaration and provider as an authentic current capture. The provider validates the target input, reader, boundary, capture and seed before Aeolia issues a dormant restoration.
+
+Use `preparePositionedSeedRestore` when the target is a fresh graph or process and the application has decoded an accumulator value. Pass the target member, explicit target policy, `{ after, value }`, and a reader reserved by the target provider. The target provider authenticates that boundary and seed; the function does not require the source graph or its private capture identity. Accumulation seeds are arrays of emitted values, not positioned event envelopes. Reduction seeds use the reducer's accumulator type, which can differ from the event type.
+
+Preparation validates the target reservation and installs the seed without opening the source or refolding a prefix. The returned restoration is dormant. `activate()` rechecks that the target and reader are current, then opens after the admitted boundary once. `discard()` closes an active restoration or releases a dormant reader. If a reader becomes stale after preparation, activation fails, closes the projection and releases the reservation. A preparation error leaves the reservation with its caller. Graph reset closes dormant and active restorations instead of reusing a one-shot reader, then preserves terminal status while resetting the value and error according to the projection policy. Graph disposal closes all projections; bound-context disposal also closes projections created through that context.
+
+The provider's `validateReader` and `isReaderCurrent` callbacks must be synchronous local checks and return exactly `true` for an admitted reader. They must not perform SQL or publish external state. `acknowledgePositionedFold` passes the provider an opaque native receipt only after a successful fold. That receipt does not prove that an external write, durable transaction or required-transfer publication committed. Applications own those protocols and must acknowledge or release their provider reader at the correct external boundary.
+
+Positions and reader reservations are provider-specific. Aeolia sets no retention window, cursor encoding, authorization rule or fallback for missing history. The provider must reject an expired or invalid reservation before dormant issuance, and it must report an ordered gap through its own source behavior rather than silently skipping events.

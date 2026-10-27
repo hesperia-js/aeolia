@@ -7,6 +7,7 @@ import {
   createQuery,
   createStore,
   createStream,
+  createPositionedStream,
   storeKey,
   type CallContext,
   type FetchOptions,
@@ -107,6 +108,41 @@ test("creation functions retain ownership of definition discriminants", () => {
   expect(createQuery(queryInput).kind).toBe("query");
   expect(createStream(streamInput).kind).toBe("stream");
   expect(createMutation(mutationInput).kind).toBe("mutation");
+
+  let opens = 0;
+  const positioned = createPositionedStream({
+    name: "items.positioned",
+    key: (input: { readonly id: string }) => input.id,
+    source: {
+      open: async function* (_input: { readonly id: string }) {
+        opens += 1;
+        yield { position: 1, value: 1 };
+      },
+      validateReader: () => true,
+      isReaderCurrent: () => true,
+      acknowledge: () => undefined,
+      releaseReader: () => undefined,
+    },
+  });
+  expect(positioned.kind).toBe("positioned-stream");
+  const graph = createGraph({
+    contract: defineContract({ namespace: "positioned-factory", operations: { positioned } }),
+  });
+  try {
+    expect(typeof graph.api.positioned).toBe("function");
+    const structuralCopy = { ...positioned };
+    expect(() =>
+      createGraph({
+        contract: defineContract({
+          namespace: "positioned-copy",
+          operations: { positioned: structuralCopy },
+        }),
+      }),
+    ).toThrow(TypeError);
+    expect(opens).toBe(0);
+  } finally {
+    graph.dispose();
+  }
 });
 
 test("query declarations capture and validate acquisition policy", () => {

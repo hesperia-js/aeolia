@@ -11,7 +11,8 @@ import type {
   StoreAt,
   StoreDefinition,
   StoreOptions,
-  StreamDefinition,
+  PositionedStreamDefinition,
+  NativeStreamDefinition,
   ValueOptions,
   StoreIdentity,
   ValueRevision,
@@ -41,6 +42,7 @@ import {
   reportGraphContinuationError,
   runtimeForStore,
   rawStreamMemberByFunction,
+  positionedStreamSourceByDefinition,
   queryBindingByHandle,
   streamBindingByHandle,
   assertBindingContextOpen,
@@ -483,9 +485,14 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
           }
         };
       } else {
-        const definition = value as StreamDefinition<unknown, unknown, any>;
+        const definition = value as NativeStreamDefinition<unknown, unknown, any, any, any>;
+        if (definition.kind === "positioned-stream") {
+          if (!positionedStreamSourceByDefinition.has(definition))
+            throw new TypeError("Positioned stream must be created by createPositionedStream");
+          state.positionedDefinitions.add(definition as PositionedStreamDefinition<any, any, any, any, any>);
+        }
         const member = (input: unknown, options?: ValueOptions<unknown>) =>
-          streamMember(state, definition, input, options);
+          streamMember(state, definition, input, options, undefined, member);
         rawStreamMemberByFunction.set(member, { state, definition });
         api[property] = member;
       }
@@ -632,6 +639,8 @@ function disposeBindingContext(context: BindingContextRuntime): void {
     state.disposed ? runtime.valueRevision : nextValueRevision(runtime.valueRevision),
   );
   const mutationControllers = [...context.mutationControllers];
+  const positionedProjections = [...(context.positionedProjections ?? [])];
+  context.positionedProjections?.clear();
   context.disposed = true;
   for (const profiles of context.bindings.values())
     for (const binding of profiles.values()) binding.addresses.clear();
@@ -656,6 +665,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
       reportContinuationError(state, error);
     }
   };
+  for (const closeProjection of positionedProjections) attempt(closeProjection);
   attempt(() =>
     reactiveInternal.batch(() => {
       for (const [index, runtime] of stores.entries()) {
@@ -1073,6 +1083,7 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     stores: new Map(),
     queryDefinitions: new Map(),
     mutationDefinitions: new Set(),
+    positionedDefinitions: new Set(),
     bindingContexts: new Set(),
     declaredStores: new Map(),
     faultObservers: new Set(),

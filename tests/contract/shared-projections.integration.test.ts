@@ -4,10 +4,15 @@ import {
   createBindingContext,
   createGraph,
   createStream,
+  createPositionedStream,
   defineContract,
   project,
   subscribe,
+  capturePositionedProjection,
+  isPositionedCheckpointCurrent,
+  type PositionedProjectionCheckpoint,
   type Readable,
+  type Projection,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
@@ -131,6 +136,62 @@ it("projects every shared emission without reopening, replaying, or observing di
     expect(count.value.get()).toBe(3);
     expect(backend.calls).toHaveLength(1);
   } finally {
+    graph.dispose();
+  }
+});
+
+it("starts a positioned shared projection at the next event when it joins during delivery", async () => {
+  const backend = testBackend();
+  const stream = createPositionedStream<void, number, string, number, object>({
+    name: "positioned-shared-join",
+    key: () => "positioned-shared-join/one",
+    source: {
+      open: backend.stream<void, { position: number; value: number }>("positioned-shared-join"),
+      validateReader: () => true,
+      isReaderCurrent: () => true,
+      acknowledge: () => undefined,
+      releaseReader: () => undefined,
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "positioned-shared-join", operations: { stream } }),
+  });
+  const source = graph.api.stream();
+  const policy = {
+    kind: "reduce" as const,
+    initial: 0,
+    step: (sum: number, item: number) => sum + item,
+  };
+  const first = project(source, policy);
+  let late: Projection<number> | undefined;
+  let lateAtJoin: PositionedProjectionCheckpoint<number, number> | undefined;
+  const stop = subscribe(first.value, (value) => {
+    if (value !== 1 || late !== undefined) return;
+    late = project(source, policy);
+    lateAtJoin = capturePositionedProjection<number, number>(late);
+  });
+  try {
+    const firstDelivered = until(first.value, (value) => value === 1);
+    backend.emit("positioned-shared-join", { position: 5, value: 1 });
+    await firstDelivered;
+    expect(lateAtJoin).toMatchObject({ value: 0, hasPosition: false, position: undefined, revision: 0 });
+    if (late === undefined || lateAtJoin === undefined) throw new Error("The projection did not join during delivery");
+    expect(isPositionedCheckpointCurrent(lateAtJoin)).toBe(true);
+    expect(capturePositionedProjection<number, number>(first)).toMatchObject({
+      value: 1, hasPosition: true, position: 5, revision: 1,
+    });
+    const secondDelivered = until(late.value, (value) => value === 2);
+    backend.emit("positioned-shared-join", { position: 6, value: 2 });
+    await secondDelivered;
+    expect(first.value.get()).toBe(3);
+    expect(late.value.get()).toBe(2);
+    expect(capturePositionedProjection<number, number>(late)).toMatchObject({
+      value: 2, hasPosition: true, position: 6, revision: 1,
+    });
+    expect(isPositionedCheckpointCurrent(lateAtJoin)).toBe(false);
+    expect(backend.calls).toHaveLength(1);
+  } finally {
+    stop();
     graph.dispose();
   }
 });

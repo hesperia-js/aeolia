@@ -4,11 +4,24 @@ import {
   createGraph,
   defineContract,
   createStream,
+  createPositionedStream,
   createQuery,
   project,
+  projectPositioned,
+  capturePositionedProjection,
+  isPositionedCheckpointCurrent,
+  preparePositionedRestore,
+  preparePositionedSeedRestore,
+  positionedFoldReceipt,
+  acknowledgePositionedFold,
   subscribe,
   type Graph,
   type StreamDefinition,
+  type PositionedStreamSource,
+  type PositionedStreamEvent,
+  type PositionedStreamOpenOptions,
+  type PositionedProjectionCheckpoint,
+  type PositionedFoldReceipt,
 } from "../../src/index.ts";
 import { testBackend, type TestBackend } from "../../src/testing.ts";
 
@@ -82,6 +95,139 @@ function waitForProjectionStatus(
       }
     });
     if (done) stop();
+  });
+}
+
+type PositionedInput = { readonly room: string };
+type PositionedEvent = PositionedStreamEvent<number, number>;
+type PositionedCheckpoint = PositionedProjectionCheckpoint<unknown, number>;
+
+function positionedChannel() {
+  const queued: PositionedEvent[] = [];
+  const waiters: Array<(result: IteratorResult<PositionedEvent>) => void> = [];
+  let ended = false;
+  const emit = (event: PositionedEvent): void => {
+    const waiter = waiters.shift();
+    if (waiter !== undefined) waiter({ done: false, value: event });
+    else queued.push(event);
+  };
+  const source: AsyncIterable<PositionedEvent> = {
+    [Symbol.asyncIterator](): AsyncIterator<PositionedEvent> {
+      return {
+        next: () => {
+          const event = queued.shift();
+          if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
+          if (ended) return Promise.resolve({ done: true as const, value: undefined });
+          return new Promise<IteratorResult<PositionedEvent>>((resolve) => waiters.push(resolve));
+        },
+        return: () => {
+          ended = true;
+          for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+          return Promise.resolve({ done: true as const, value: undefined });
+        },
+      };
+    },
+  };
+  return { source, emit };
+}
+
+class PositionedProvider implements PositionedStreamSource<PositionedInput, number, number, object> {
+  readonly opens: Array<{ room: string; hasAfter: boolean; after: number | undefined; hasReader: boolean }> = [];
+  readonly currentChecks: Array<{ after: number; seed: unknown }> = [];
+  readonly acknowledgements: Array<{ reader: object; receipt: PositionedFoldReceipt<number> }> = [];
+  validationOverride: unknown = undefined;
+  readonly #reservations = new WeakMap<object, { input: PositionedInput; after: number; checkpoint: PositionedCheckpoint | undefined; seed: unknown }>();
+  readonly #readerEmitters = new WeakMap<object, (event: PositionedEvent) => void>();
+  readonly #liveEmitters = new Map<string, (event: PositionedEvent) => void>();
+  readonly #releaseCounts = new WeakMap<object, number>();
+
+  reserve(input: PositionedInput, after: number, checkpoint: PositionedCheckpoint | undefined, seed: unknown): object {
+    const reader = Object.freeze({});
+    this.#reservations.set(reader, { input, after, checkpoint, seed });
+    return reader;
+  }
+
+  emitLive(input: PositionedInput, event: PositionedEvent): void {
+    const emit = this.#liveEmitters.get(input.room);
+    if (emit === undefined) throw new Error("The live provider opening is missing");
+    emit(event);
+  }
+
+  emitReader(reader: object, event: PositionedEvent): void {
+    const emit = this.#readerEmitters.get(reader);
+    if (emit === undefined) throw new Error("The reserved provider opening is missing");
+    emit(event);
+  }
+
+  releaseCount(reader: object): number {
+    return this.#releaseCounts.get(reader) ?? 0;
+  }
+
+  open(input: PositionedInput, options: PositionedStreamOpenOptions<number, object>): AsyncIterable<PositionedEvent> {
+    const channel = positionedChannel();
+    const hasAfter = Object.hasOwn(options, "after");
+    const hasReader = Object.hasOwn(options, "reader");
+    this.opens.push({ room: input.room, hasAfter, after: options.after, hasReader });
+    if (options.reader !== undefined) this.#readerEmitters.set(options.reader, channel.emit);
+    else this.#liveEmitters.set(input.room, channel.emit);
+    return channel.source;
+  }
+
+  validateReader(
+    input: PositionedInput,
+    reader: object,
+    after: number,
+    checkpoint: PositionedCheckpoint | undefined,
+    seed: unknown,
+  ): boolean {
+    if (this.validationOverride !== undefined) return this.validationOverride as boolean;
+    const reservation = this.#reservations.get(reader);
+    return (
+      reservation !== undefined &&
+      reservation.input === input &&
+      reservation.after === after &&
+      reservation.checkpoint === checkpoint &&
+      reservation.seed === seed
+    );
+  }
+
+  isReaderCurrent(
+    input: PositionedInput,
+    reader: object,
+    after: number,
+    seed: unknown,
+  ): boolean {
+    this.currentChecks.push({ after, seed });
+    const reservation = this.#reservations.get(reader);
+    return (
+      reservation !== undefined &&
+      reservation.input === input &&
+      reservation.after === after &&
+      reservation.seed === seed
+    );
+  }
+
+  acknowledge(_input: PositionedInput, reader: object, receipt: PositionedFoldReceipt<number>): void {
+    this.acknowledgements.push({ reader, receipt });
+  }
+
+  releaseReader(_input: PositionedInput, reader: object): void {
+    this.#releaseCounts.set(reader, this.releaseCount(reader) + 1);
+  }
+}
+
+function positionedDefinition(provider: PositionedProvider) {
+  return createPositionedStream({
+    name: "positioned-events",
+    key: (input: PositionedInput) => input.room,
+    source: provider,
+  });
+}
+
+function positionedGraph(stream: ReturnType<typeof positionedDefinition>, namespace: string): Graph {
+  return createGraph({
+    contract: defineContract({ namespace, operations: { events: stream } }),
+    idleMs: 10,
   });
 }
 
@@ -427,6 +573,271 @@ describe("stream projections", () => {
       }
     }
     graph.dispose();
+  });
+
+  it("restores a decoded fold into another graph and acknowledges from its original reader boundary", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const sourceGraph = positionedGraph(stream, "positioned-source");
+    const targetGraph = positionedGraph(stream, "positioned-target");
+    const input = Object.freeze({ room: "one" });
+    const policy = { kind: "reduce" as const, initial: 0, step: (sum: number, item: number) => sum + item };
+    const source = projectPositioned(sourceGraph.api.events, input, policy);
+    try {
+      expect(provider.opens[0]?.hasAfter).toBe(false);
+      provider.emitLive(input, { position: 5, value: 2 });
+      await flush();
+      const checkpoint = capturePositionedProjection<number, number>(source);
+      expect(checkpoint).toMatchObject({ value: 2, hasPosition: true, position: 5, resumable: true });
+      expect(isPositionedCheckpointCurrent(checkpoint)).toBe(true);
+
+      const seed = 20;
+      const reader = provider.reserve(input, 5, checkpoint, seed);
+      const restore = preparePositionedRestore(
+        targetGraph.api.events,
+        input,
+        checkpoint,
+        reader,
+        { value: seed },
+      );
+      expect(provider.opens).toHaveLength(1);
+      expect(restore.projection.value.get()).toBe(seed);
+      expect(capturePositionedProjection<number, number>(restore.projection)).toMatchObject({
+        value: seed, hasPosition: true, position: 5, resumable: true,
+      });
+
+      restore.activate();
+      const resumedOpen = provider.opens[1];
+      if (resumedOpen === undefined) throw new Error("The admitted reader did not open");
+      expect(resumedOpen).toMatchObject({ hasAfter: true, after: 5, hasReader: true });
+      provider.emitReader(reader, { position: 6, value: 3 });
+      await flush();
+      expect(restore.projection.value.get()).toBe(23);
+      const receipt = positionedFoldReceipt(restore.projection);
+      if (receipt === undefined) throw new Error("The successful fold did not issue a receipt");
+      expect(receipt.position).toBe(6);
+      acknowledgePositionedFold(restore.projection, receipt);
+      expect(provider.currentChecks.length).toBeGreaterThanOrEqual(2);
+      expect(provider.currentChecks.every((check) => check.after === 5)).toBe(true);
+      expect(provider.acknowledgements[0]?.receipt).toBe(receipt);
+      restore.discard();
+      expect(provider.releaseCount(reader)).toBe(1);
+      expect(() => restore.activate()).toThrow(TypeError);
+    } finally {
+      source.close();
+      sourceGraph.dispose();
+      targetGraph.dispose();
+    }
+  });
+
+  it("refuses a non-boolean provider reservation result before issuing a restore", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const sourceGraph = positionedGraph(stream, "positioned-validator-source");
+    const targetGraph = positionedGraph(stream, "positioned-validator-target");
+    const input = Object.freeze({ room: "one" });
+    const source = projectPositioned(sourceGraph.api.events, input, {
+      kind: "reduce", initial: 0, step: (sum, item) => sum + item,
+    });
+    try {
+      provider.emitLive(input, { position: 5, value: 2 });
+      await flush();
+      const checkpoint = capturePositionedProjection<number, number>(source);
+      const reader = provider.reserve(input, 5, checkpoint, 20);
+      provider.validationOverride = Promise.resolve(true);
+      expect(() =>
+        preparePositionedRestore(targetGraph.api.events, input, checkpoint, reader, { value: 20 }),
+      ).toThrow(TypeError);
+      expect(provider.opens).toHaveLength(1);
+      expect(provider.releaseCount(reader)).toBe(0);
+    } finally {
+      source.close();
+      sourceGraph.dispose();
+      targetGraph.dispose();
+    }
+  });
+
+  it("restores a decoded accumulator into a fresh target provider after source A is gone", async () => {
+    const persisted: { after: number; value: { total: number } } = await (async () => {
+      const providerA = new PositionedProvider();
+      const streamA = positionedDefinition(providerA);
+      const graphA = positionedGraph(streamA, "positioned-fresh-a");
+      const inputA = Object.freeze({ room: "one" });
+      const source = projectPositioned(graphA.api.events, inputA, {
+        kind: "reduce" as const,
+        initial: { total: 0 },
+        step: (accumulator, item) => ({ total: accumulator.total + item }),
+      });
+      try {
+        providerA.emitLive(inputA, { position: 5, value: 2 });
+        await flush();
+        const checkpoint = capturePositionedProjection<{ total: number }, number>(source);
+        if (!checkpoint.hasPosition || checkpoint.position === undefined)
+          throw new Error("Source A did not fold a positioned event");
+        const record = { after: checkpoint.position, value: { total: checkpoint.value.total } };
+        source.close();
+        graphA.dispose();
+        return record;
+      } finally {
+        source.close();
+        graphA.dispose();
+      }
+    })();
+    const providerB = new PositionedProvider();
+    const streamB = positionedDefinition(providerB);
+    const graphB = positionedGraph(streamB, "positioned-fresh-b");
+    const inputB = Object.freeze({ room: "one" });
+    const decodedValue = persisted.value;
+    const reader = providerB.reserve(inputB, persisted.after, undefined, decodedValue);
+    const policy = {
+      kind: "reduce" as const,
+      initial: decodedValue,
+      step: (accumulator: { total: number }, item: number) => ({ total: accumulator.total + item }),
+    };
+    try {
+      const restore = preparePositionedSeedRestore(
+        graphB.api.events,
+        inputB,
+        policy,
+        { after: persisted.after, value: decodedValue },
+        reader,
+      );
+      expect(providerB.opens).toHaveLength(0);
+      expect(restore.projection.value.get()).toBe(decodedValue);
+      expect(capturePositionedProjection(restore.projection)).toMatchObject({
+        value: decodedValue, hasPosition: true, position: 5, revision: 0, resumable: true,
+      });
+      restore.activate();
+      const resumedOpen = providerB.opens[0];
+      if (resumedOpen === undefined) throw new Error("The target reader did not open");
+      expect(resumedOpen).toMatchObject({ hasAfter: true, after: 5, hasReader: true });
+      providerB.emitReader(reader, { position: 6, value: 3 });
+      await flush();
+      expect(restore.projection.value.get()).toEqual({ total: 5 });
+      const receipt = positionedFoldReceipt(restore.projection);
+      if (receipt === undefined) throw new Error("The target fold did not issue a receipt");
+      acknowledgePositionedFold(restore.projection, receipt);
+      expect(providerB.currentChecks.length).toBeGreaterThanOrEqual(2);
+      expect(providerB.currentChecks.every((check) => check.after === persisted.after)).toBe(true);
+      expect(providerB.acknowledgements[0]?.receipt).toBe(receipt);
+      restore.discard();
+      expect(providerB.releaseCount(reader)).toBe(1);
+    } finally {
+      graphB.dispose();
+    }
+  });
+  it("keeps a mutated accumulator at its last successful position but forbids restore after reducer failure", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const graph = positionedGraph(stream, "positioned-reducer-failure");
+    const input = Object.freeze({ room: "one" });
+    const failure = new Error("reducer failed after mutation");
+    const source = projectPositioned(graph.api.events, input, {
+      kind: "reduce" as const,
+      initial: { total: 0 },
+      step: (accumulator, item) => {
+        accumulator.total += item;
+        if (item === 9) {
+          accumulator.total = 77;
+          throw failure;
+        }
+        return accumulator;
+      },
+    });
+    try {
+      provider.emitLive(input, { position: 1, value: 1 });
+      await flush();
+      const beforeFailure = capturePositionedProjection(source);
+      expect(beforeFailure).toMatchObject({ hasPosition: true, position: 1, resumable: true });
+      provider.emitLive(input, { position: 2, value: 9 });
+      await flush();
+      const afterFailure = capturePositionedProjection(source);
+      expect(afterFailure.status).toBe("failed");
+      expect(afterFailure.error).toBe(failure);
+      expect(afterFailure.position).toBe(1);
+      expect(afterFailure.value.total).toBe(77);
+      expect(afterFailure.resumable).toBe(false);
+      expect(() => preparePositionedRestore(graph.api.events, input, afterFailure, {}, { value: afterFailure.value })).toThrow(TypeError);
+      expect(provider.opens).toHaveLength(1);
+    } finally {
+      source.close();
+      graph.dispose();
+    }
+  });
+
+  it("keeps positioned folds landed across observer failure and equal-value delivery", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const faults: unknown[] = [];
+    const graph = createGraph({
+      contract: defineContract({ namespace: "positioned-observer-failure", operations: { events: stream } }),
+      onUnobservedFault: (error) => faults.push(error),
+    });
+    const input = Object.freeze({ room: "one" });
+    const projection = projectPositioned(graph.api.events, input, {
+      kind: "reduce" as const,
+      initial: 0,
+      step: () => 1,
+    });
+    const notificationFailure = new Error("projection observer failed");
+    const stop = subscribe(projection.value, (value) => {
+      if (value === 1) throw notificationFailure;
+    });
+    try {
+      provider.emitLive(input, { position: 5, value: 2 });
+      await flush();
+      expect(projection.status.get()).toBe("open");
+      expect(projection.value.get()).toBe(1);
+      expect(faults).toEqual([notificationFailure]);
+      const first = capturePositionedProjection<number, number>(projection);
+      expect(first).toMatchObject({ value: 1, hasPosition: true, position: 5, revision: 1, resumable: true });
+      provider.emitLive(input, { position: 6, value: 3 });
+      await flush();
+      const second = capturePositionedProjection<number, number>(projection);
+      expect(second).toMatchObject({ value: 1, hasPosition: true, position: 6, revision: 2, resumable: true });
+      expect(isPositionedCheckpointCurrent(first)).toBe(false);
+      expect(positionedFoldReceipt(projection)).toMatchObject({ position: 6, revision: 2 });
+      expect(faults).toEqual([notificationFailure]);
+    } finally {
+      stop();
+      projection.close();
+      graph.dispose();
+    }
+  });
+
+  it("resets a terminal positioned tuple without making its old cursor current", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const graph = positionedGraph(stream, "positioned-terminal-reset");
+    const input = Object.freeze({ room: "one" });
+    const projection = projectPositioned(graph.api.events, input, {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (sum: number, item: number) => sum + item,
+    });
+    try {
+      provider.emitLive(input, { position: 7, value: 3 });
+      await flush();
+      const beforeClose = capturePositionedProjection<number, number>(projection);
+      projection.close();
+      expect(projection.status.get()).toBe("closed");
+      expect(projection.value.get()).toBe(3);
+      await graph.reset();
+      expect(projection.status.get()).toBe("closed");
+      expect(projection.value.get()).toBe(0);
+      expect(projection.error.get()).toBeUndefined();
+      expect(isPositionedCheckpointCurrent(beforeClose)).toBe(false);
+      const afterReset = capturePositionedProjection<number, number>(projection);
+      expect(afterReset).toMatchObject({
+        status: "closed", value: 0, error: undefined, hasPosition: false,
+        position: undefined, resumable: false,
+      });
+      expect(isPositionedCheckpointCurrent(afterReset)).toBe(true);
+      expect(provider.opens).toHaveLength(1);
+    } finally {
+      projection.close();
+      graph.dispose();
+    }
   });
 
   it("closes projections on graph disposal", () => {

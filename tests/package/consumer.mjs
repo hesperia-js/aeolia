@@ -5,6 +5,12 @@ import {
   bindStream as rootBindStream,
   inspectBoundAddress as rootInspectBoundAddress,
   createGraph,
+  createPositionedStream,
+  projectPositioned,
+  capturePositionedProjection,
+  preparePositionedSeedRestore,
+  positionedFoldReceipt,
+  acknowledgePositionedFold,
   createStore,
   defineContract,
   observeQueryProgress as rootObserveQueryProgress,
@@ -57,6 +63,7 @@ export async function verifyConsumer() {
   await verifyBoundConsumer();
   await verifyBoundStreamConsumer();
   await verifyAcquisitionConsumer();
+  await verifyPositionedConsumer();
   const count = signal(2);
   const doubled = computed(() => count.get() * 2);
   const signalValues = [];
@@ -171,6 +178,185 @@ export async function verifyConsumer() {
   }
 }
 
+function positionedChannel() {
+  const queued = [];
+  const waiters = [];
+  let ended = false;
+  return {
+    source: {
+      [Symbol.asyncIterator]() {
+        return {
+          next() {
+            const event = queued.shift();
+            if (event !== undefined) return Promise.resolve({ done: false, value: event });
+            if (ended) return Promise.resolve({ done: true, value: undefined });
+            return new Promise((resolve) => waiters.push(resolve));
+          },
+          return() {
+            ended = true;
+            for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+            return Promise.resolve({ done: true, value: undefined });
+          },
+        };
+      },
+    },
+    emit(event) {
+      const waiter = waiters.shift();
+      if (waiter === undefined) queued.push(event);
+      else waiter({ done: false, value: event });
+    },
+  };
+}
+
+class ConsumerPositionedSource {
+  #reservations = new WeakMap();
+  #readerEmitters = new WeakMap();
+  #liveEmitters = new Map();
+  #releaseCounts = new WeakMap();
+  opens = [];
+  acknowledgements = [];
+
+  reserve(input, after, checkpoint, seed) {
+    const reader = Object.freeze({});
+    this.#reservations.set(reader, { input, after, checkpoint, seed });
+    return reader;
+  }
+
+  emitLive(input, event) {
+    const emit = this.#liveEmitters.get(input.id);
+    check(emit !== undefined, "The positioned live provider opening is missing");
+    emit(event);
+  }
+
+  emitReader(reader, event) {
+    const emit = this.#readerEmitters.get(reader);
+    check(emit !== undefined, "The positioned reserved reader opening is missing");
+    emit(event);
+  }
+
+  open(input, options) {
+    const channel = positionedChannel();
+    const hasAfter = Object.hasOwn(options, "after");
+    const hasReader = Object.hasOwn(options, "reader");
+    this.opens.push({ input, hasAfter, after: options.after, hasReader });
+    if (options.reader !== undefined) this.#readerEmitters.set(options.reader, channel.emit);
+    else this.#liveEmitters.set(input.id, channel.emit);
+    return channel.source;
+  }
+
+  validateReader(input, reader, after, checkpoint, seed) {
+    const reservation = this.#reservations.get(reader);
+    return reservation !== undefined && reservation.input === input && reservation.after === after && reservation.checkpoint === checkpoint && reservation.seed === seed;
+  }
+
+  isReaderCurrent(input, reader, after, seed) {
+    const reservation = this.#reservations.get(reader);
+    return reservation !== undefined && reservation.input === input && reservation.after === after && reservation.seed === seed;
+  }
+
+  acknowledge(_input, reader, receipt) {
+    this.acknowledgements.push({ reader, receipt });
+  }
+
+  releaseReader(_input, reader) {
+    this.#releaseCounts.set(reader, this.releaseCount(reader) + 1);
+  }
+
+  releaseCount(reader) {
+    return this.#releaseCounts.get(reader) ?? 0;
+  }
+}
+
+function waitForPositionedValue(projection, predicate) {
+  let stop = () => {};
+  let matched = false;
+  let resolveValue;
+  const result = new Promise((resolve) => { resolveValue = resolve; });
+  const unsubscribe = subscribe(projection.value, (value) => {
+    if (matched || !predicate(value)) return;
+    matched = true;
+    stop();
+    resolveValue(value);
+  });
+  stop = unsubscribe;
+  if (matched) stop();
+  return result;
+}
+
+async function verifyPositionedConsumer() {
+  const persisted = await (async () => {
+    const providerA = new ConsumerPositionedSource();
+    const definitionA = createPositionedStream({
+      name: "positioned.consumer",
+      key: (input) => input.id,
+      source: providerA,
+    });
+    const graphA = createGraph({
+      contract: defineContract({ namespace: "positioned-consumer-a", operations: { events: definitionA } }),
+    });
+    const inputA = { id: "one" };
+    const source = projectPositioned(graphA.api.events, inputA, {
+      kind: "reduce",
+      initial: { total: 0 },
+      step: (accumulator, event) => ({ total: accumulator.total + event }),
+    });
+    try {
+      check(providerA.opens.length === 1 && !providerA.opens[0].hasAfter, "A live positioned open included a restore boundary");
+      const firstFold = waitForPositionedValue(source, (value) => value.total === 2);
+      providerA.emitLive(inputA, { position: 5, value: 2 });
+      await firstFold;
+      const checkpoint = capturePositionedProjection(source);
+      check(checkpoint.hasPosition && checkpoint.position === 5 && checkpoint.resumable, "A did not capture its successful positioned fold");
+      return { after: checkpoint.position, value: { total: checkpoint.value.total } };
+    } finally {
+      source.close();
+      graphA.dispose();
+    }
+  })();
+
+  const providerB = new ConsumerPositionedSource();
+  const definitionB = createPositionedStream({
+    name: "positioned.consumer",
+    key: (input) => input.id,
+    source: providerB,
+  });
+  const graphB = createGraph({
+    contract: defineContract({ namespace: "positioned-consumer-b", operations: { events: definitionB } }),
+  });
+  const inputB = { id: "one" };
+  const seed = persisted.value;
+  const reader = providerB.reserve(inputB, persisted.after, undefined, seed);
+  let restore;
+  try {
+    restore = preparePositionedSeedRestore(
+      graphB.api.events,
+      inputB,
+      {
+        kind: "reduce",
+        initial: seed,
+        step: (accumulator, event) => ({ total: accumulator.total + event }),
+      },
+      { after: persisted.after, value: seed },
+      reader,
+    );
+    check(providerB.opens.length === 0, "Dormant B opened before activation");
+    check(restore.projection.value.get() === seed, "B did not install the decoded accumulator seed");
+    const resumedFold = waitForPositionedValue(restore.projection, (value) => value.total === 5);
+    restore.activate();
+    check(providerB.opens.length === 1 && providerB.opens[0].hasAfter && providerB.opens[0].after === 5 && providerB.opens[0].hasReader, "B did not open after its admitted boundary");
+    providerB.emitReader(reader, { position: 6, value: 3 });
+    await resumedFold;
+    const receipt = positionedFoldReceipt(restore.projection);
+    check(receipt !== undefined && receipt.position === 6, "B did not issue a successful-fold receipt");
+    acknowledgePositionedFold(restore.projection, receipt);
+    check(providerB.acknowledgements.length === 1 && providerB.acknowledgements[0].receipt === receipt, "B did not acknowledge the native receipt");
+    restore.discard();
+    check(providerB.releaseCount(reader) === 1, "B did not release its reader exactly once");
+  } finally {
+    restore?.discard();
+    graphB.dispose();
+  }
+}
 async function verifyAcquisitionConsumer() {
   const backend = testBackend();
   const query = createQuery({

@@ -14,7 +14,8 @@ import type {
   StoreKey,
   StoreIdentity,
   StoreStatus,
-  StreamDefinition,
+  PositionedStreamDefinition,
+  NativeStreamDefinition,
   StreamStatus,
   StreamStore,
   ValueRevision,
@@ -106,7 +107,10 @@ export interface StreamSession<T> {
   readonly token: object;
   /** Reset identity under which this session was opened. */
   readonly resetEpoch: number;
-  readonly listeners: Set<(event: StreamEvent<T>) => void>;
+  listeners: Set<(event: StreamEvent<T>) => void>;
+  /** Latest event boundary, installed before listener census. */
+  position?: unknown;
+  hasPosition: boolean;
   iterator?: AsyncIterator<T>;
   removeCallerAbort?: () => void;
   removeControllerAbort?: () => void;
@@ -118,8 +122,9 @@ export interface StreamSession<T> {
 }
 
 export interface StreamSource<T> {
-  readonly stream: StreamDefinition<unknown, T, any>;
+  readonly stream: NativeStreamDefinition<unknown, T, any, any, any>;
   readonly input: unknown;
+  readonly member?: object;
   readonly abortSignal?: AbortSignal;
 }
 
@@ -138,7 +143,7 @@ export interface GraphProjection {
 }
 
 export type StreamEvent<T> =
-  | { readonly kind: "value"; readonly value: T }
+  | { readonly kind: "value"; readonly value: T; readonly hasPosition?: boolean; readonly position?: unknown }
   | { readonly kind: "gap" }
   | { readonly kind: "close"; readonly failed: boolean; readonly reason?: unknown };
 
@@ -309,6 +314,8 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly stores: Map<string | StoreIdentity, StoreRuntime<unknown>>;
   readonly queryDefinitions: Map<QueryDefinition<any, any, any, any>, QueryAcquisition>;
   readonly mutationDefinitions: Set<MutationDefinition<any, any>>;
+  /** Exact positioned declarations admitted by this graph before API exposure. */
+  readonly positionedDefinitions: Set<PositionedStreamDefinition<any, any, any, any, any>>;
   readonly bindingContexts: Set<BindingContextRuntime>;
   readonly declaredStores: Map<string, StoreDefinition<unknown>>;
   readonly faultObservers: Set<(fault: Fault) => void>;
@@ -332,9 +339,11 @@ export interface BindingContextRuntime {
   readonly handle: BindingContext;
   readonly activeCell: WritableSignal<boolean>;
   readonly bindings: Map<QueryDefinition<any, any, any, any>, Map<object, QueryBindingRuntime>>;
-  readonly streamBindings: Map<StreamDefinition<any, any, any>, Map<object, StreamBindingRuntime>>;
+  readonly streamBindings: Map<NativeStreamDefinition<any, any, any, any, any>, Map<object, StreamBindingRuntime>>;
   readonly mutations: Map<MutationDefinition<any, any>, Map<object, MutationBindingRuntime>>;
   readonly mutationControllers: Set<AbortController>;
+  /** Independent native projections opened through this context stream bindings. */
+  positionedProjections?: Set<() => void>;
   disposed: boolean;
 }
 
@@ -353,7 +362,7 @@ export interface QueryBindingRuntime {
 export interface StreamBindingRuntime {
   readonly kind: "stream";
   readonly context: BindingContextRuntime;
-  readonly definition: StreamDefinition<any, any, any>;
+  readonly definition: NativeStreamDefinition<any, any, any, any, any>;
   readonly originalMember: object;
   readonly stores: Map<string, StoreRuntime<unknown>>;
   readonly addresses: Map<string, BindingAddressRuntime>;
