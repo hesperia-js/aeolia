@@ -717,7 +717,7 @@ describe("stream projections", () => {
       acknowledgePositionedFold(restore.projection, receipt);
       expect(provider.currentChecks.length).toBeGreaterThanOrEqual(2);
       expect(provider.currentChecks.every((check) => check.after === 5)).toBe(true);
-      expect(provider.acknowledgements[0]?.receipt).toBe(receipt);
+      expect(provider.acknowledgements[0]?.receipt === receipt).toBe(true);
       restore.discard();
       expect(provider.releaseCount(reader)).toBe(1);
       expect(() => restore.activate()).toThrow(TypeError);
@@ -925,7 +925,7 @@ describe("stream projections", () => {
       acknowledgePositionedFold(restore.projection, receipt);
       expect(providerB.currentChecks.length).toBeGreaterThanOrEqual(2);
       expect(providerB.currentChecks.every((check) => check.after === persisted.after)).toBe(true);
-      expect(providerB.acknowledgements[0]?.receipt).toBe(receipt);
+      expect(providerB.acknowledgements[0]?.receipt === receipt).toBe(true);
       restore.discard();
       expect(providerB.releaseCount(reader)).toBe(1);
     } finally {

@@ -63,7 +63,6 @@ import {
   type PositionedStreamOpenOptions,
   type PositionedProjectionCheckpoint,
   type PositionedFoldReceipt,
-  type PositionedStreamMember,
   type PositionedRestoreSeed,
   type Observer,
   type QueryStore,
@@ -198,8 +197,7 @@ const neverPositionedGraph = createGraph({
   }),
 });
 void neverPositionedGraph.api.events;
-const positionedMember: PositionedStreamMember<PositionedInput, number, number, PositionedReader> =
-  positionedGraph.api.positioned;
+const positionedMember: MemberOf<typeof positionedDefinition> = positionedGraph.api.positioned;
 const positionedReduce = projectPositioned(
   positionedMember,
   { id: "one" },
@@ -237,7 +235,6 @@ const positionedRestore = preparePositionedSeedRestore(
   { token: "reader" },
 );
 const restoredPositionedValue: { total: number } = positionedRestore.projection.value.get();
-// @ts-expect-error The raw graph member retains its numeric provider position type.
 preparePositionedSeedRestore(
   positionedGraph.api.positioned,
   { id: "wrong-position" },
@@ -246,10 +243,10 @@ preparePositionedSeedRestore(
     initial: { total: 0 },
     step: (accumulator, event) => ({ total: accumulator.total + event }),
   },
+  // @ts-expect-error The raw graph member retains its numeric provider position type.
   { after: "wrong-position", value: { total: 0 } },
   { token: "reader" },
 );
-// @ts-expect-error The raw graph member retains its provider reader type.
 preparePositionedSeedRestore(
   positionedGraph.api.positioned,
   { id: "wrong-reader" },
@@ -259,6 +256,7 @@ preparePositionedSeedRestore(
     step: (accumulator, event) => ({ total: accumulator.total + event }),
   },
   { after: 4, value: { total: 0 } },
+  // @ts-expect-error The raw graph member retains its provider reader type.
   { token: 1 },
 );
 const accumulatedRestore = preparePositionedSeedRestore(
@@ -269,10 +267,10 @@ const accumulatedRestore = preparePositionedSeedRestore(
   { token: "reader" },
 );
 const restoredPositionedArray: readonly number[] = accumulatedRestore.projection.value.get();
-// @ts-expect-error Accumulation restores must seed the event array, not a scalar.
 preparePositionedSeedRestore(
   positionedMember,
   { id: "invalid-array" },
+  // @ts-expect-error Accumulation restores must seed the event array, not a scalar.
   { kind: "accumulate", max: 4 },
   { after: 4, value: 2 },
   { token: "reader" },
