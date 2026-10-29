@@ -87,11 +87,13 @@ function clearRuntime(
   if (!owns()) return;
   if (runtime.timer !== undefined) clearTimeout(runtime.timer);
   runtime.timer = undefined;
-  runtime.baseAvailable = runtime.declared;
-  runtime.hasAcceptedLanding = runtime.declared;
+  const readerInitial = runtime.readerScope !== undefined && runtime.initialSpecified;
+  const resetInitial = runtime.declared || readerInitial;
+  runtime.baseAvailable = resetInitial;
+  runtime.hasAcceptedLanding = resetInitial;
   runtime.transferEligible = true;
-  runtime.initial = runtime.declared ? runtime.initial : undefined;
-  runtime.initialSpecified = runtime.declared;
+  runtime.initial = resetInitial ? runtime.initial : undefined;
+  runtime.initialSpecified = resetInitial ? runtime.initialSpecified : runtime.declared;
   runtime.refreshOnActivation = !runtime.declared && runtime.source !== undefined;
   runtime.failing = false;
   runtime.recoveryDisarmed = false;
@@ -106,14 +108,18 @@ function clearRuntime(
   if (!owns()) return;
   reactiveInternal.guardedWrite(
     runtime.committed,
-    runtime.declared ? runtime.initial : undefined,
+    resetInitial ? runtime.initial : undefined,
     owns,
     () => undefined,
   );
   if (!owns()) return;
-  runtime.presence.set(runtime.declared);
+  runtime.presence.set(resetInitial);
   if (!owns()) return;
-  runtime.streamStatusCell.set(runtime.streamSource?.abortSignal?.aborted ? "closed" : "empty");
+  runtime.streamStatusCell.set(
+    runtime.readerScope !== undefined || runtime.streamSource?.abortSignal?.aborted
+      ? "closed"
+      : "empty",
+  );
   for (const caller of runtime.callers) {
     if (!owns()) return;
     caller.statusCell.set("empty");
@@ -264,7 +270,11 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
           runtime,
           caller: callerForSource(runtime, runtime.source),
         });
-      if (runtime.binding?.kind !== "stream" && runtime.streamSource !== undefined)
+      if (
+        runtime.readerScope === undefined &&
+        runtime.binding?.kind !== "stream" &&
+        runtime.streamSource !== undefined
+      )
         streams.push({ runtime, source: runtime.streamSource, key: runtime.key });
     }
     const projections = [...state.projections];
@@ -277,6 +287,13 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
         for (const binding of profiles.values()) binding.addresses.clear();
       for (const members of context.streamBindings.values())
         for (const binding of members.values()) binding.addresses.clear();
+      for (const runtime of [...state.stores.values()]) {
+        const address = runtime.readerScope?.address;
+        if (address !== undefined) {
+          address.operations.clear();
+          address.guard = {};
+        }
+      }
     }
     for (const runtime of state.stores.values())
       if (

@@ -102,6 +102,7 @@ export interface QueryProgressAuthority {
 export type QueryOutcome = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
 
 export interface StreamSession<T> {
+  positioned?: PositionedStoreSessionState<T>;
   readonly physical: PhysicalWork;
   readonly controller: AbortController;
   readonly token: object;
@@ -119,6 +120,63 @@ export interface StreamSession<T> {
   ended: boolean;
   emitted: boolean;
   bound?: BoundStreamSessionRuntime<T>;
+}
+
+
+/** One genuine source dispatch, independent of reactive value equality. */
+export interface PositionedStoreEvent {
+  readonly identity: object;
+  readonly ordinal: number;
+  readonly position: unknown;
+  readonly latest: unknown;
+  landingRevision?: import("./types.ts").ValueRevision;
+}
+
+/** Completed source Store landing; pending per-open positions never supply this cut. */
+export interface PositionedStoreCompletedEvent extends PositionedStoreEvent {
+  readonly landingRevision: import("./types.ts").ValueRevision;
+}
+
+export interface PositionedStoreParticipant {
+  readonly projection: object;
+  event?: PositionedStoreEvent;
+  failed: boolean;
+}
+
+export interface PositionedStoreReaderLease {
+  readonly reader: unknown;
+  readonly after: unknown;
+  readonly seed: unknown;
+  owned: boolean;
+  released: boolean;
+}
+
+/** Actual Store/session ownership shared by its positioned projections. */
+export interface PositionedStoreSessionState<T> {
+  readonly runtime: StoreRuntime<T>;
+  readonly definition: import("./types.ts").PositionedStreamDefinition<any, T, any, any, any>;
+  readonly provider: import("./types.ts").PositionedStreamSource<any, T, any, any>;
+  readonly input: unknown;
+  readonly member: object;
+  readonly binding?: StreamBindingRuntime;
+  phase: "dormant" | "active" | "closed";
+  nextOrdinal: number;
+  /** Incoming provider boundary while next() is pending; never a completed capture cut. */
+  pendingPosition?: unknown;
+  hasPendingPosition: boolean;
+  dispatch?: PositionedStoreEvent;
+  completed?: PositionedStoreCompletedEvent;
+  /** Last committed base landing, distinct from visible prediction revisions. */
+  baseRevision?: ValueRevision;
+  diverged: boolean;
+  readonly participants: Set<PositionedStoreParticipant>;
+  reader?: PositionedStoreReaderLease;
+}
+
+/** Reader-specific native address, distinct from the ordinary logical-key slot. */
+export interface PositionedStoreReaderScope<T> {
+  readonly session: StreamSession<T>;
+  readonly address?: BindingAddressRuntime;
 }
 
 export interface StreamSource<T> {
@@ -171,6 +229,7 @@ export interface ObservationState {
 }
 
 export interface StoreRuntime<T> {
+  readerScope?: PositionedStoreReaderScope<T>;
   readonly graph: GraphRuntime<any>;
   readonly identity: StoreIdentity;
   readonly key: StoreKey;
@@ -368,6 +427,7 @@ export interface QueryBindingRuntime {
 }
 
 export interface StreamBindingRuntime {
+  readerStores?: Set<StoreRuntime<unknown>>;
   readonly kind: "stream";
   readonly context: BindingContextRuntime;
   readonly definition: NativeStreamDefinition<any, any, any, any, any>;

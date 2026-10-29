@@ -7,6 +7,9 @@ import {
   createStream,
   createPositionedStream,
   projectPositioned,
+  project,
+  capturePositionedStore,
+  preparePositionedStoreRestore,
   capturePositionedProjection,
   preparePositionedRestore,
   isPositionedCheckpointCurrent,
@@ -818,6 +821,246 @@ it("refuses an exhausted later stream session before clearing the retained impor
   } finally {
     source.source.graph.dispose();
     target.graph.dispose();
+  }
+});
+
+
+
+
+it("keeps same-key restored readers isolated through dormant and active caller abort", async () => {
+  type Event = { position: number; value: number };
+  type Reservation = { input: Input; after: number; seed: unknown };
+  type Opening = {
+    hasAfter: boolean;
+    after: number | undefined;
+    reader: object | undefined;
+    abortSignal: AbortSignal;
+    returnStarted: Promise<void>;
+    finishReturn(): void;
+    returnCalls: number;
+  };
+  const reservations = new WeakMap<object, Reservation>();
+  const releases = new WeakMap<object, number>();
+  const openings: Opening[] = [];
+  let emitLive: ((event: Event) => void) | undefined;
+
+  const makeChannel = (
+    opening: Opening,
+    returnPromise: Promise<IteratorResult<Event>>,
+    markReturnStarted: () => void,
+  ) => {
+    const queued: Event[] = [];
+    const waiters: Array<(result: IteratorResult<Event>) => void> = [];
+    let ended = false;
+    const emit = (event: Event): void => {
+      if (ended) return;
+      const waiter = waiters.shift();
+      if (waiter !== undefined) waiter({ done: false, value: event });
+      else queued.push(event);
+    };
+    const iterable: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => {
+            const event = queued.shift();
+            if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
+            if (ended) return Promise.resolve({ done: true as const, value: undefined });
+            return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
+          },
+          return: () => {
+            opening.returnCalls += 1;
+            markReturnStarted();
+            ended = true;
+            for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+            return returnPromise;
+          },
+        };
+      },
+    };
+    return { iterable, emit };
+  };
+
+  const reserve = (input: Input, after: number, seed: unknown): object => {
+    const reader = Object.freeze({});
+    reservations.set(reader, { input, after, seed });
+    return reader;
+  };
+  const releaseCount = (reader: object): number => releases.get(reader) ?? 0;
+  const releaseReader = (reader: object): void => releases.set(reader, releaseCount(reader) + 1);
+  const stream = createPositionedStream<Input, number, string, number, object>({
+    name: "reader-scoped-store",
+    key: (input) => input.room,
+    source: {
+      open: (input, options) => {
+        const returnGate = Promise.withResolvers<IteratorResult<Event>>();
+        const returnStarted = Promise.withResolvers<void>();
+        const opening: Opening = {
+          hasAfter: Object.hasOwn(options, "after"),
+          after: options.after,
+          reader: options.reader,
+          abortSignal: options.abortSignal,
+          returnStarted: returnStarted.promise,
+          finishReturn: () => returnGate.resolve({ done: true, value: undefined }),
+          returnCalls: 0,
+        };
+        openings.push(opening);
+        const channel = makeChannel(opening, returnGate.promise, () => returnStarted.resolve());
+        if (options.reader === undefined) emitLive = channel.emit;
+        return channel.iterable;
+      },
+      validateReader: (input, reader, after, checkpoint, seed) => {
+        const reservation = reservations.get(reader);
+        return (
+          checkpoint === undefined &&
+          reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
+      },
+      isReaderCurrent: (input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        return (
+          reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
+      },
+      acknowledge: () => undefined,
+      releaseReader: (_input, reader) => releaseReader(reader),
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "reader-scoped-store", operations: { stream } }),
+  });
+  const context = createBindingContext(graph);
+  const binding = bindStream(graph, stream, graph.api.stream, { context });
+  const input = Object.freeze({ room: "one" });
+  const policy = {
+    kind: "reduce" as const,
+    initial: 0,
+    step: (sum: number, event: number) => sum + event,
+  };
+  const source = binding.member(input);
+  const sourceSession = binding.session(source);
+  const sourceProjection = project(source, policy);
+  const abortA = new AbortController();
+  const abortB = new AbortController();
+  let readerA: object | undefined;
+  let readerB: object | undefined;
+  let readerATransferred = false;
+  let readerBTransferred = false;
+
+  try {
+    const folded = new Promise<void>((resolve) => {
+      let stop = (): void => undefined;
+      stop = subscribe(sourceProjection.value, (value) => {
+        if (value !== 2) return;
+        stop();
+        resolve();
+      });
+    });
+    if (emitLive === undefined) throw new Error("The bound source did not open");
+    emitLive({ position: 5, value: 2 });
+    await folded;
+
+    const checkpoint = capturePositionedStore(source, [sourceProjection] as const);
+    if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
+      throw new Error("The bound source did not capture a positioned landing");
+    const after: number = checkpoint.position;
+    expect(checkpoint.sourceIdentity).toBe(source.identity);
+    expect(checkpoint.sessionIdentity).toBe(sourceSession.identity);
+    expect(checkpoint.latest).toBe(2);
+    expect(checkpoint.values).toStrictEqual([2]);
+
+    const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+    readerA = reserve(input, after, seed);
+    readerB = reserve(input, after, seed);
+    const first = preparePositionedStoreRestore(
+      binding,
+      input,
+      [policy] as const,
+      seed,
+      readerA,
+      { abortSignal: abortA.signal },
+    );
+    readerATransferred = true;
+    const second = preparePositionedStoreRestore(
+      binding,
+      input,
+      [policy] as const,
+      seed,
+      readerB,
+      { abortSignal: abortB.signal },
+    );
+    readerBTransferred = true;
+
+    expect(openings).toHaveLength(1);
+    expect(first.source.identity).not.toBe(second.source.identity);
+    expect(first.source.identity).not.toBe(source.identity);
+    expect(second.source.identity).not.toBe(source.identity);
+    const firstSession = binding.session(first.source);
+    const secondSession = binding.session(second.source);
+    expect(firstSession.storeIdentity).toBe(first.source.identity);
+    expect(secondSession.storeIdentity).toBe(second.source.identity);
+    expect(firstSession.identity).not.toBe(secondSession.identity);
+    expect(first.source.available.get()).toBe(true);
+    expect(first.source.value.get()).toBe(2);
+    expect(second.source.available.get()).toBe(true);
+    expect(second.source.value.get()).toBe(2);
+
+    const ordinaryJoin = binding.member(input);
+    expect(ordinaryJoin.identity).toBe(source.identity);
+    expect(binding.session(ordinaryJoin).identity).toBe(sourceSession.identity);
+    expect(openings).toHaveLength(1);
+
+    const dormantReason = new Error("dormant reader aborted");
+    abortA.abort(dormantReason);
+    const firstDetachment = await firstSession.detached;
+    expect(firstDetachment.status).toBe("closed");
+    expect(firstSession.abortSignal.aborted).toBe(true);
+    expect(firstSession.abortSignal.reason).toBe(dormantReason);
+    expect(openings).toHaveLength(1);
+    expect(releaseCount(readerA)).toBe(1);
+    expect(releaseCount(readerB)).toBe(0);
+    expect(second.source.status.get()).toBe("empty");
+    expect(() => first.activate()).toThrow(TypeError);
+    expect(openings).toHaveLength(1);
+
+    expect(second.activate()).toBe(second.source);
+    expect(openings).toHaveLength(2);
+    expect(openings[1]).toMatchObject({ hasAfter: true, after: 5, reader: readerB });
+    expect(openings[1]!.abortSignal).toBe(secondSession.abortSignal);
+
+    const activeReason = new Error("active reader aborted");
+    abortB.abort(activeReason);
+    const secondDetachment = await secondSession.detached;
+    expect(secondDetachment.status).toBe("closed");
+    expect(openings[1]!.abortSignal.aborted).toBe(true);
+    expect(openings[1]!.abortSignal.reason).toBe(activeReason);
+    expect(openings[1]!.returnCalls).toBe(1);
+    expect(releaseCount(readerB)).toBe(1);
+
+    const retiring = context.retire();
+    expect(context.retire()).toBe(retiring);
+    await openings[0]!.returnStarted;
+    openings[0]!.finishReturn();
+    await expectPending(retiring);
+
+    for (const opening of openings) opening.finishReturn();
+    await retiring;
+    expect(openings.map((opening) => opening.returnCalls)).toEqual([1, 1]);
+    expect(releaseCount(readerA)).toBe(1);
+    expect(releaseCount(readerB)).toBe(1);
+  } finally {
+    for (const opening of openings) opening.finishReturn();
+    if (readerA !== undefined && !readerATransferred && releaseCount(readerA) === 0)
+      releaseReader(readerA);
+    if (readerB !== undefined && !readerBTransferred && releaseCount(readerB) === 0)
+      releaseReader(readerB);
+    context.dispose();
+    graph.dispose();
   }
 });
 

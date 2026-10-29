@@ -190,9 +190,11 @@ export interface QueryStore<T, P = never> extends Store<T> {
 /**
  * A view of the latest value produced by a keyed stream.
  *
- * The source is shared by callers resolving to the same key. The first caller
- * opens the source and owns the source-level cancellation signal; later
- * callers join that session. Stream stores are writable through the inherited
+ * Ordinary member calls resolving to the same key share their keyed session.
+ * The first caller opens the source and owns source-level cancellation; later
+ * callers join it. Explicit Store restorations own separate admitted reader
+ * sessions, even at the same key; their views share the returned source Store.
+ * Stream stores are writable through the inherited
  * `set` and `update` methods, but those writes do not emit into the source.
  */
 export interface StreamStore<T> extends Store<T> {
@@ -200,8 +202,9 @@ export interface StreamStore<T> extends Store<T> {
    * Whether the current shared session is waiting for its first emission.
    *
    * An initial, adopted, or previously emitted value does not end this wait.
-   * Gaps before the session's first emission are ignored. Closing or failing
-   * the session ends the wait even if it delivered no value.
+   * Ordinary opens ignore gaps before the session's first emission. An explicitly
+   * restored positioned reader has an admitted boundary and fails on a reported
+   * gap. Closing or failing ends the wait even if the session delivered no value.
    */
   readonly pending: Readable<boolean>;
 
@@ -794,6 +797,90 @@ export interface PositionedRestoreSeed<Value, Position> {
   /** Borrowed accumulator value decoded and checked by the owning application. */
   readonly value: Value;
 }
+
+
+/** Native identity for one coherent Store session and its required projection values. */
+declare const positionedStoreCheckpointBrand: unique symbol;
+/**
+ * Non-pulling borrowed capture of one completed positioned Store/session cut.
+ * Authenticity belongs to the native issuer, not these descriptive fields.
+ */
+export type PositionedStoreCheckpoint<Event, Values extends readonly unknown[] = readonly unknown[]> = {
+  /** Physical identity of the actual source Store. */
+  readonly sourceIdentity: StoreIdentity;
+  /** Exact native source session; a replacement session has another identity. */
+  readonly sessionIdentity: import("./stream-binding.ts").StreamSessionIdentity;
+  /** Whether the source has completed a genuine positioned event landing. */
+  readonly hasPosition: boolean;
+  /** Borrowed provider boundary; the source Store does not carry its Position type. */
+  readonly position: unknown;
+  /** Borrowed required projection values, in the supplied projection order. */
+  readonly values: Values;
+  /** Whether this actual source and all required folds permit continuation. */
+  readonly resumable: boolean;
+  /** Native capture identity; copying fields does not preserve authority. */
+  readonly [positionedStoreCheckpointBrand]: true;
+} & (
+  | {
+      /** No coherent latest source event is available at this cut. */
+      readonly present: false;
+    }
+  | {
+      /** A latest source event is present, including an event valued undefined. */
+      readonly present: true;
+      /** Borrowed source Event, distinct from every projected accumulator. */
+      readonly latest: Event;
+    }
+);
+
+/** Decoded ordinary data admitted by a provider for one fresh Store/session. */
+export interface PositionedStoreRestoreSeed<Event, Position, Values extends readonly unknown[]> {
+  /** Exclusive provider boundary authenticated by the admitted reader. */
+  readonly after: Position;
+  /** Own latest source-event property; undefined remains a present event. */
+  readonly latest: Event;
+  /** One decoded accumulator per target policy, in matching tuple order. */
+  readonly values: Values;
+}
+
+/** Genuine dormant source Store and its seeded, shared native projections. */
+export interface PositionedStoreRestoration<Event, Values extends readonly unknown[]> {
+  /** Actual Store belonging to this reader/session; all returned views share it. */
+  readonly source: StreamStore<Event>;
+  /** Independent folds over source, seeded without opening or prefix replay. */
+  readonly projections: { readonly [Index in keyof Values]: import("./projection.ts").Projection<Values[Index]> };
+  /**
+   * Open this reader once after its admitted boundary, returning source unchanged.
+   * @throws TypeError for repeated activation or stale session/reader authority.
+   */
+  activate(): StreamStore<Event>;
+  /**
+   * Revoke this group and release its reader once. Native retirement joins actual
+   * async iterator cleanup; this synchronous return is not physical completion.
+   */
+  discard(): void;
+}
+
+/** @internal Tuple value relation used by the public Store restoration signature. */
+export type PositionedStorePolicyValues<
+  Event,
+  Policies extends readonly import("./projection.ts").ProjectionPolicy<Event, any>[],
+> = {
+  readonly [Index in keyof Policies]: Policies[Index] extends import("./projection.ts").AccumulatePolicy
+    ? readonly Event[]
+    : Policies[Index] extends import("./projection.ts").ReducePolicy<Event, infer Value>
+      ? Value
+      : never;
+};
+
+/** @internal Tuple value relation used by non-pulling Store capture. */
+export type PositionedStoreProjectionValues<
+  Projections extends readonly import("./projection.ts").Projection<any>[],
+> = {
+  readonly [Index in keyof Projections]: Projections[Index] extends import("./projection.ts").Projection<infer Value>
+    ? Value
+    : never;
+};
 
 /**
  * Provider-backed source contract for a positioned stream.

@@ -842,3 +842,239 @@ Preparation validates the target reservation and installs the seed without openi
 The provider's `validateReader` and `isReaderCurrent` callbacks must be synchronous local checks and return exactly `true` for an admitted reader. They must not perform SQL or publish external state. `acknowledgePositionedFold` passes the provider an opaque native receipt only after a successful fold. That receipt does not prove that an external write, durable transaction or required-transfer publication committed. Applications own those protocols and must acknowledge or release their provider reader at the correct external boundary.
 
 Positions and reader reservations are provider-specific. Aeolia sets no retention window, cursor encoding, authorization rule or fallback for missing history. The provider must reject an expired or invalid reservation before dormant issuance, and it must report an ordered gap through its own source behavior rather than silently skipping events.
+
+
+### Restore a shared Store session
+
+A graph member call for a positioned declaration returns a genuine `StreamStore<Event>`. Use
+`project(source, policy)` to attach each projection to that Store's current native
+session. The projection does not open another reader or fold the Store's retained
+value. Use `capturePositionedStore(source, requiredProjections)` to capture the
+Store and the exact finite tuple of projections that the target needs. Aeolia
+checks that every projection belongs to the source's session and that they share
+one completed event cut. Your application remains responsible for including every
+projection its continuation requires.
+
+The checkpoint records the source Store identity, session identity, latest-event
+presence, provider position, required projection values in tuple order, and
+whether the cut is resumable. `hasPosition` records whether a positioned event
+established a boundary. It is separate from `present`: a Store value can exist
+without a positioned boundary, so presence alone does not establish a resumable cut. Narrow
+`checkpoint.present` before reading
+`checkpoint.latest`. A present event can have the value `undefined`.
+`checkpoint.position` has type `unknown` because a Store does not carry its
+declaration's provider `Position` type. The provider codec must validate and
+narrow that value.
+
+```ts
+import {
+  capturePositionedStore,
+  createGraph,
+  createPositionedStream,
+  defineContract,
+  project,
+} from "aeolia";
+import type { PositionedStreamSource } from "aeolia";
+
+type Input = { readonly id: string };
+declare const sourceCallbacks: PositionedStreamSource<
+  Input,
+  number | undefined,
+  number,
+  object
+>;
+
+const events = createPositionedStream({
+  name: "orders.events",
+  key: (input: Input) => input.id,
+  source: sourceCallbacks,
+});
+const graph = createGraph({
+  contract: defineContract({
+    namespace: "positioned-store-example",
+    operations: { events },
+  }),
+});
+const source = graph.api.events({ id: "one" });
+const total = project(source, {
+  kind: "reduce",
+  initial: 0,
+  step: (sum, event) => sum + (event ?? 0),
+});
+const count = project(source, {
+  kind: "reduce",
+  initial: 0,
+  step: (value) => value + 1,
+});
+const checkpoint = capturePositionedStore(source, [total, count] as const);
+if (!checkpoint.present || !checkpoint.hasPosition || !checkpoint.resumable)
+  throw new TypeError("No resumable Store cut is available");
+
+const latestEvent: number | undefined = checkpoint.latest;
+const [totalValue, countValue] = checkpoint.values;
+```
+
+The checkpoint and its values are borrowed native state. The handle is not
+transfer authority that can be reconstructed from copied fields. Copy the event,
+position, and fold values with your codec's bounds. Then call
+`isPositionedStoreCheckpointCurrent(checkpoint)` at the publication boundary.
+The check recognizes only the exact native capture. It does not pull the source
+or call provider code. The API does not admit a capture during event delivery.
+An incomplete source landing, a failed required reducer, or projections at
+different event boundaries also cannot form one resumable group. Do not split
+the projections into separate readers or refold the prefix to make the group fit.
+
+The native group eligibility check also reads the source Store's actual prediction
+state. Any live optimistic prediction on that Store makes the group cut ineligible,
+even when the predicted value equals the current value. The checkpoint contains
+no prediction state or callables. If a prediction changes the Store's visible
+revision, an earlier eligible checkpoint becomes stale. After the prediction
+layer actually retires or reconciles and the positioned source base remains
+unchanged, a new group capture may be eligible. The earlier checkpoint never
+becomes current again. This restriction applies to positioned group capture;
+`peekStore` retains its existing effective-value capture, including optimistic
+predictions.
+
+The absence of a visible prediction does not prove that an affected operation
+has retired or that complete affected-operation coverage exists. The host or
+provider owns those gates.
+
+`preparePositionedStoreRestore(member, input, policies, seed, reader, options?)` creates the
+target group from a genuine target member and the target provider's admitted
+reader. The policy tuple determines the projection tuple and its value types.
+Target policies are code in the target runtime, not decoded wire callbacks. The
+seed has the shape `{ after, latest, values }`. Its own `latest` property is
+required, including when its value is `undefined`. `values` contains one
+decoded fold value for each target policy. The target member fixes the
+`Event`, `Position`, and `Reader` types. The options
+argument does not widen `Event`. The target provider must authenticate the full
+seed and reservation before Aeolia transfers ownership of the reader.
+
+Pass an optional sixth `ValueOptions<Event>` argument for the target source Store.
+Options belong to the target runtime and are not part of the decoded seed.
+`options.initial` supplies the target Store's authored reset baseline;
+`seed.latest` remains the restored current source value. Store equality,
+snapshot settings, defaults, and conflicting-option faults follow the ordinary
+native stream configuration rules.
+
+`options.abortSignal` owns the target reader session from preparation through
+activation. If it aborts while the restoration is dormant, the session closes
+and releases its reader without opening the source. The same signal governs the
+active reader after activation.
+
+Preparation does not open the source or run reducers over a prefix. The returned
+`source` is the actual target `StreamStore`. It exposes the seeded latest event
+as a present Store value. While the restoration is dormant, the source status
+is `"empty"` and `pending` is false. Reads and subscriptions do not activate
+the reader. The returned projections attach to that same source and begin with
+their decoded fold values.
+
+After the target accepts the transfer at its publication boundary, activate the
+restoration:
+
+```ts
+import { preparePositionedStoreRestore, subscribe } from "aeolia";
+import type {
+  MemberOf,
+  PositionedStreamDefinition,
+  PositionedStoreRestoreSeed,
+  ReducePolicy,
+  ValueOptions,
+} from "aeolia";
+
+type Input = { readonly id: string };
+declare const targetDefinition: PositionedStreamDefinition<
+  Input,
+  number | undefined,
+  string,
+  number,
+  object
+>;
+declare const targetMember: MemberOf<typeof targetDefinition>;
+declare const input: Input;
+declare const policies: readonly [
+  ReducePolicy<number | undefined, number>,
+  ReducePolicy<number | undefined, number>,
+];
+declare const seed: PositionedStoreRestoreSeed<
+  number | undefined,
+  number,
+  readonly [number, number]
+>;
+declare const reader: object;
+const options: ValueOptions<number | undefined> = {
+  initial: 100,
+  equals: (left, right) =>
+    left === undefined || right === undefined
+      ? left === right
+      : Math.floor(left) === Math.floor(right),
+};
+declare const handleEvent: (event: number | undefined) => void;
+
+const restoration = preparePositionedStoreRestore(
+  targetMember,
+  input,
+  policies,
+  seed,
+  reader,
+  options,
+);
+const stop = subscribe(restoration.source, handleEvent);
+restoration.activate();
+stop();
+restoration.discard();
+```
+
+`activate()` enters `opening`, opens the admitted reader once after `seed.after`,
+and returns the same Store. The source is pending while it waits for the first
+genuine suffix event. That event changes its status to `"live"` and ends the
+pending wait. Source failure or completion also ends the wait under the existing
+stream contract. An admitted restored reader enters `failed` and releases its
+reader on any reported gap after `seed.after`, even before the first suffix
+event, while an ordinary unreserved `StreamStore` keeps its existing gap
+behavior. A later `project(restoration.source, policy)` starts from that
+policy's initial state and folds future events. It does not receive the restored
+event or refold the transferred prefix.
+
+Each restoration owns a separate Store identity, session, and reader. Two
+admitted restorations may use the same declaration and logical key without
+sharing their reader. An ordinary member call keeps its existing keyed-cache
+behavior and does not find or join a reader-scoped restoration.
+
+Calling `set` or `update` on the source Store changes its visible value but
+does not emit a positioned event. Such a write cannot advance the source
+position or any projection receipt, and it invalidates the group's continuation
+relation. A later genuine source event can establish a new completed cut.
+Equal-valued source events still advance the native event and fold facts even
+when Store signal equality suppresses a value notification.
+
+Use the positioned checkpoint and your application codec for reader-scoped
+transfer. A reader-scoped Store triggers the existing encoding `Fault` only when
+it would otherwise be included by ordinary snapshot rules: it is not disposed, its
+`snapshot` option is enabled, it has a committed base value, and native transfer
+eligibility allows it. The key-only snapshot format cannot represent its reader
+authority, so an eligible entry fails encoding instead of being flattened into
+a different identity.
+
+A disposed, `snapshot: false`, base-absent, or otherwise ineligible reader Store
+stays excluded under the ordinary rules. It does not block unrelated snapshot
+entries. The `snapshot` option does not add reader authority to the wire format.
+The existing `positionedFoldReceipt` and `acknowledgePositionedFold` functions
+continue to report native successful folds. A capture
+or fold acknowledgement does not report an operation result, complete
+affected-operation coverage, an external commit, or physical retirement. The
+host or provider owns those gates.
+
+`discard()` revokes the group synchronously and releases its reader once. If an
+active iterator has asynchronous cleanup, the original `graph.retire()` or
+`context.retire()` promise joins that work and rejects on cleanup faults. The
+`void` return from `discard()` is not cleanup completion. Cleanup faults remain
+separate from source and projection outcomes. Reset, cancellation, or disposal
+invalidates the one-shot reader. A later continuation requires a fresh provider
+admission.
+
+These APIs support in-memory transfer when the provider admits a target reader.
+They do not enable durable restart or failover recovery. Durable persistence
+remains off unless the application explicitly enables a provider feature for it.
+Reader validation, currentness, acknowledgement, and release callbacks remain
+synchronous local operations. They do not run SQL or publish external state.

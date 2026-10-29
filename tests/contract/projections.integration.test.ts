@@ -8,6 +8,9 @@ import {
   createQuery,
   project,
   projectPositioned,
+  capturePositionedStore,
+  isPositionedStoreCheckpointCurrent,
+  preparePositionedStoreRestore,
   capturePositionedProjection,
   isPositionedCheckpointCurrent,
   preparePositionedRestore,
@@ -25,6 +28,7 @@ import {
   type PositionedStreamOpenOptions,
   type PositionedProjectionCheckpoint,
   type PositionedFoldReceipt,
+  type PositionedStoreRestoreSeed,
 } from "../../src/index.ts";
 import { testBackend, type TestBackend } from "../../src/testing.ts";
 
@@ -1031,6 +1035,359 @@ describe("stream projections", () => {
       stop();
       projection.close();
       graph.dispose();
+    }
+  });
+
+
+  it("captures one Store session across equal source and fold values", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const graph = positionedGraph(stream, "positioned-store-equal-fold");
+    const input = Object.freeze({ room: "one" });
+    const source = graph.api.events(input);
+    const equalPolicy = {
+      kind: "reduce" as const,
+      initial: 10,
+      step: () => 10,
+    };
+    const equalFold = project(source, equalPolicy);
+    let progress!: Projection<number>;
+    let duringEvent: { resumable: boolean } | undefined;
+    progress = project(source, {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (sum: number) => {
+        duringEvent = capturePositionedStore(source, [equalFold, progress] as const);
+        return sum + 1;
+      },
+    });
+    try {
+      const firstProgress = new Promise<void>((resolve) => {
+        let stop = (): void => undefined;
+        stop = subscribe(progress.value, (value) => {
+          if (value !== 1) return;
+          stop();
+          resolve();
+        });
+      });
+      provider.emitLive(input, { position: 5, value: 7 });
+      await firstProgress;
+      expect(duringEvent?.resumable).toBe(false);
+
+      const first = capturePositionedStore(source, [equalFold, progress] as const);
+      if (!first.present || !first.hasPosition || typeof first.position !== "number")
+        throw new Error("The completed Store event did not produce a positioned capture");
+      expect(first.sourceIdentity).toBe(source.identity);
+      expect(first.latest).toBe(7);
+      expect(first.position).toBe(5);
+      expect(first.values).toStrictEqual([10, 1]);
+      expect(first.resumable).toBe(true);
+      expect(isPositionedStoreCheckpointCurrent(first)).toBe(true);
+
+      const secondProgress = new Promise<void>((resolve) => {
+        let stop = (): void => undefined;
+        stop = subscribe(progress.value, (value) => {
+          if (value !== 2) return;
+          stop();
+          resolve();
+        });
+      });
+      provider.emitLive(input, { position: 6, value: 7 });
+      await secondProgress;
+
+      const second = capturePositionedStore(source, [equalFold, progress] as const);
+      if (!second.present || !second.hasPosition || typeof second.position !== "number")
+        throw new Error("The equal-valued event did not advance the Store capture");
+      expect(second.sourceIdentity).toBe(source.identity);
+      expect(second.sessionIdentity).toBe(first.sessionIdentity);
+      expect(second.latest).toBe(first.latest);
+      expect(second.position).toBe(6);
+      expect(second.values[0]).toBe(first.values[0]);
+      expect(second.values[1]).toBe(2);
+      expect(isPositionedStoreCheckpointCurrent(first)).toBe(false);
+      expect(isPositionedStoreCheckpointCurrent(second)).toBe(true);
+
+      const imitation = Object.create(source) as typeof source;
+      expect(() => capturePositionedStore(imitation, [equalFold, progress] as const)).toThrow(
+        TypeError,
+      );
+
+      const foreignInput = Object.freeze({ room: "foreign" });
+      const foreignGraph = positionedGraph(stream, "positioned-store-foreign");
+      const foreignSource = foreignGraph.api.events(foreignInput);
+      const foreignProjection = project(foreignSource, equalPolicy);
+      try {
+        expect(() => capturePositionedStore(source, [equalFold, foreignProjection] as const)).toThrow(
+          TypeError,
+        );
+      } finally {
+        foreignProjection.close();
+        foreignGraph.dispose();
+      }
+    } finally {
+      equalFold.close();
+      progress.close();
+      graph.dispose();
+    }
+  });
+
+  it("marks a genuine Store group nonresumable when a required projection joined after its boundary", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const graph = positionedGraph(stream, "positioned-store-incoherent");
+    const input = Object.freeze({ room: "one" });
+    const source = graph.api.events(input);
+    const firstPolicy = {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (sum: number) => sum + 1,
+    };
+    const first = project(source, firstPolicy);
+    let late: Projection<number> | undefined;
+    try {
+      const firstFold = new Promise<void>((resolve) => {
+        let stop = (): void => undefined;
+        stop = subscribe(first.value, (value) => {
+          if (value !== 1) return;
+          stop();
+          resolve();
+        });
+      });
+      provider.emitLive(input, { position: 9, value: 2 });
+      await firstFold;
+      const lateProjection = project(source, firstPolicy);
+      late = lateProjection;
+
+      const captured = capturePositionedStore(source, [first, lateProjection] as const);
+      expect(captured.present).toBe(true);
+      expect(captured.hasPosition).toBe(true);
+      expect(captured.resumable).toBe(false);
+    } finally {
+      first.close();
+      late?.close();
+      graph.dispose();
+    }
+  });
+
+  it("rejects a Store restore seed whose own latest event field was removed", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const graph = positionedGraph(stream, "positioned-store-seed-presence");
+    const input = Object.freeze({ room: "one" });
+    const source = graph.api.events(input);
+    const policy = {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (sum: number) => sum + 1,
+    };
+    const projection = project(source, policy);
+    let reader: object | undefined;
+    try {
+      const folded = new Promise<void>((resolve) => {
+        let stop = (): void => undefined;
+        stop = subscribe(projection.value, (value) => {
+          if (value !== 1) return;
+          stop();
+          resolve();
+        });
+      });
+      provider.emitLive(input, { position: 5, value: 2 });
+      await folded;
+      const checkpoint = capturePositionedStore(source, [projection] as const);
+      if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
+        throw new Error("The actual Store event did not yield a position");
+      const malformedSeed = {
+        after: checkpoint.position,
+        latest: checkpoint.latest,
+        values: checkpoint.values,
+      };
+      delete (malformedSeed as { latest?: number }).latest;
+      expect(Object.hasOwn(malformedSeed, "latest")).toBe(false);
+      reader = provider.reserve(input, checkpoint.position, undefined, malformedSeed);
+
+      expect(() =>
+        preparePositionedStoreRestore(
+          graph.api.events,
+          input,
+          [policy] as const,
+          malformedSeed,
+          reader!,
+        ),
+      ).toThrow(TypeError);
+      expect(provider.opens).toHaveLength(1);
+      expect(provider.releaseCount(reader)).toBe(0);
+    } finally {
+      projection.close();
+      graph.dispose();
+      if (reader !== undefined && provider.releaseCount(reader) === 0)
+        provider.releaseReader(input, reader);
+    }
+  });
+
+
+  it("rejects overlong accumulated and wrong-count Store seeds with valid provider reservations", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const sourceGraph = positionedGraph(stream, "positioned-store-seed-source");
+    const targetGraph = positionedGraph(stream, "positioned-store-seed-target");
+    const input = Object.freeze({ room: "one" });
+    const source = sourceGraph.api.events(input);
+    const accumulationPolicy: AccumulatePolicy = {
+      kind: "accumulate",
+      max: 1,
+      onOverflow: "drop-oldest",
+    };
+    const countPolicy = {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (count: number) => count + 1,
+    };
+    const accumulation = project(source, accumulationPolicy);
+    const count = project(source, countPolicy);
+    let overlongReader: object | undefined;
+    let wrongCountReader: object | undefined;
+
+    try {
+      const folded = new Promise<void>((resolve) => {
+        let stop = (): void => undefined;
+        stop = subscribe(count.value, (value) => {
+          if (value !== 1) return;
+          stop();
+          resolve();
+        });
+      });
+      provider.emitLive(input, { position: 5, value: 2 });
+      await folded;
+
+      const checkpoint = capturePositionedStore(source, [accumulation, count] as const);
+      if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
+        throw new Error("The actual source Store did not capture its positioned event");
+      const after: number = checkpoint.position;
+      const policies = [accumulationPolicy, countPolicy] as const;
+
+      const overlongSeed = {
+        after,
+        latest: checkpoint.latest,
+        values: [[...checkpoint.values[0], 3], checkpoint.values[1]],
+      } as unknown as PositionedStoreRestoreSeed<
+        number,
+        number,
+        readonly [readonly number[], number]
+      >;
+      overlongReader = provider.reserve(input, after, undefined, overlongSeed);
+      expect(() =>
+        preparePositionedStoreRestore(
+          targetGraph.api.events,
+          input,
+          policies,
+          overlongSeed,
+          overlongReader!,
+        ),
+      ).toThrow(TypeError);
+      expect(provider.opens).toHaveLength(1);
+      expect(provider.releaseCount(overlongReader)).toBe(0);
+      provider.releaseReader(input, overlongReader);
+      expect(provider.releaseCount(overlongReader)).toBe(1);
+
+      const wrongCountSeed = {
+        after,
+        latest: checkpoint.latest,
+        values: [checkpoint.values[0]],
+      } as unknown as PositionedStoreRestoreSeed<
+        number,
+        number,
+        readonly [readonly number[], number]
+      >;
+      wrongCountReader = provider.reserve(input, after, undefined, wrongCountSeed);
+      expect(() =>
+        preparePositionedStoreRestore(
+          targetGraph.api.events,
+          input,
+          policies,
+          wrongCountSeed,
+          wrongCountReader!,
+        ),
+      ).toThrow(TypeError);
+      expect(provider.opens).toHaveLength(1);
+      expect(provider.releaseCount(wrongCountReader)).toBe(0);
+      provider.releaseReader(input, wrongCountReader);
+      expect(provider.releaseCount(wrongCountReader)).toBe(1);
+    } finally {
+      accumulation.close();
+      count.close();
+      sourceGraph.dispose();
+      targetGraph.dispose();
+      if (overlongReader !== undefined && provider.releaseCount(overlongReader) === 0)
+        provider.releaseReader(input, overlongReader);
+      if (wrongCountReader !== undefined && provider.releaseCount(wrongCountReader) === 0)
+        provider.releaseReader(input, wrongCountReader);
+    }
+  });
+
+
+  it("rejects a reader Store equals option that conflicts with its positioned declaration", async () => {
+    const provider = new PositionedProvider();
+    const declaredEquals = (left: number | undefined, right: number | undefined) =>
+      Object.is(left, right);
+    const callerEquals = (left: number | undefined, right: number | undefined) =>
+      left === right;
+    const stream = createPositionedStream<PositionedInput, number, string, number, object>({
+      name: "positioned-store-equals-conflict",
+      key: (input) => input.room,
+      source: provider,
+      equals: declaredEquals,
+    });
+    const sourceGraph = positionedGraph(stream, "positioned-store-equals-source");
+    const targetGraph = positionedGraph(stream, "positioned-store-equals-target");
+    const input = Object.freeze({ room: "one" });
+    const source = sourceGraph.api.events(input);
+    const policy = {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (count: number) => count + 1,
+    };
+    const projection = project(source, policy);
+    let reader: object | undefined;
+
+    try {
+      const folded = new Promise<void>((resolve) => {
+        let stop = (): void => undefined;
+        stop = subscribe(projection.value, (value) => {
+          if (value !== 1) return;
+          stop();
+          resolve();
+        });
+      });
+      provider.emitLive(input, { position: 5, value: 2 });
+      await folded;
+
+      const checkpoint = capturePositionedStore(source, [projection] as const);
+      if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
+        throw new Error("The actual source Store did not capture its positioned event");
+      const after: number = checkpoint.position;
+      const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+      reader = provider.reserve(input, after, undefined, seed);
+
+      expect(() =>
+        preparePositionedStoreRestore(
+          targetGraph.api.events,
+          input,
+          [policy] as const,
+          seed,
+          reader!,
+          { equals: callerEquals },
+        ),
+      ).toThrow(Fault);
+      expect(provider.opens).toHaveLength(1);
+      expect(provider.releaseCount(reader)).toBe(0);
+      provider.releaseReader(input, reader);
+      expect(provider.releaseCount(reader)).toBe(1);
+    } finally {
+      projection.close();
+      sourceGraph.dispose();
+      targetGraph.dispose();
+      if (reader !== undefined && provider.releaseCount(reader) === 0)
+        provider.releaseReader(input, reader);
     }
   });
 

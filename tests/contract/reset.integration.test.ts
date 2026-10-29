@@ -6,6 +6,12 @@ import {
   createQuery,
   createStore,
   createStream,
+  createPositionedStream,
+  createBindingContext,
+  bindStream,
+  capturePositionedStore,
+  isPositionedStoreCheckpointCurrent,
+  preparePositionedStoreRestore,
   defineContract,
   project,
 } from "../../src/contract/index.ts";
@@ -977,6 +983,190 @@ describe("Graph.reset", () => {
 
     stop();
     graph.dispose();
+  });
+
+
+  it("reset invalidates a dormant Store reader and restores its fold seed without reopening it", async () => {
+    type Input = { readonly room: string };
+    type Event = { position: number; value: number };
+    const reservations = new WeakMap<object, { input: Input; after: number; seed: unknown }>();
+    const releases = new WeakMap<object, number>();
+    const openings: Array<{ reader: object | undefined; after: number | undefined }> = [];
+    let emitLive: ((event: Event) => void) | undefined;
+
+    const makeChannel = () => {
+      const queued: Event[] = [];
+      const waiters: Array<(result: IteratorResult<Event>) => void> = [];
+      let ended = false;
+      const emit = (event: Event): void => {
+        if (ended) return;
+        const waiter = waiters.shift();
+        if (waiter !== undefined) waiter({ done: false, value: event });
+        else queued.push(event);
+      };
+      const iterable: AsyncIterable<Event> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              const event = queued.shift();
+              if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
+              if (ended) return Promise.resolve({ done: true as const, value: undefined });
+              return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
+            },
+            return: () => {
+              ended = true;
+              for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+              return Promise.resolve({ done: true as const, value: undefined });
+            },
+          };
+        },
+      };
+      return { iterable, emit };
+    };
+
+    const reserve = (input: Input, after: number, seed: unknown): object => {
+      const reader = Object.freeze({});
+      reservations.set(reader, { input, after, seed });
+      return reader;
+    };
+    const releaseCount = (reader: object): number => releases.get(reader) ?? 0;
+    const releaseReader = (reader: object): void => releases.set(reader, releaseCount(reader) + 1);
+    const stream = createPositionedStream<Input, number, string, number, object>({
+      name: "reset-reader-store",
+      key: (input) => input.room,
+      source: {
+        open: (input, options) => {
+          const channel = makeChannel();
+          openings.push({ reader: options.reader, after: options.after });
+          if (options.reader === undefined) emitLive = channel.emit;
+          return channel.iterable;
+        },
+        validateReader: (input, reader, after, checkpoint, seed) => {
+          const reservation = reservations.get(reader);
+          return (
+            checkpoint === undefined &&
+            reservation !== undefined &&
+            reservation.input === input &&
+            reservation.after === after &&
+            reservation.seed === seed
+          );
+        },
+        isReaderCurrent: (input, reader, after, seed) => {
+          const reservation = reservations.get(reader);
+          return (
+            reservation !== undefined &&
+            reservation.input === input &&
+            reservation.after === after &&
+            reservation.seed === seed
+          );
+        },
+        acknowledge: () => undefined,
+        releaseReader: (_input, reader) => releaseReader(reader),
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "reset-reader-store", operations: { stream } }),
+    });
+    const rawGraph = createGraph({
+      contract: defineContract({ namespace: "reset-reader-store-raw", operations: { stream } }),
+    });
+    const context = createBindingContext(graph);
+    const binding = bindStream(graph, stream, graph.api.stream, { context });
+    const input = Object.freeze({ room: "one" });
+    const source = binding.member(input);
+    const policy = {
+      kind: "reduce" as const,
+      initial: 10,
+      step: (sum: number, event: number) => sum + event,
+    };
+    const projection = project(source, policy);
+    let reader: object | undefined;
+    let rawReader: object | undefined;
+    let readerTransferred = false;
+    let rawReaderTransferred = false;
+
+    try {
+      const folded = new Promise<void>((resolve) => {
+        let stop = (): void => undefined;
+        stop = subscribe(projection.value, (value) => {
+          if (value !== 12) return;
+          stop();
+          resolve();
+        });
+      });
+      if (emitLive === undefined) throw new Error("The real source Store did not open");
+      emitLive({ position: 5, value: 2 });
+      await folded;
+
+      const checkpoint = capturePositionedStore(source, [projection] as const);
+      if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
+        throw new Error("The source did not capture a positioned landing");
+      const after: number = checkpoint.position;
+      const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+      reader = reserve(input, after, seed);
+      rawReader = reserve(input, after, seed);
+      const restoration = preparePositionedStoreRestore(
+        binding,
+        input,
+        [policy] as const,
+        seed,
+        reader,
+        { initial: 99 },
+      );
+      readerTransferred = true;
+      const rawRestoration = preparePositionedStoreRestore(
+        rawGraph.api.stream,
+        input,
+        [policy] as const,
+        seed,
+        rawReader,
+        { initial: 99 },
+      );
+      rawReaderTransferred = true;
+      const restoredSession = binding.session(restoration.source);
+      expect(restoration.source.available.get()).toBe(true);
+      expect(restoration.source.value.get()).toBe(2);
+      expect(restoration.projections[0].value.get()).toBe(12);
+      expect(rawRestoration.source.available.get()).toBe(true);
+      expect(rawRestoration.source.value.get()).toBe(2);
+      expect(rawRestoration.projections[0].value.get()).toBe(12);
+      expect(openings).toHaveLength(1);
+
+      await graph.reset();
+      const detached = await restoredSession.detached;
+
+      expect(openings).toHaveLength(1);
+      expect(detached.status).toBe("closed");
+      expect(detached.terminalCapture).toMatchObject({
+        kind: "captured",
+        capture: { kind: "stable", present: true, value: 2 },
+      });
+      expect(restoration.source.available.get()).toBe(true);
+      expect(restoration.source.value.get()).toBe(2);
+      expect(restoration.source.status.get()).toBe("closed");
+      expect(restoration.source.pending.get()).toBe(false);
+      expect(restoration.projections[0].value.get()).toBe(10);
+      expect(isPositionedStoreCheckpointCurrent(checkpoint)).toBe(false);
+      expect(releaseCount(reader)).toBe(1);
+      expect(() => restoration.activate()).toThrow(TypeError);
+
+      await rawGraph.reset();
+      expect(rawRestoration.source.available.get()).toBe(true);
+      expect(rawRestoration.source.value.get()).toBe(99);
+      expect(rawRestoration.projections[0].value.get()).toBe(10);
+      expect(releaseCount(rawReader)).toBe(1);
+      expect(() => rawRestoration.activate()).toThrow(TypeError);
+      expect(openings).toHaveLength(1);
+    } finally {
+      if (reader !== undefined && !readerTransferred && releaseCount(reader) === 0)
+        releaseReader(reader);
+      if (rawReader !== undefined && !rawReaderTransferred && releaseCount(rawReader) === 0)
+        releaseReader(rawReader);
+      projection.close();
+      context.dispose();
+      graph.dispose();
+      rawGraph.dispose();
+    }
   });
 
   it("clears retained values and errors from terminal projections without reopening them", async () => {

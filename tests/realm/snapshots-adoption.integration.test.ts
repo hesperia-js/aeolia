@@ -10,6 +10,10 @@ import {
   createQuery,
   createStore,
   createStream,
+  createPositionedStream,
+  capturePositionedStore,
+  preparePositionedStoreRestore,
+  project,
   affects,
   snapshot,
   observeStore,
@@ -824,3 +828,190 @@ it.each([false, true])(
     }
   },
 );
+
+it("refuses generic snapshots for multiple reader-scoped Stores sharing one logical key", async () => {
+  type Input = { readonly room: string };
+  type Event = { position: number; value: number };
+  type Reservation = { input: Input; after: number; seed: unknown };
+  const reservations = new WeakMap<object, Reservation>();
+  const liveEmitters = new Map<string, (event: Event) => void>();
+  const openings: Array<{ room: string; reader: object | undefined }> = [];
+
+  const makeChannel = () => {
+    const queued: Event[] = [];
+    const waiters: Array<(result: IteratorResult<Event>) => void> = [];
+    let ended = false;
+    const emit = (event: Event): void => {
+      if (ended) return;
+      const waiter = waiters.shift();
+      if (waiter !== undefined) waiter({ done: false, value: event });
+      else queued.push(event);
+    };
+    const iterable: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => {
+            const event = queued.shift();
+            if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
+            if (ended) return Promise.resolve({ done: true as const, value: undefined });
+            return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
+          },
+          return: () => {
+            ended = true;
+            for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+            return Promise.resolve({ done: true as const, value: undefined });
+          },
+        };
+      },
+    };
+    return { iterable, emit };
+  };
+  const reserve = (input: Input, after: number, seed: unknown): object => {
+    const reader = Object.freeze({});
+    reservations.set(reader, { input, after, seed });
+    return reader;
+  };
+
+  const stream = createPositionedStream<Input, number, string, number, object>({
+    name: "realm-reader-store",
+    key: (input) => input.room,
+    source: {
+      open: (input, options) => {
+        const channel = makeChannel();
+        openings.push({ room: input.room, reader: options.reader });
+        if (options.reader === undefined) liveEmitters.set(input.room, channel.emit);
+        return channel.iterable;
+      },
+      validateReader: (input, reader, after, checkpoint, seed) => {
+        const reservation = reservations.get(reader);
+        return (
+          checkpoint === undefined &&
+          reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
+      },
+      isReaderCurrent: (input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        return (
+          reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
+      },
+      acknowledge: () => undefined,
+      releaseReader: () => undefined,
+    },
+  });
+  const makeGraph = (namespace: string) =>
+    createGraph({ contract: { namespace, operations: { events: stream } } });
+  const sourceGraph = makeGraph("realm-reader-source");
+  const targetGraph = makeGraph("realm-reader-target");
+  const input = Object.freeze({ room: "one" });
+  const source = sourceGraph.api.events(input);
+  const policy = {
+    kind: "reduce" as const,
+    initial: 0,
+    step: (sum: number, event: number) => sum + event,
+  };
+  const projection = project(source, policy);
+  let firstDiscard: (() => void) | undefined;
+  let secondDiscard: (() => void) | undefined;
+
+  try {
+    const folded = new Promise<void>((resolve) => {
+      let stop = (): void => undefined;
+      stop = subscribe(projection.value, (value) => {
+        if (value !== 5) return;
+        stop();
+        resolve();
+      });
+    });
+    const emit = liveEmitters.get(input.room);
+    if (emit === undefined) throw new Error("The source Store did not open");
+    emit({ position: 5, value: 5 });
+    await folded;
+
+    const checkpoint = capturePositionedStore(source, [projection] as const);
+    if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
+      throw new Error("The actual source Store has no positioned landing");
+    const after: number = checkpoint.position;
+    const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+    const firstReader = reserve(input, after, seed);
+    const secondReader = reserve(input, after, seed);
+    const first = preparePositionedStoreRestore(
+      targetGraph.api.events,
+      input,
+      [policy] as const,
+      seed,
+      firstReader,
+    );
+    const second = preparePositionedStoreRestore(
+      targetGraph.api.events,
+      input,
+      [policy] as const,
+      seed,
+      secondReader,
+    );
+    firstDiscard = () => first.discard();
+    secondDiscard = () => second.discard();
+
+    expect(first.source.identity).not.toBe(second.source.identity);
+    expect(openings).toHaveLength(1);
+    let v1Fault: unknown;
+    try {
+      snapshot(targetGraph);
+    } catch (error) {
+      v1Fault = error;
+    }
+    expect(v1Fault).toBeInstanceOf(Fault);
+    expect(v1Fault).toMatchObject({ kind: "encoding" });
+
+    let v2Fault: unknown;
+    try {
+      snapshot(targetGraph, { version: 2 });
+    } catch (error) {
+      v2Fault = error;
+    }
+    expect(v2Fault).toBeInstanceOf(Fault);
+    expect(v2Fault).toMatchObject({ kind: "encoding" });
+    expect(openings).toHaveLength(1);
+
+    const ordinary = createStore({ name: "ordinary", initial: 7, snapshot: true });
+    const excludedGraph = createGraph({
+      contract: {
+        namespace: "realm-reader-snapshot-excluded",
+        operations: { events: stream, ordinary },
+      },
+    });
+    const ordinaryStore = excludedGraph.api.ordinary();
+    const excludedReader = reserve(input, after, seed);
+    const excluded = preparePositionedStoreRestore(
+      excludedGraph.api.events,
+      input,
+      [policy] as const,
+      seed,
+      excludedReader,
+      { snapshot: false },
+    );
+    try {
+      const v1 = snapshot(excludedGraph);
+      expect(Object.keys(v1.entries)).toEqual([String(ordinaryStore.key)]);
+      const v2 = snapshot(excludedGraph, { version: 2 });
+      expect(v2.entries).toHaveLength(1);
+      expect(openings).toHaveLength(1);
+    } finally {
+      excluded.discard();
+      excludedGraph.dispose();
+    }
+  } finally {
+    firstDiscard?.();
+    secondDiscard?.();
+    projection.close();
+    sourceGraph.dispose();
+    targetGraph.dispose();
+  }
+});
+

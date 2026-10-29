@@ -8,12 +8,12 @@ import type {
 import { Fault } from "../fault.ts";
 import { nextValueRevision } from "./identity.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
-import type { BoundStreamSessionRuntime, Prediction, StoreRuntime } from "./runtime.ts";
+import type { BoundStreamSessionRuntime, Prediction, StoreRuntime, StreamSession } from "./runtime.ts";
 import { scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
 import { assertStoreOpen, graphFault } from "./faults.ts";
 
-import { beginBindingAddress, changeBoundAddress, endBindingAddress } from "./registry.ts";
+import { beginStoreAddress, changeBoundAddress, endStoreAddress } from "./registry.ts";
 
 /** @internal Checks the exact next authority without changing native state. */
 export function nextGeneration(current: number, minimum = current): Generation {
@@ -51,10 +51,11 @@ export function recordLanding<T>(
   value: T,
   landingGeneration?: number,
   expectedSession?: BoundStreamSessionRuntime<T>,
+  expectedPositionedSession?: StreamSession<T>,
 ): void {
   assertStoreOpen(runtime);
   const revision = nextValueRevision(runtime.valueRevision);
-  const addressWrite = beginBindingAddress(runtime.binding, String(runtime.key));
+  const addressWrite = beginStoreAddress(runtime);
   try {
     if (runtime.incarnation === undefined) runtime.incarnation = {};
     const incarnation = runtime.incarnation;
@@ -76,7 +77,12 @@ export function recordLanding<T>(
             (expectedSession.phase === "active" &&
               !expectedSession.session.ended &&
               runtime.stream?.token === expectedSession.session.token &&
-              runtime.incarnation === expectedSession.incarnation)),
+              runtime.incarnation === expectedSession.incarnation)) &&
+          (expectedPositionedSession === undefined ||
+            (runtime.stream === expectedPositionedSession &&
+              !expectedPositionedSession.ended &&
+              runtime.streamToken === expectedPositionedSession.token &&
+              expectedPositionedSession.resetEpoch === epoch)),
         () => {
           runtime.valueRevision = revision;
           runtime.importedBaseline = undefined;
@@ -89,6 +95,19 @@ export function recordLanding<T>(
           runtime.invalidated = false;
           runtime.refreshOnActivation = false;
           runtime.dropped = false;
+          const positioned = runtime.stream?.positioned;
+          if (positioned !== undefined) {
+            positioned.baseRevision = revision;
+            if (expectedPositionedSession === runtime.stream && positioned.dispatch !== undefined) {
+              positioned.dispatch.landingRevision = revision;
+              positioned.diverged = !expectedPositionedSession.hasPosition;
+            } else if (
+              expectedPositionedSession === runtime.stream &&
+              positioned.phase === "dormant" &&
+              positioned.reader !== undefined
+            ) positioned.diverged = false;
+            else positioned.diverged = true;
+          }
           runtime.errorCell.set(undefined);
           runtime.presence.set(true);
         },
@@ -104,7 +123,7 @@ export function recordLanding<T>(
       writeAllStatuses(runtime, Date.now(), landingGeneration);
     });
   } finally {
-    endBindingAddress(runtime.binding, String(runtime.key), addressWrite);
+    endStoreAddress(runtime, addressWrite);
   }
 }
 
@@ -117,7 +136,7 @@ export function publishObservation<T>(
 ): boolean {
   const before = runtime.valueRevision;
   const next = nextValueRevision(before);
-  const addressWrite = beginBindingAddress(runtime.binding, String(runtime.key));
+  const addressWrite = beginStoreAddress(runtime);
   try {
     let committed = false;
     reactiveInternal.batch(() => {
@@ -137,7 +156,7 @@ export function publishObservation<T>(
     });
     return committed;
   } finally {
-    endBindingAddress(runtime.binding, String(runtime.key), addressWrite);
+    endStoreAddress(runtime, addressWrite);
   }
 }
 

@@ -2,6 +2,7 @@ import type {
   OpenOptions,
   Readable,
   NativeStreamDefinition,
+  PositionedStreamDefinition,
   StreamStore,
   ValueOptions,
   ValueRevision,
@@ -14,8 +15,10 @@ import type {
   StreamSession,
   StoreRuntime,
   GraphRuntimeState,
+  PositionedStoreSessionState,
+  PositionedStoreCompletedEvent,
 } from "./runtime.ts";
-import { assertGraphOpen, graphFault, reportContinuationError } from "./faults.ts";
+import { AbortError, assertGraphOpen, graphFault, reportContinuationError } from "./faults.ts";
 import { nextValueRevision, storeKey } from "./identity.ts";
 import { configureKeyedValue, issue, nextGeneration, recordLanding } from "./store-state.ts";
 import {
@@ -23,6 +26,7 @@ import {
   admitStore,
   directWrite,
   getOrCreateStore,
+  makeStore,
   observeStoreReadable,
 } from "./store.ts";
 import {
@@ -35,7 +39,11 @@ import {
 } from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
 import { publishStreamEvent } from "./stream-events.ts";
-import { positionedPositionWriterByOpenOptions } from "./registry.ts";
+import {
+  positionedOpenRequestByOpenOptions,
+  positionedPositionWriterByOpenOptions,
+  positionedStreamSourceByDefinition,
+} from "./registry.ts";
 import {
   assertBindingContextOpen,
   boundStreamByStore,
@@ -43,6 +51,8 @@ import {
   changeBoundAddress,
   beginBindingAddress,
   endBindingAddress,
+  beginStoreAddress,
+  endStoreAddress,
   runtimeByStore,
 } from "./registry.ts";
 import { importedBaselineCurrent, reserveBoundStreamAddress } from "./binding-address.ts";
@@ -98,17 +108,43 @@ export async function consumeStream<T>(
   if (iterator === undefined) return;
   try {
     while (!session.ended) {
+      const positioned = session.positioned;
+      if (positioned !== undefined) {
+        positioned.pendingPosition = undefined;
+        positioned.hasPendingPosition = false;
+      }
       const result = await iterator.next();
       if (!isCurrentSession(runtime, session)) return;
       if (result.done) {
+        if (positioned !== undefined) {
+          positioned.pendingPosition = undefined;
+          positioned.hasPendingPosition = false;
+        }
         endStream(runtime, session, "closed");
         return;
+      }
+      let event = positioned?.dispatch;
+      if (positioned !== undefined) {
+        const hasPosition = positioned.hasPendingPosition;
+        const position = positioned.pendingPosition;
+        positioned.pendingPosition = undefined;
+        positioned.hasPendingPosition = false;
+        session.hasPosition = hasPosition;
+        if (hasPosition) session.position = position;
+        event = {
+          identity: Object.freeze({}),
+          ordinal: positioned.nextOrdinal++,
+          position: hasPosition ? position : undefined,
+          latest: result.value,
+        };
+        positioned.dispatch = event;
+        positioned.diverged = !hasPosition;
       }
       issue(runtime);
       session.emitted = true;
       try {
         reactiveInternal.batch(() =>
-          recordLanding(runtime, result.value, undefined, session.bound),
+          recordLanding(runtime, result.value, undefined, session.bound, session),
         );
       } catch (error) {
         if (isCurrentSession(runtime, session))
@@ -129,12 +165,24 @@ export async function consumeStream<T>(
         if (isCurrentSession(runtime, session))
           reportContinuationError(runtime.graph.__runtime, error);
       }
+      if (positioned !== undefined && positioned.dispatch === event) {
+        const landingRevision = event?.landingRevision;
+        const coherent =
+          event !== undefined &&
+          session.hasPosition &&
+          landingRevision !== undefined &&
+          positioned.baseRevision === landingRevision &&
+          !positioned.diverged;
+        if (coherent) {
+          positioned.completed = Object.freeze(event) as PositionedStoreCompletedEvent;
+        } else positioned.diverged = true;
+        positioned.dispatch = undefined;
+      }
     }
   } catch (error) {
     if (isCurrentSession(runtime, session)) failStream(runtime, session, error);
   }
 }
-
 export function openStream<T>(
   runtime: StoreRuntime<T>,
   stream: NativeStreamDefinition<any, T, any, any, any>,
@@ -197,6 +245,35 @@ export function openStream<T>(
   }
 }
 
+function ensurePositionedStoreState<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+  stream: NativeStreamDefinition<any, T, any, any, any>,
+  input: unknown,
+): PositionedStoreSessionState<T> | undefined {
+  if (session.positioned !== undefined) return session.positioned;
+  if (stream.kind !== "positioned-stream") return undefined;
+  const definition = stream as PositionedStreamDefinition<any, T, any, any, any>;
+  const provider = positionedStreamSourceByDefinition.get(definition);
+  const member = session.bound?.binding.handle ?? runtime.streamSource?.member;
+  if (provider === undefined || member === undefined) return undefined;
+  const positioned: PositionedStoreSessionState<T> = {
+    runtime,
+    definition,
+    provider,
+    input,
+    member,
+    ...(session.bound === undefined ? {} : { binding: session.bound.binding }),
+    phase: "active",
+    nextOrdinal: 0,
+    hasPendingPosition: false,
+    diverged: false,
+    participants: new Set(),
+  };
+  session.positioned = positioned;
+  return positioned;
+}
+
 function driveStreamSource<T>(
   runtime: StoreRuntime<T>,
   session: StreamSession<T>,
@@ -207,6 +284,7 @@ function driveStreamSource<T>(
   rawRemoveAbort?: () => void,
 ): void {
   const state = runtime.graph.__runtime;
+  ensurePositionedStoreState(runtime, session, stream, input);
   let observed = false;
   try {
     const controller = session.controller;
@@ -256,6 +334,7 @@ function driveStreamSource<T>(
       controller.signal.addEventListener("abort", closeOnAbort, { once: true });
     };
     if (session.bound !== undefined) {
+      const callerAlreadyAttached = session.removeCallerAbort !== undefined;
       let linked = false;
       const abort = (): void => controller.abort(abortSignal?.reason);
       const unlinkCaller = (): void => {
@@ -263,10 +342,10 @@ function driveStreamSource<T>(
         linked = false;
         abortSignal.removeEventListener("abort", abort);
       };
-      session.removeCallerAbort = unlinkCaller;
+      if (!callerAlreadyAttached) session.removeCallerAbort = unlinkCaller;
       try {
         attachController();
-        if (abortSignal !== undefined) {
+        if (abortSignal !== undefined && !callerAlreadyAttached) {
           const aborted = abortSignal.aborted;
           if (!isCurrentSession(runtime, session)) {
             removeAbort();
@@ -318,6 +397,12 @@ function driveStreamSource<T>(
         key,
         reportGap: () => {
           if (!isCurrentSession(runtime, session)) return;
+          const positioned = session.positioned;
+          if (positioned !== undefined) positioned.diverged = true;
+          if (positioned?.reader?.owned) {
+            failStream(runtime, session, new Error("Positioned Store reader reported a history gap"));
+            return;
+          }
           publishStreamEvent(runtime, session, { kind: "gap" });
           if (!isCurrentSession(runtime, session) || !session.emitted) return;
           runtime.invalidated = true;
@@ -332,9 +417,22 @@ function driveStreamSource<T>(
         },
       };
       positionedPositionWriterByOpenOptions.set(sourceOptions, (position) => {
-        session.position = position;
-        session.hasPosition = true;
+        if (session.positioned?.phase === "closed" || session.ended) return;
+        const positioned = session.positioned;
+        if (positioned === undefined) {
+          session.position = position;
+          session.hasPosition = true;
+          return;
+        }
+        positioned.pendingPosition = position;
+        positioned.hasPendingPosition = true;
       });
+      const positionedReader = session.positioned?.reader;
+      if (positionedReader !== undefined)
+        positionedOpenRequestByOpenOptions.set(sourceOptions, {
+          after: positionedReader.after,
+          reader: positionedReader.reader,
+        });
       iterable = Reflect.apply(open, stream, [input, sourceOptions]);
     } catch (cause) {
       removeAbort();
@@ -565,13 +663,13 @@ function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): S
       reactiveInternal.assertWritesAllowed(runtime.committed);
       nextValueRevision(runtime.valueRevision);
       nextGeneration(runtime.generation);
-      const write = beginBindingAddress(bound.binding, String(runtime.key));
+      const write = beginStoreAddress(runtime);
       try {
         const value = next(reactiveInternal.signalValue(runtime.committed));
         assertBoundSession(bound);
         directWrite(runtime, value, bound);
       } finally {
-        endBindingAddress(bound.binding, String(runtime.key), write);
+        endStoreAddress(runtime, write);
       }
     },
   };
@@ -750,6 +848,29 @@ function boundMember<T>(
   }
 }
 
+function rawStreamWrapper<T>(
+  runtime: StoreRuntime<T>,
+  stream: NativeStreamDefinition<any, T, any, any, any>,
+): StreamStore<T> {
+  const state = runtime.graph.__runtime;
+  const status = runtime.streamStatus;
+  const pending = computed(() => status.get() === "opening", {
+    label: `stream:${stream.name}:${String(runtime.key)}:pending`,
+  });
+  const streamStore = Object.create(runtime.store) as StreamStore<T>;
+  Object.assign(streamStore, { pending, error: runtime.error, status });
+  Object.freeze(streamStore);
+  runtimeByStore.set(streamStore, runtime as StoreRuntime<unknown>);
+  observeStoreReadable(runtime, status);
+  observeStoreReadable(runtime, pending);
+  reactiveInternal.bindReadable(pending, {
+    graphId: state.graph.id,
+    reportFault: (fault) => graphFault(state, fault),
+  });
+  touch(runtime);
+  return streamStore;
+}
+
 export function streamMember<T>(
   state: GraphRuntimeState<any>,
   stream: NativeStreamDefinition<any, T, any, any, any>,
@@ -791,24 +912,257 @@ export function streamMember<T>(
       };
       openStream(runtime, stream, input, key, abortSignal);
     }
-    const status = runtime.streamStatus;
-    const pending = computed(() => status.get() === "opening", {
-      label: `stream:${stream.name}:${String(key)}:pending`,
-    });
-    const streamStore = Object.create(runtime.store) as StreamStore<T>;
-    Object.assign(streamStore, { pending, error: runtime.error, status });
-    Object.freeze(streamStore);
-    runtimeByStore.set(streamStore, runtime as StoreRuntime<unknown>);
-
-    observeStoreReadable(runtime, status);
-    observeStoreReadable(runtime, pending);
-    reactiveInternal.bindReadable(pending, {
-      graphId: state.graph.id,
-      reportFault: (fault) => graphFault(state, fault),
-    });
-    touch(runtime);
-    return streamStore;
+    return rawStreamWrapper(runtime, stream);
   } finally {
     finishPhysicalWork(acquisition);
   }
+}
+
+
+/** @internal Issues a private Store/session pair for one admitted positioned reader. */
+export function createPositionedStoreSession<T>(
+  state: GraphRuntimeState<any>,
+  definition: PositionedStreamDefinition<any, T, any, any, any>,
+  input: unknown,
+  key: ReturnType<typeof storeKey>,
+  member: object,
+  binding: StreamBindingRuntime | undefined,
+  after: unknown,
+  latest: T,
+  reader: unknown,
+  seed: unknown,
+  options?: ValueOptions<T>,
+): StreamStore<T> {
+  if (binding !== undefined) assertBindingContextOpen(binding.context);
+  else assertGraphOpen(state);
+  if (options !== undefined && !isValueOptions(options))
+    throw new TypeError("Invalid positioned Store value options");
+  const runtime = makeStore<T>(state, key, undefined, binding);
+  let session: StreamSession<T> | undefined;
+  const ownAddress =
+    binding === undefined
+      ? undefined
+      : {
+          binding,
+          key: String(key),
+          operations: new Set<object>(),
+          guard: {},
+        };
+  try {
+    runtime.incarnation = {};
+    runtime.dropped = false;
+    runtime.streamSource = {
+      stream: definition,
+      input,
+      member,
+      ...(options?.abortSignal === undefined ? {} : { abortSignal: options.abortSignal }),
+    };
+    state.stores.set(runtime.identity, runtime as StoreRuntime<unknown>);
+    if (binding !== undefined) {
+      const readerStores = binding.readerStores ?? new Set<StoreRuntime<unknown>>();
+      binding.readerStores = readerStores;
+      readerStores.add(runtime as StoreRuntime<unknown>);
+      session = installBoundSession(runtime, binding);
+    } else {
+      const physical = beginPhysicalWork(state.retirement, "stream");
+      session = {
+        physical,
+        controller: new AbortController(),
+        token: {},
+        resetEpoch: state.resetEpoch,
+        listeners: new Set(),
+        hasPosition: false,
+        ended: false,
+        emitted: false,
+        unobservedSince: Date.now(),
+      };
+      runtime.stream = session;
+      runtime.streamToken = session.token;
+      state.activeControllers.add(session.controller);
+    }
+    runtime.readerScope = {
+      session,
+      ...(ownAddress === undefined ? {} : { address: ownAddress }),
+    };
+    const provider = positionedStreamSourceByDefinition.get(definition);
+    if (provider === undefined) throw new TypeError("Positioned source provider is not registered");
+    const lease = { reader, after, seed, owned: false, released: false };
+    session.positioned = {
+      runtime,
+      definition,
+      provider,
+      input,
+      member,
+      ...(binding === undefined ? {} : { binding }),
+      phase: "dormant",
+      nextOrdinal: 1,
+      hasPendingPosition: false,
+      completed: undefined,
+      diverged: false,
+      participants: new Set(),
+      reader: lease,
+    };
+    changeBoundAddress(runtime);
+    configureKeyedValue(runtime, definition, options, session.bound, false, false);
+    admitStore(runtime);
+    recordLanding(runtime, latest, undefined, session.bound, session);
+    session.position = after;
+    session.hasPosition = true;
+    session.emitted = true;
+    const completed: PositionedStoreCompletedEvent = Object.freeze({
+      identity: Object.freeze({}),
+      ordinal: 0,
+      position: after,
+      latest,
+      landingRevision: runtime.valueRevision,
+    });
+    session.positioned.completed = completed;
+    session.positioned.baseRevision = runtime.valueRevision;
+    session.positioned.diverged = false;
+    return binding === undefined
+      ? rawStreamWrapper(runtime, definition)
+      : boundWrapper(runtime, session);
+  } catch (error) {
+    if (session !== undefined && !session.ended) {
+      try {
+        endStream(runtime, session, "closed");
+      } catch (cleanupError) {
+        reportContinuationError(state, cleanupError);
+      }
+    }
+    if (binding?.readerStores !== undefined)
+      binding.readerStores.delete(runtime as StoreRuntime<unknown>);
+    runtime.disposed = true;
+    state.stores.delete(runtime.identity);
+    changeBoundAddress(runtime);
+    throw error;
+  }
+}
+
+/** @internal Installs caller cancellation on the staged native reader session. */
+export function attachPositionedStoreAbort<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+  signal: AbortSignal | undefined,
+): void {
+  if (signal === undefined) return;
+  let attached = false;
+  const abort = (): void => {
+    try {
+      session.controller.abort(signal.reason);
+    } catch (error) {
+      reportContinuationError(runtime.graph.__runtime, error);
+    }
+    if (session.ended) return;
+    try {
+      endStream(runtime, session, "closed", undefined, { abortReason: signal.reason });
+    } catch (error) {
+      reportContinuationError(runtime.graph.__runtime, error);
+    }
+  };
+  const remove = (): void => {
+    if (!attached) return;
+    attached = false;
+    signal.removeEventListener("abort", abort);
+  };
+  const aborted = signal.aborted;
+  if (aborted) {
+    abort();
+    throw new AbortError("Positioned Store caller signal aborted before reader ownership");
+  }
+  attached = true;
+  try {
+    signal.addEventListener("abort", abort, { once: true });
+  } catch (error) {
+    try {
+      remove();
+    } catch (cleanupError) {
+      reportContinuationError(runtime.graph.__runtime, cleanupError);
+    }
+    throw error;
+  }
+  if (
+    signal.aborted ||
+    session.ended ||
+    runtime.stream !== session ||
+    session.resetEpoch !== runtime.graph.__runtime.resetEpoch ||
+    runtime.graph.__runtime.disposed ||
+    runtime.binding?.context.disposed === true
+  ) {
+    const isAborted = signal.aborted;
+    try {
+      remove();
+    } catch (error) {
+      reportContinuationError(runtime.graph.__runtime, error);
+    }
+    if (isAborted && !session.ended) abort();
+    throw new AbortError("Positioned Store caller cancellation interrupted reader staging");
+  }
+  session.removeCallerAbort = remove;
+}
+
+/** @internal Activates a prepared reader on its already-issued Store session. */
+export function activatePositionedStoreSession<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+): void {
+  const positioned = session.positioned;
+  const reader = positioned?.reader;
+  if (
+    positioned === undefined ||
+    reader === undefined ||
+    !reader.owned ||
+    reader.released ||
+    positioned.phase !== "dormant" ||
+    session.ended ||
+    runtime.stream !== session ||
+    !sameSessionEpoch(runtime, session)
+  )
+    throw new TypeError("Positioned Store reader session is no longer current");
+  const admittedEvent = positioned.completed;
+  if (positioned.provider.isReaderCurrent(
+    positioned.input,
+    reader.reader,
+    reader.after,
+    reader.seed,
+  ) !== true)
+    throw new TypeError("Positioned Store reader reservation is no longer current");
+  if (
+    positioned.phase !== "dormant" ||
+    session.ended ||
+    runtime.stream !== session ||
+    session.resetEpoch !== runtime.graph.__runtime.resetEpoch ||
+    runtime.graph.__runtime.disposed ||
+    runtime.binding?.context.disposed === true ||
+    positioned.reader !== reader ||
+    !reader.owned ||
+    reader.released ||
+    positioned.diverged ||
+    positioned.completed !== admittedEvent ||
+    admittedEvent === undefined ||
+    positioned.baseRevision !== admittedEvent.landingRevision ||
+    reactiveInternal.signalValue(runtime.predictionStack).some((prediction) => !prediction.dead) ||
+    [...positioned.participants].some(
+      (participant) => participant.failed || participant.event !== admittedEvent,
+    )
+  )
+    throw new TypeError("Positioned Store reader changed during activation validation");
+  const abortSignal = runtime.streamSource?.abortSignal;
+  if (
+    session.ended ||
+    runtime.stream !== session ||
+    positioned.phase !== "dormant" ||
+    positioned.reader !== reader ||
+    reader.released
+  )
+    throw new TypeError("Positioned Store session changed before activation");
+  positioned.phase = "active";
+  driveStreamSource(
+    runtime,
+    session,
+    positioned.definition,
+    positioned.input,
+    runtime.key as ReturnType<typeof storeKey>,
+    abortSignal,
+  );
 }

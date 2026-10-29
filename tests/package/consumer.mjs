@@ -6,8 +6,12 @@ import {
   inspectBoundAddress as rootInspectBoundAddress,
   createGraph,
   createPositionedStream,
+  project,
   projectPositioned,
   capturePositionedProjection,
+  capturePositionedStore,
+  isPositionedStoreCheckpointCurrent,
+  preparePositionedStoreRestore,
   preparePositionedSeedRestore,
   positionedFoldReceipt,
   acknowledgePositionedFold,
@@ -64,6 +68,7 @@ export async function verifyConsumer() {
   await verifyBoundStreamConsumer();
   await verifyAcquisitionConsumer();
   await verifyPositionedConsumer();
+  await verifyPositionedStoreConsumer();
   const count = signal(2);
   const doubled = computed(() => count.get() * 2);
   const signalValues = [];
@@ -397,6 +402,306 @@ async function verifyPositionedConsumer() {
     graphB.dispose();
   }
 }
+function waitForPositionedStoreValue(source, predicate) {
+  let stop = () => {};
+  let matched = false;
+  let resolveValue;
+  const result = new Promise((resolve) => {
+    resolveValue = resolve;
+  });
+  const unsubscribe = subscribe(source, (value) => {
+    if (matched || !predicate(value)) return;
+    matched = true;
+    stop();
+    resolveValue(value);
+  });
+  stop = unsubscribe;
+  if (matched) stop();
+  return result;
+}
+
+async function verifyPositionedStoreConsumer() {
+  const providerA = new ConsumerPositionedSource();
+  const definitionA = createPositionedStream({
+    name: "positioned.store.consumer",
+    key: (input) => input.id,
+    source: providerA,
+  });
+  const graphA = createGraph({
+    contract: defineContract({
+      namespace: "positioned-store-consumer-a",
+      operations: { events: definitionA },
+    }),
+  });
+  const inputA = { id: "one" };
+  let sourceA;
+  const sourceValuesA = [];
+  let stopSourceA = () => {};
+  let totalStepsA = 0;
+  let countStepsA = 0;
+  let totalA;
+  let countA;
+  let graphB;
+  let restoration;
+  let stopSourceB = () => {};
+  try {
+    sourceA = graphA.api.events(inputA);
+    stopSourceA = subscribe(sourceA, (value) => sourceValuesA.push(value));
+    totalA = project(sourceA, {
+      kind: "reduce",
+      initial: 0,
+      step: (total, event) => {
+        totalStepsA += 1;
+        return total + (event ?? 0);
+      },
+    });
+    countA = project(sourceA, {
+      kind: "reduce",
+      initial: 0,
+      step: (count) => {
+        countStepsA += 1;
+        return count + 1;
+      },
+    });
+    check(
+      providerA.opens.length === 1 && !providerA.opens[0].hasAfter && !providerA.opens[0].hasReader,
+      "The live positioned Store did not open one unreserved source",
+    );
+
+    const firstSourceValue = waitForPositionedStoreValue(sourceA, (value) => value === 2);
+    const firstTotal = waitForPositionedValue(totalA, (value) => value === 2);
+    const firstCount = waitForPositionedValue(countA, (value) => value === 1);
+    providerA.emitLive(inputA, { position: 2, value: 2 });
+    await Promise.all([firstSourceValue, firstTotal, firstCount]);
+
+    const secondSourceValue = waitForPositionedStoreValue(sourceA, (value) => value === 5);
+    const secondTotal = waitForPositionedValue(totalA, (value) => value === 7);
+    const secondCount = waitForPositionedValue(countA, (value) => value === 2);
+    providerA.emitLive(inputA, { position: 5, value: 5 });
+    await Promise.all([secondSourceValue, secondTotal, secondCount]);
+
+    const undefinedSourceValue = waitForPositionedStoreValue(
+      sourceA,
+      (value) => value === undefined,
+    );
+    const thirdCount = waitForPositionedValue(countA, (value) => value === 3);
+    providerA.emitLive(inputA, { position: 7, value: undefined });
+    await Promise.all([undefinedSourceValue, thirdCount]);
+
+    check(
+      sourceA.available.get() &&
+        sourceA.value.get() === undefined &&
+        sourceValuesA.length === 3 &&
+        sourceValuesA[0] === 2 &&
+        sourceValuesA[1] === 5 &&
+        sourceValuesA[2] === undefined,
+      "The source Store did not retain and publish its present undefined event",
+    );
+
+    const checkpoint = capturePositionedStore(sourceA, [totalA, countA]);
+    check(
+      checkpoint.present &&
+        Object.hasOwn(checkpoint, "latest") &&
+        checkpoint.latest === undefined &&
+        checkpoint.hasPosition &&
+        checkpoint.position === 7 &&
+        checkpoint.resumable &&
+        checkpoint.sessionIdentity !== undefined &&
+        checkpoint.sourceIdentity === sourceA.identity,
+      "The positioned Store capture lost its actual source event or session facts",
+    );
+    check(
+      checkpoint.values[0] === 7 &&
+        checkpoint.values[1] === 3 &&
+        totalStepsA === 3 &&
+        countStepsA === 3,
+      "The captured fold tuple did not match the source's completed event cut",
+    );
+    check(
+      isPositionedStoreCheckpointCurrent(checkpoint),
+      "The source Store checkpoint was stale before transfer",
+    );
+
+    const encoded = JSON.stringify({
+      after: checkpoint.position,
+      latest:
+        checkpoint.latest === undefined
+          ? { kind: "undefined" }
+          : { kind: "value", value: checkpoint.latest },
+      values: checkpoint.values,
+    });
+    const decoded = JSON.parse(encoded);
+    check(
+      Number.isSafeInteger(decoded.after),
+      "The provider codec did not recognize the captured position",
+    );
+    const seed = {
+      after: decoded.after,
+      latest: decoded.latest.kind === "undefined" ? undefined : decoded.latest.value,
+      values: decoded.values,
+    };
+    check(
+      Object.hasOwn(seed, "latest") && seed.latest === undefined,
+      "The provider codec did not preserve a present undefined latest event",
+    );
+    check(
+      isPositionedStoreCheckpointCurrent(checkpoint),
+      "The source Store checkpoint changed while the codec copied its values",
+    );
+
+    const providerB = new ConsumerPositionedSource();
+    const definitionB = createPositionedStream({
+      name: "positioned.store.consumer",
+      key: (input) => input.id,
+      source: providerB,
+    });
+    graphB = createGraph({
+      contract: defineContract({
+        namespace: "positioned-store-consumer-b",
+        operations: { events: definitionB },
+      }),
+    });
+    const inputB = { id: "one" };
+    const readerB = providerB.reserve(inputB, seed.after, undefined, seed);
+    let totalStepsB = 0;
+    let countStepsB = 0;
+    let equalityCallsB = 0;
+    const policiesB = [
+      {
+        kind: "reduce",
+        initial: 0,
+        step: (total, event) => {
+          totalStepsB += 1;
+          return total + (event ?? 0);
+        },
+      },
+      {
+        kind: "reduce",
+        initial: 0,
+        step: (count) => {
+          countStepsB += 1;
+          return count + 1;
+        },
+      },
+    ];
+    const targetOptionsB = {
+      equals: (left, right) => {
+        equalityCallsB += 1;
+        if (left === undefined || right === undefined) return left === right;
+        return Math.floor(left) === Math.floor(right);
+      },
+    };
+    restoration = preparePositionedStoreRestore(
+      graphB.api.events,
+      inputB,
+      policiesB,
+      seed,
+      readerB,
+      targetOptionsB,
+    );
+    const sourceB = restoration.source;
+    check(
+      providerB.opens.length === 0 &&
+        sourceB.status.get() === "empty" &&
+        !sourceB.pending.get() &&
+        sourceB.available.get() &&
+        sourceB.value.get() === undefined &&
+        restoration.projections[0].value.get() === 7 &&
+        restoration.projections[1].value.get() === 3 &&
+        totalStepsB === 0 &&
+        countStepsB === 0,
+      "The dormant Store restore opened its source or refolded the transferred prefix",
+    );
+
+    const sourceValuesB = [];
+    stopSourceB = subscribe(sourceB, (value) => sourceValuesB.push(value));
+    check(
+      sourceValuesB.length === 1 &&
+        sourceValuesB[0] === undefined &&
+        providerB.opens.length === 0 &&
+        sourceB.status.get() === "empty" &&
+        !sourceB.pending.get(),
+      "Subscribing to the dormant Store opened it or lost its present seed",
+    );
+
+    let lateSteps = 0;
+    const lateProjection = project(sourceB, {
+      kind: "reduce",
+      initial: 100,
+      step: (total, event) => {
+        lateSteps += 1;
+        return total + (event ?? 0);
+      },
+    });
+    check(
+      lateProjection.value.get() === 100 && lateSteps === 0 && providerB.opens.length === 0,
+      "A later shared projection replayed the Store's restored prefix",
+    );
+
+    check(
+      restoration.activate() === sourceB &&
+        sourceB.status.get() === "opening" &&
+        sourceB.pending.get() &&
+        providerB.opens.length === 1 &&
+        providerB.opens[0].hasAfter &&
+        providerB.opens[0].after === seed.after &&
+        providerB.opens[0].hasReader,
+      "The restored Store did not activate its admitted reader exactly once",
+    );
+
+    const suffixSourceValue = waitForPositionedStoreValue(sourceB, (value) => value === 4);
+    const suffixCount = waitForPositionedValue(
+      restoration.projections[1],
+      (value) => value === 4,
+    );
+    providerB.emitReader(readerB, { position: 8, value: 4 });
+    await Promise.all([suffixSourceValue, suffixCount]);
+    check(
+      sourceValuesB.length === 2 &&
+        sourceValuesB[0] === undefined &&
+        sourceValuesB[1] === 4 &&
+        sourceB.value.get() === 4 &&
+        sourceB.status.get() === "live" &&
+        !sourceB.pending.get() &&
+        restoration.projections[0].value.get() === 11 &&
+        restoration.projections[1].value.get() === 4 &&
+        lateProjection.value.get() === 104 &&
+        totalStepsB === 1 &&
+        countStepsB === 1 &&
+        lateSteps === 1,
+      "The restored Store or its projections did not consume only the real suffix",
+    );
+
+    const equalityCallsBeforeWrite = equalityCallsB;
+    sourceB.set(4.25);
+    check(
+      equalityCallsB > equalityCallsBeforeWrite &&
+        sourceB.value.get() === 4 &&
+        sourceValuesB.length === 2 &&
+        totalStepsB === 1 &&
+        countStepsB === 1 &&
+        lateProjection.value.get() === 104,
+      "The restored Store did not retain its target equality for direct writes",
+    );
+
+    restoration.discard();
+    check(
+      providerB.releaseCount(readerB) === 1,
+      "The restored Store did not release its reader once",
+    );
+  } finally {
+    stopSourceA();
+    stopSourceB();
+    restoration?.discard();
+    const sourceRetirement = graphA.retire();
+    const targetRetirement = graphB?.retire();
+    await Promise.all([
+      sourceRetirement,
+      ...(targetRetirement === undefined ? [] : [targetRetirement]),
+    ]);
+  }
+}
+
 async function verifyAcquisitionConsumer() {
   const backend = testBackend();
   const query = createQuery({

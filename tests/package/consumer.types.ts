@@ -29,7 +29,11 @@ import {
   queryOptions,
   subscribe,
   projectPositioned,
+  project,
   capturePositionedProjection,
+  capturePositionedStore,
+  isPositionedStoreCheckpointCurrent,
+  preparePositionedStoreRestore,
   preparePositionedRestore,
   preparePositionedSeedRestore,
   positionedFoldReceipt,
@@ -64,6 +68,9 @@ import {
   type PositionedProjectionCheckpoint,
   type PositionedFoldReceipt,
   type PositionedRestoreSeed,
+  type PositionedStoreCheckpoint,
+  type PositionedStoreRestoreSeed,
+  type PositionedStoreRestoration,
   type Observer,
   type QueryStore,
   type StoreIdentity,
@@ -91,6 +98,9 @@ import type {
   BindingContext as ContractBindingContext,
   Graph as ContractGraph,
   QueryAcquisition as ContractQueryAcquisition,
+  PositionedStoreCheckpoint as ContractPositionedStoreCheckpoint,
+  PositionedStoreRestoreSeed as ContractPositionedStoreRestoreSeed,
+  PositionedStoreRestoration as ContractPositionedStoreRestoration,
 } from "aeolia/contract";
 import { testBackend } from "aeolia/testing";
 
@@ -506,6 +516,261 @@ function typecheckOnly(): void {
   const widenedAtIsUnknown: Equal<WidenedValue, unknown> = true;
   const finiteQueryHasNoProgress: Equal<ProgressOf<typeof queried>, never> = true;
   const progressQueryKeepsExactType: Equal<ProgressOf<typeof progressStore>, Progress> = true;
+
+  const positionedStoreSource = positionedMember({ id: "store-source" });
+  const positionedStoreTotalPolicy = {
+    kind: "reduce" as const,
+    initial: { total: 0 },
+    step: (accumulator: { total: number }, event: number) => ({
+      total: accumulator.total + event,
+    }),
+  };
+  const positionedStoreCountPolicy = {
+    kind: "reduce" as const,
+    initial: 0,
+    step: (count: number, _event: number) => count + 1,
+  };
+  const positionedStorePolicies = [
+    positionedStoreTotalPolicy,
+    positionedStoreCountPolicy,
+  ] as const;
+  const positionedStoreViews = [
+    project(positionedStoreSource, positionedStoreTotalPolicy),
+    project(positionedStoreSource, positionedStoreCountPolicy),
+  ] as const;
+  const positionedStoreCheckpoint = capturePositionedStore(
+    positionedStoreSource,
+    positionedStoreViews,
+  );
+  type PositionedStoreValues = readonly [{ total: number }, number];
+  type CapturedPositionedStoreValues =
+    typeof positionedStoreCheckpoint extends PositionedStoreCheckpoint<number, infer Values>
+      ? Values
+      : never;
+  const capturedPositionedStoreValuesMatch: Equal<
+    CapturedPositionedStoreValues,
+    PositionedStoreValues
+  > = true;
+  const capturedPositionedStoreValues: PositionedStoreValues =
+    positionedStoreCheckpoint.values;
+  const positionedStoreCurrent: boolean =
+    isPositionedStoreCheckpointCurrent(positionedStoreCheckpoint);
+  if (positionedStoreCheckpoint.present) {
+    const positionedLatestEvent: number = positionedStoreCheckpoint.latest;
+    const positionedUnknownBoundary: unknown = positionedStoreCheckpoint.position;
+    // @ts-expect-error The provider codec must narrow the opaque capture position.
+    const uncheckedPosition: number = positionedStoreCheckpoint.position;
+    void [positionedLatestEvent, positionedUnknownBoundary, uncheckedPosition];
+  }
+  const positionedStoreSeed: PositionedStoreRestoreSeed<
+    number,
+    number,
+    PositionedStoreValues
+  > = {
+    after: 4,
+    latest: 5,
+    values: [{ total: 3 }, 2],
+  };
+  const undefinedLatestSeed: PositionedStoreRestoreSeed<
+    number | undefined,
+    number,
+    PositionedStoreValues
+  > = {
+    after: 4,
+    latest: undefined,
+    values: [{ total: 3 }, 2],
+  };
+  function positionedStoreUndefinedEventType(
+    checkpoint: PositionedStoreCheckpoint<number | undefined, PositionedStoreValues>,
+  ): void {
+    if (!checkpoint.present) return;
+    const latestEvent: number | undefined = checkpoint.latest;
+    // @ts-expect-error Presence does not narrow an event value away from undefined.
+    const numericEvent: number = checkpoint.latest;
+    void [latestEvent, numericEvent];
+  }
+  const contractCheckpointType: ContractPositionedStoreCheckpoint<
+    number,
+    PositionedStoreValues
+  > = positionedStoreCheckpoint;
+  const contractSeedType: ContractPositionedStoreRestoreSeed<
+    number,
+    number,
+    PositionedStoreValues
+  > = positionedStoreSeed;
+  const inferredPositionedStoreRestoration = preparePositionedStoreRestore(
+    positionedMember,
+    { id: "fresh-store" },
+    positionedStorePolicies,
+    positionedStoreSeed,
+    { token: "reader" },
+  );
+  type InferredPositionedStoreValues =
+    typeof inferredPositionedStoreRestoration extends PositionedStoreRestoration<
+      number,
+      infer Values
+    >
+      ? Values
+      : never;
+  const inferredPositionedStoreValuesMatch: Equal<
+    InferredPositionedStoreValues,
+    PositionedStoreValues
+  > = true;
+  const positionedStoreRestoration: PositionedStoreRestoration<
+    number,
+    PositionedStoreValues
+  > = inferredPositionedStoreRestoration;
+  const positionedStoreWithOptions = preparePositionedStoreRestore(
+    positionedMember,
+    { id: "fresh-store-options" },
+    positionedStorePolicies,
+    positionedStoreSeed,
+    { token: "reader" },
+    {
+      initial: 99,
+      equals: (left, right) => {
+        const leftEvent: number = left;
+        const rightEvent: number = right;
+        return Math.floor(leftEvent) === Math.floor(rightEvent);
+      },
+    },
+  );
+  const positionedStoreWithOptionsType: PositionedStoreRestoration<
+    number,
+    PositionedStoreValues
+  > = positionedStoreWithOptions;
+  preparePositionedStoreRestore(
+    positionedMember,
+    { id: "wrong-store-initial-option" },
+    positionedStorePolicies,
+    positionedStoreSeed,
+    { token: "reader" },
+    // @ts-expect-error Caller options cannot widen Event from the target member.
+    { initial: "wrong-initial" },
+  );
+  preparePositionedStoreRestore(
+    positionedMember,
+    { id: "wrong-store-equality-option" },
+    positionedStorePolicies,
+    positionedStoreSeed,
+    { token: "reader" },
+    // @ts-expect-error Store equality parameters retain the target Event type.
+    { equals: (left: string, right: string) => left === right },
+  );
+
+  const contractRestorationType: ContractPositionedStoreRestoration<
+    number,
+    PositionedStoreValues
+  > = positionedStoreRestoration;
+  const positionedRestoredSource: StreamStore<number> = positionedStoreRestoration.source;
+  const positionedRestoredTotal: { total: number } =
+    positionedStoreRestoration.projections[0].value.get();
+  const positionedRestoredCount: number =
+    positionedStoreRestoration.projections[1].value.get();
+  const positionedActivatedSource: StreamStore<number> =
+    positionedStoreRestoration.activate();
+
+  const positionedStoreAccumulatePolicy = {
+    kind: "accumulate" as const,
+    max: 4,
+  };
+  const positionedStoreMixedPolicies = [
+    positionedStoreTotalPolicy,
+    positionedStoreAccumulatePolicy,
+  ] as const;
+  const positionedStoreMixedViews = [
+    project(positionedStoreSource, positionedStoreTotalPolicy),
+    project(positionedStoreSource, positionedStoreAccumulatePolicy),
+  ] as const;
+  const positionedStoreMixedCheckpoint = capturePositionedStore(
+    positionedStoreSource,
+    positionedStoreMixedViews,
+  );
+  type MixedPositionedStoreValues = readonly [{ total: number }, readonly number[]];
+  type CapturedMixedPositionedStoreValues =
+    typeof positionedStoreMixedCheckpoint extends PositionedStoreCheckpoint<
+      number,
+      infer Values
+    >
+      ? Values
+      : never;
+  const capturedMixedPositionedStoreValuesMatch: Equal<
+    CapturedMixedPositionedStoreValues,
+    MixedPositionedStoreValues
+  > = true;
+  const capturedMixedPositionedStoreValues: MixedPositionedStoreValues =
+    positionedStoreMixedCheckpoint.values;
+  const inferredMixedPositionedStoreRestoration = preparePositionedStoreRestore(
+    positionedMember,
+    { id: "fresh-mixed-store" },
+    positionedStoreMixedPolicies,
+    { after: 4, latest: 5, values: [{ total: 3 }, [1, 2]] },
+    { token: "reader" },
+  );
+  type InferredMixedPositionedStoreValues =
+    typeof inferredMixedPositionedStoreRestoration extends PositionedStoreRestoration<
+      number,
+      infer Values
+    >
+      ? Values
+      : never;
+  const inferredMixedPositionedStoreValuesMatch: Equal<
+    InferredMixedPositionedStoreValues,
+    MixedPositionedStoreValues
+  > = true;
+  const restoredAccumulatedEvents: readonly number[] =
+    inferredMixedPositionedStoreRestoration.projections[1].value.get();
+  preparePositionedStoreRestore(
+    positionedMember,
+    { id: "wrong-accumulated-event" },
+    positionedStoreMixedPolicies,
+    // @ts-expect-error Accumulation restore values keep the source event type.
+    { after: 4, latest: 5, values: [{ total: 3 }, ["wrong-event"]] },
+    { token: "reader" },
+  );
+
+
+  preparePositionedStoreRestore(
+    positionedMember,
+    { id: "wrong-store-position" },
+    positionedStorePolicies,
+    // @ts-expect-error Store restoration keeps the provider Position from its member.
+    { after: "wrong-position", latest: 5, values: [{ total: 3 }, 2] },
+    { token: "reader" },
+  );
+  preparePositionedStoreRestore(
+    positionedMember,
+    { id: "wrong-store-reader" },
+    positionedStorePolicies,
+    positionedStoreSeed,
+    // @ts-expect-error Store restoration keeps the provider Reader from its member.
+    { token: 1 },
+  );
+  preparePositionedStoreRestore(
+    positionedMember,
+    { id: "wrong-store-event" },
+    positionedStorePolicies,
+    // @ts-expect-error The source seed keeps the positioned stream event type.
+    { after: 4, latest: "five", values: [{ total: 3 }, 2] },
+    { token: "reader" },
+  );
+  preparePositionedStoreRestore(
+    positionedMember,
+    { id: "wrong-store-tuple" },
+    positionedStorePolicies,
+    // @ts-expect-error Each decoded value must match its corresponding policy.
+    { after: 4, latest: 5, values: [2, { total: 3 }] },
+    { token: "reader" },
+  );
+  preparePositionedStoreRestore(
+    positionedMember,
+    { id: "missing-store-event" },
+    positionedStorePolicies,
+    // @ts-expect-error The decoded seed must carry an own latest event property.
+    { after: 4, values: [{ total: 3 }, 2] },
+    { token: "reader" },
+  );
+
   const progressStatus: QueryProgressStatus = progressStore.progress.get().status;
   const progressSnapshot: QueryProgressSnapshot<Progress> = progressStore.progress.get();
   const progressObservation: QueryProgressObservation<Progress> =
@@ -532,6 +797,26 @@ function typecheckOnly(): void {
   void finiteFetchResult;
   void legacyFetchResult;
   void progressFetchResult;
+  void [
+    capturedPositionedStoreValuesMatch,
+    capturedPositionedStoreValues,
+    positionedStoreCurrent,
+    contractCheckpointType,
+    contractSeedType,
+    undefinedLatestSeed,
+    positionedStoreUndefinedEventType,
+    inferredPositionedStoreValuesMatch,
+    capturedMixedPositionedStoreValuesMatch,
+    capturedMixedPositionedStoreValues,
+    inferredMixedPositionedStoreValuesMatch,
+    restoredAccumulatedEvents,
+    contractRestorationType,
+    positionedStoreWithOptionsType,
+    positionedRestoredSource,
+    positionedRestoredTotal,
+    positionedRestoredCount,
+    positionedActivatedSource,
+  ];
 
   // @ts-expect-error graph.at returns Store, not QueryStore.
   void unknown.status.get();

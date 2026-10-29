@@ -98,7 +98,18 @@ export const DEFAULT_MAX_PREDICTIONS = 64;
 function realmStores(graph: Graph): readonly RealmStoreState[] {
   const state = (graph as GraphRuntime<any>).__runtime;
   assertGraphOpen(state);
-  return [...state.stores.values()]
+  const graphStores = [...state.stores.values()];
+  const unsupportedReader = graphStores.find(
+    (runtime) =>
+      !runtime.disposed &&
+      runtime.readerScope !== undefined &&
+      runtime.snapshot &&
+      runtime.baseAvailable &&
+      runtime.transferEligible,
+  );
+  if (unsupportedReader !== undefined)
+    throw new Fault("encoding", [String(unsupportedReader.key)]);
+  return graphStores
     .filter((runtime) => !runtime.disposed)
     .map((runtime) => {
       const incarnation = runtime.incarnation;
@@ -629,14 +640,17 @@ export function retireBindingContextRuntime(context: BindingContextRuntime): Pro
 
 function disposeBindingContext(context: BindingContextRuntime): void {
   const state = context.state;
-  const stores = [
+  const stores = [...new Set([
     ...[...context.bindings.values()].flatMap((profiles) =>
       [...profiles.values()].flatMap((binding) => [...binding.stores.values()]),
     ),
     ...[...context.streamBindings.values()].flatMap((members) =>
-      [...members.values()].flatMap((binding) => [...binding.stores.values()]),
+      [...members.values()].flatMap((binding) => [
+        ...binding.stores.values(),
+        ...(binding.readerStores ?? []),
+      ]),
     ),
-  ];
+  ])];
   const revisions = stores.map((runtime) =>
     state.disposed ? runtime.valueRevision : nextValueRevision(runtime.valueRevision),
   );
@@ -647,7 +661,10 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   for (const profiles of context.bindings.values())
     for (const binding of profiles.values()) binding.addresses.clear();
   for (const members of context.streamBindings.values())
-    for (const binding of members.values()) binding.addresses.clear();
+    for (const binding of members.values()) {
+      binding.addresses.clear();
+      binding.readerStores?.clear();
+    }
   context.mutationControllers.clear();
   for (const controller of mutationControllers) state.activeControllers.delete(controller);
   state.bindingContexts.delete(context);

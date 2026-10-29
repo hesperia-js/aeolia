@@ -9,10 +9,17 @@ import {
   project,
   subscribe,
   capturePositionedProjection,
+  capturePositionedStore,
   isPositionedCheckpointCurrent,
+  isPositionedStoreCheckpointCurrent,
+  preparePositionedStoreRestore,
+  positionedFoldReceipt,
+  acknowledgePositionedFold,
   type PositionedProjectionCheckpoint,
   type Readable,
   type Projection,
+  type PositionedStoreRestoration,
+  type PositionedFoldReceipt,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
@@ -205,6 +212,332 @@ it("starts a positioned shared projection at the next event when it joins during
   } finally {
     stop();
     graph.dispose();
+  }
+});
+
+
+
+it("restores shared folds over one dormant source Store without replaying the latest event", async () => {
+  type Event = { position: number; value: number };
+  const reservations = new WeakMap<object, { after: number; seed: unknown }>();
+  const readerEmitters = new WeakMap<object, (event: Event) => void>();
+  const releases = new WeakMap<object, number>();
+  const acknowledgements: Array<{ reader: object; receipt: PositionedFoldReceipt<number> }> = [];
+  const openings: Array<{
+    hasAfter: boolean;
+    after: number | undefined;
+    hasReader: boolean;
+    reader: object | undefined;
+    reportGap: () => void;
+  }> = [];
+  let emitLive: ((event: Event) => void) | undefined;
+
+  const makeChannel = () => {
+    const queued: Event[] = [];
+    const waiters: Array<(result: IteratorResult<Event>) => void> = [];
+    let ended = false;
+    const emit = (event: Event): void => {
+      if (ended) return;
+      const waiter = waiters.shift();
+      if (waiter !== undefined) waiter({ done: false, value: event });
+      else queued.push(event);
+    };
+    const iterable: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => {
+            const event = queued.shift();
+            if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
+            if (ended) return Promise.resolve({ done: true as const, value: undefined });
+            return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
+          },
+          return: () => {
+            ended = true;
+            for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+            return Promise.resolve({ done: true as const, value: undefined });
+          },
+        };
+      },
+    };
+    return { iterable, emit };
+  };
+
+  const reserve = (after: number, seed: unknown): object => {
+    const reader = Object.freeze({});
+    reservations.set(reader, { after, seed });
+    return reader;
+  };
+  const releaseCount = (reader: object): number => releases.get(reader) ?? 0;
+  const releaseReader = (reader: object): void => releases.set(reader, releaseCount(reader) + 1);
+  const stream = createPositionedStream<void, number, string, number, object>({
+    name: "restored-shared-store",
+    key: () => "restored-shared-store/one",
+    source: {
+      open: (_input, options) => {
+        const channel = makeChannel();
+        openings.push({
+          hasAfter: Object.hasOwn(options, "after"),
+          after: options.after,
+          hasReader: Object.hasOwn(options, "reader"),
+          reader: options.reader,
+          reportGap: options.reportGap,
+        });
+        if (options.reader === undefined) emitLive = channel.emit;
+        else readerEmitters.set(options.reader, channel.emit);
+        return channel.iterable;
+      },
+      validateReader: (_input, reader, after, checkpoint, seed) => {
+        const reservation = reservations.get(reader);
+        return (
+          checkpoint === undefined &&
+          reservation !== undefined &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
+      },
+      isReaderCurrent: (_input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        return (
+          reservation !== undefined &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
+      },
+      acknowledge: (_input, reader, receipt) => {
+        acknowledgements.push({ reader, receipt });
+      },
+      releaseReader: (_input, reader) => releaseReader(reader),
+    },
+  });
+  const makeGraph = (namespace: string) =>
+    createGraph({ contract: defineContract({ namespace, operations: { events: stream } }) });
+  const sourceGraph = makeGraph("restored-shared-source");
+  const targetGraph = makeGraph("restored-shared-target");
+  const source = sourceGraph.api.events();
+  const historyPolicy = { kind: "accumulate" as const, max: 10 };
+  const totalPolicy = {
+    kind: "reduce" as const,
+    initial: 10,
+    step: (total: number, event: number) => total + event,
+  };
+  const equalPolicy = {
+    kind: "reduce" as const,
+    initial: 7,
+    step: () => 7,
+  };
+  const history = project(source, historyPolicy);
+  const total = project(source, totalPolicy);
+  const unchanged = project(source, equalPolicy);
+  let stopRestoredSource: (() => void) | undefined;
+  let stopEarlyAcknowledge: (() => void) | undefined;
+  let restoredHistory: Projection<readonly number[]> | undefined;
+  let restoredTotal: Projection<number> | undefined;
+  let restoredEqual: Projection<number> | undefined;
+  let later: Projection<number> | undefined;
+  let restoration: PositionedStoreRestoration<
+    number,
+    readonly [readonly number[], number, number]
+  > | undefined;
+  let reader: object | undefined;
+  let readerTransferred = false;
+  let gapReader: object | undefined;
+  let gapReaderTransferred = false;
+  let discardGapRestoration: (() => void) | undefined;
+
+  try {
+    const folded = until(total.value, (value) => value === 14);
+    if (emitLive === undefined) throw new Error("The actual source Store did not open");
+    emitLive({ position: 5, value: 4 });
+    await folded;
+
+    const checkpoint = capturePositionedStore(source, [history, total, unchanged] as const);
+    if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
+      throw new Error("The actual source Store did not capture a positioned event");
+    const after: number = checkpoint.position;
+    expect(checkpoint.sourceIdentity).toBe(source.identity);
+    expect(checkpoint.latest).toBe(4);
+    expect(checkpoint.values).toStrictEqual([[4], 14, 7]);
+    expect(checkpoint.resumable).toBe(true);
+    expect(isPositionedStoreCheckpointCurrent(checkpoint)).toBe(true);
+
+    const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+    const readerForRestore = reserve(after, seed);
+    reader = readerForRestore;
+    const prepared = preparePositionedStoreRestore(
+      targetGraph.api.events,
+      undefined,
+      [historyPolicy, totalPolicy, equalPolicy] as const,
+      seed,
+      readerForRestore,
+    );
+    restoration = prepared;
+    readerTransferred = true;
+    const restoredHistoryProjection = prepared.projections[0];
+    const restoredTotalProjection = prepared.projections[1];
+    const restoredEqualProjection = prepared.projections[2];
+    restoredHistory = restoredHistoryProjection;
+    restoredTotal = restoredTotalProjection;
+    restoredEqual = restoredEqualProjection;
+
+    expect(openings).toHaveLength(1);
+    expect(prepared.source.available.get()).toBe(true);
+    expect(prepared.source.value.get()).toBe(4);
+    expect(prepared.source.status.get()).toBe("empty");
+    expect(restoredHistoryProjection.value.get()).toStrictEqual([4]);
+    expect(restoredTotalProjection.value.get()).toBe(14);
+    expect(restoredEqualProjection.value.get()).toBe(7);
+    const sourceValues: number[] = [];
+    stopRestoredSource = subscribe(prepared.source, (value) => sourceValues.push(value));
+    const laterProjection = project(prepared.source, {
+      kind: "reduce",
+      initial: 0,
+      step: (sum: number, event: number) => sum + event,
+    });
+    later = laterProjection;
+    expect(laterProjection.value.get()).toBe(0);
+    expect(sourceValues).toEqual([4]);
+    expect(openings).toHaveLength(1);
+
+    let earlyAcknowledgeAttempted = false;
+    let earlyAcknowledgeCount: number | undefined;
+    let earlyReceiptAvailable = false;
+    let earlyAcknowledgeError: unknown;
+    stopEarlyAcknowledge = subscribe(restoredHistoryProjection.value, (items) => {
+      if (items.length !== 2 || earlyAcknowledgeAttempted) return;
+      earlyAcknowledgeAttempted = true;
+      const receipt = positionedFoldReceipt(restoredHistoryProjection);
+      if (receipt === undefined) return;
+      earlyReceiptAvailable = true;
+      try {
+        acknowledgePositionedFold(restoredHistoryProjection, receipt);
+      } catch (error) {
+        earlyAcknowledgeError = error;
+      }
+      earlyAcknowledgeCount = acknowledgements.length;
+    });
+
+    const activated = prepared.activate();
+    expect(activated).toBe(prepared.source);
+    expect(openings).toHaveLength(2);
+    expect(openings[1]).toMatchObject({
+      hasAfter: true,
+      after: 5,
+      hasReader: true,
+      reader: readerForRestore,
+    });
+
+    const sourceSuffix = until(prepared.source.value, (value) => value === 3);
+    const historySuffix = until(restoredHistoryProjection.value, (value) => value.length === 2);
+    const totalSuffix = until(restoredTotalProjection.value, (value) => value === 17);
+    const laterSuffix = until(laterProjection.value, (value) => value === 3);
+    const emitReader = readerEmitters.get(readerForRestore);
+    if (emitReader === undefined) throw new Error("The actual reader opening is missing");
+    emitReader({ position: 6, value: 3 });
+    await Promise.all([sourceSuffix, historySuffix, totalSuffix, laterSuffix]);
+
+    expect(prepared.source.value.get()).toBe(3);
+    expect(restoredHistoryProjection.value.get()).toStrictEqual([4, 3]);
+    expect(restoredTotalProjection.value.get()).toBe(17);
+    expect(restoredEqualProjection.value.get()).toBe(7);
+    expect(laterProjection.value.get()).toBe(3);
+    expect(sourceValues).toEqual([4, 3]);
+    expect(earlyAcknowledgeAttempted).toBe(true);
+    expect(earlyReceiptAvailable).toBe(true);
+    expect(earlyAcknowledgeCount).toBe(0);
+    expect(acknowledgements).toHaveLength(0);
+    if (
+      earlyAcknowledgeError !== undefined &&
+      !(earlyAcknowledgeError instanceof TypeError)
+    )
+      throw earlyAcknowledgeError;
+
+    stopEarlyAcknowledge?.();
+    stopEarlyAcknowledge = undefined;
+    restoredHistoryProjection.close();
+    expect(openings).toHaveLength(2);
+    expect(releaseCount(readerForRestore)).toBe(0);
+
+    const secondSourceSuffix = until(prepared.source.value, (value) => value === 6);
+    const secondTotalSuffix = until(restoredTotalProjection.value, (value) => value === 23);
+    const secondLaterSuffix = until(laterProjection.value, (value) => value === 9);
+    emitReader({ position: 7, value: 6 });
+    await Promise.all([secondSourceSuffix, secondTotalSuffix, secondLaterSuffix]);
+
+    expect(prepared.source.value.get()).toBe(6);
+    expect(restoredHistoryProjection.value.get()).toStrictEqual([4, 3]);
+    expect(restoredTotalProjection.value.get()).toBe(23);
+    expect(restoredEqualProjection.value.get()).toBe(7);
+    expect(laterProjection.value.get()).toBe(9);
+    expect(openings).toHaveLength(2);
+    expect(releaseCount(reader)).toBe(0);
+
+    const finalReceipt = positionedFoldReceipt(restoredEqualProjection);
+    if (finalReceipt === undefined) throw new Error("The completed equal fold has no receipt");
+    expect(finalReceipt.position).toBe(7);
+    acknowledgePositionedFold(restoredEqualProjection, finalReceipt);
+    expect(acknowledgements).toHaveLength(1);
+    expect(acknowledgements[0]?.reader).toBe(reader);
+    expect(acknowledgements[0]?.receipt).toBe(finalReceipt);
+
+    prepared.discard();
+    restoration = undefined;
+    expect(releaseCount(readerForRestore)).toBe(1);
+
+    const gapReaderForRestore = reserve(after, seed);
+    gapReader = gapReaderForRestore;
+    const gapRestoration = preparePositionedStoreRestore(
+      targetGraph.api.events,
+      undefined,
+      [historyPolicy, totalPolicy, equalPolicy] as const,
+      seed,
+      gapReaderForRestore,
+    );
+    gapReaderTransferred = true;
+    discardGapRestoration = () => gapRestoration.discard();
+    expect(openings).toHaveLength(2);
+    const gapProjection = gapRestoration.projections[0];
+    expect(gapProjection.value.get()).toStrictEqual([4]);
+    expect(gapRestoration.activate()).toBe(gapRestoration.source);
+    expect(openings).toHaveLength(3);
+    const gapOpening = openings[2];
+    if (gapOpening === undefined) throw new Error("The restored reader did not open");
+    const gapReported = new Promise<void>((resolve) => {
+      let stop = (): void => undefined;
+      stop = subscribe(gapProjection.status, (status) => {
+        if (status !== "failed") return;
+        stop();
+        resolve();
+      });
+    });
+    gapOpening.reportGap();
+    await gapReported;
+    expect(gapRestoration.source.status.get()).toBe("failed");
+    expect(gapProjection.status.get()).toBe("failed");
+    expect(gapRestoration.source.value.get()).toBe(4);
+    expect(releaseCount(gapReaderForRestore)).toBe(1);
+    expect(openings).toHaveLength(3);
+    gapRestoration.discard();
+    discardGapRestoration = undefined;
+    expect(releaseCount(gapReaderForRestore)).toBe(1);
+    expect(openings).toHaveLength(3);
+  } finally {
+    stopRestoredSource?.();
+    stopEarlyAcknowledge?.();
+    history.close();
+    total.close();
+    unchanged.close();
+    restoredHistory?.close();
+    restoredTotal?.close();
+    restoredEqual?.close();
+    later?.close();
+    restoration?.discard();
+    discardGapRestoration?.();
+    if (gapReader !== undefined && !gapReaderTransferred && releaseCount(gapReader) === 0)
+      releaseReader(gapReader);
+    if (reader !== undefined && !readerTransferred && releaseCount(reader) === 0)
+      releaseReader(reader);
+    sourceGraph.dispose();
+    targetGraph.dispose();
   }
 });
 

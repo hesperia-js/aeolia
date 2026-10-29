@@ -9,7 +9,7 @@ import { retireObservation } from "./observation-state.ts";
 import { nextValueRevision } from "./identity.ts";
 import { Fault } from "../fault.ts";
 import type { StreamDetachment, StreamTerminalCapture } from "./stream-binding.ts";
-import { beginBindingAddress, captureStoreRuntime, endBindingAddress } from "./registry.ts";
+import { beginStoreAddress, captureStoreRuntime, changeBoundAddress, endStoreAddress } from "./registry.ts";
 import {
   beginPhysicalWork,
   finishPhysicalWork,
@@ -93,6 +93,8 @@ export function popCollectionCandidate(
 }
 
 export function isLive<T>(runtime: StoreRuntime<T>): boolean {
+  const positionedStore = runtime.readerScope?.session.positioned;
+  if (positionedStore !== undefined && positionedStore.phase !== "closed") return true;
   if (runtime.binding?.kind === "stream") {
     const session = runtime.stream;
     return (
@@ -226,6 +228,46 @@ export function returnStreamIterator<T>(
   }
 }
 
+function closePositionedStoreSession<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+): void {
+  const positioned = session.positioned;
+  if (positioned === undefined || positioned.phase === "closed") return;
+  const dormant = positioned.phase === "dormant";
+  positioned.phase = "closed";
+  positioned.dispatch = undefined;
+  if (runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
+  const reader = positioned.reader;
+  try {
+    if (reader !== undefined && reader.owned && !reader.released) {
+      reader.released = true;
+      physicalCleanup(session.physical.owner, () =>
+        positioned.provider.releaseReader(positioned.input, reader.reader),
+      );
+    }
+  } catch (error) {
+    reportContinuationError(runtime.graph.__runtime, error);
+  } finally {
+    if (dormant) finishPhysicalWork(session.physical);
+  }
+}
+
+export function discardPositionedStoreSession<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+): void {
+  if (runtime.readerScope?.session !== session || session.positioned === undefined)
+    throw new TypeError("The value is not a positioned reader Store session");
+  if (!session.ended) endStream(runtime, session, "closed");
+  runtime.disposed = true;
+  runtime.incarnation = undefined;
+  runtime.graph.__runtime.stores.delete(runtime.identity);
+  runtime.binding?.readerStores?.delete(runtime as StoreRuntime<unknown>);
+  if (runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
+  updateCollectionCandidate(runtime);
+}
+
 export function endStream<T>(
   runtime: StoreRuntime<T>,
   session: StreamSession<T>,
@@ -242,6 +284,7 @@ export function endStream<T>(
     runtime.streamToken === session.token &&
     session.resetEpoch === state.resetEpoch;
   session.ended = true;
+  closePositionedStoreSession(runtime, session);
   const iterator = session.iterator;
   const removeCallerAbort = session.removeCallerAbort;
   const removeControllerAbort = session.removeControllerAbort;
@@ -330,9 +373,10 @@ function endBoundStream<T>(
   bound.phase = "retiring";
   bound.liveReadables = 0;
   session.ended = true;
+  closePositionedStoreSession(runtime, session);
   runtime.boundRetirement = bound;
   runtime.transitioning = true;
-  const addressOperation = beginBindingAddress(bound.binding, String(runtime.key));
+  const addressOperation = beginStoreAddress(runtime);
   let terminalCapture: StreamTerminalCapture<T>;
   try {
     terminalCapture = Object.freeze({
@@ -442,7 +486,7 @@ function endBoundStream<T>(
               runtime.boundRetirement = undefined;
               if (owned) runtime.transitioning = false;
             }
-            endBindingAddress(bound.binding, String(runtime.key), addressOperation);
+            endStoreAddress(runtime, addressOperation);
             updateCollectionCandidate(runtime);
             scheduleSweep(state);
           });
@@ -462,6 +506,7 @@ function endBoundStream<T>(
 
 export function dropStore<T>(runtime: StoreRuntime<T>): void {
   if (
+    runtime.readerScope !== undefined ||
     runtime.disposed ||
     runtime.declared ||
     runtime.dropped ||
@@ -470,7 +515,7 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
     runtime.predictionStack.peek().length > 0
   )
     return;
-  const addressDrop = beginBindingAddress(runtime.binding, String(runtime.key));
+  const addressDrop = beginStoreAddress(runtime);
   try {
     const streamToken = runtime.streamToken;
     const revision = nextValueRevision(runtime.valueRevision);
@@ -529,7 +574,7 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
       updateCollectionCandidate(runtime);
     });
   } finally {
-    endBindingAddress(runtime.binding, String(runtime.key), addressDrop);
+    endStoreAddress(runtime, addressDrop);
   }
 }
 

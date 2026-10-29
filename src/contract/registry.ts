@@ -199,9 +199,56 @@ export function bindingAddress(binding: StoreBindingRuntime, key: string): Bindi
 }
 
 export function changeBoundAddress<T>(runtime: StoreRuntime<T>): void {
-  if (runtime.binding !== undefined)
+  const address = storeBindingAddress(runtime);
+  if (address !== undefined) address.guard = {};
+  if (runtime.readerScope !== undefined && runtime.binding !== undefined)
     bindingAddress(runtime.binding, String(runtime.key)).guard = {};
 }
+
+interface StoreAddressOperationRecord {
+  readonly runtime: StoreRuntime<unknown>;
+  readonly address: BindingAddressRuntime;
+  readonly aggregate?: BindingAddressRuntime;
+}
+
+const storeAddressOperations = new WeakMap<object, StoreAddressOperationRecord>();
+
+/** Exact native entry address; reader-scoped Stores do not replace the keyed slot. */
+export function storeBindingAddress<T>(runtime: StoreRuntime<T>): BindingAddressRuntime | undefined {
+  return runtime.readerScope?.address ??
+    (runtime.binding === undefined ? undefined : bindingAddress(runtime.binding, String(runtime.key)));
+}
+
+export function beginStoreAddress<T>(runtime: StoreRuntime<T>): object | undefined {
+  const address = storeBindingAddress(runtime);
+  if (address === undefined) return undefined;
+  const aggregate = runtime.readerScope !== undefined && runtime.binding !== undefined
+    ? bindingAddress(runtime.binding, String(runtime.key))
+    : undefined;
+  const token = {};
+  address.operations.add(token);
+  address.guard = {};
+  if (aggregate !== undefined && aggregate !== address) {
+    aggregate.operations.add(token);
+    aggregate.guard = {};
+  }
+  storeAddressOperations.set(token, {
+    runtime: runtime as StoreRuntime<unknown>,
+    address,
+    ...(aggregate === undefined || aggregate === address ? {} : { aggregate }),
+  });
+  return token;
+}
+
+export function endStoreAddress<T>(runtime: StoreRuntime<T>, token: object | undefined): void {
+  if (token === undefined) return;
+  const operation = storeAddressOperations.get(token);
+  if (operation === undefined || operation.runtime !== runtime) return;
+  storeAddressOperations.delete(token);
+  if (operation.address.operations.delete(token)) operation.address.guard = {};
+  if (operation.aggregate?.operations.delete(token)) operation.aggregate.guard = {};
+}
+
 
 export function beginBindingAddress(
   binding: StoreBindingRuntime | undefined,

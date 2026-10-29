@@ -17,11 +17,11 @@ import { interact, isLive, scheduleSweep, touch, updateCollectionCandidate } fro
 import { armStoreTimer } from "./query-request.ts";
 import {
   assertBindingContextOpen,
-  beginBindingAddress,
+  beginStoreAddress,
   boundStreamByStore,
   captureStoreRuntime,
   changeBoundAddress,
-  endBindingAddress,
+  endStoreAddress,
   runtimeByStore,
 } from "./registry.ts";
 
@@ -118,6 +118,7 @@ export function directWrite<T>(
 ): void {
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
+  if (runtime.stream?.positioned !== undefined) runtime.stream.positioned.diverged = true;
   nextValueRevision(runtime.valueRevision);
   issue(runtime);
   interact(runtime.graph.__runtime);
@@ -224,11 +225,11 @@ export function makeStore<T>(
       nextValueRevision(runtime.valueRevision);
       nextGeneration(runtime.generation);
       interact(state);
-      const addressWrite = beginBindingAddress(runtime.binding, String(runtime.key));
+      const addressWrite = beginStoreAddress(runtime);
       try {
         directWrite(runtime, next(reactiveInternal.signalValue(runtime.committed)));
       } finally {
-        endBindingAddress(runtime.binding, String(runtime.key), addressWrite);
+        endStoreAddress(runtime, addressWrite);
       }
     },
   };

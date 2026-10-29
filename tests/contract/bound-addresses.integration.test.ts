@@ -7,6 +7,10 @@ import {
   createGraph,
   createQuery,
   createStream,
+  createPositionedStream,
+  project,
+  capturePositionedStore,
+  preparePositionedStoreRestore,
   defineContract,
   Fault,
   inspectBoundAddress,
@@ -786,3 +790,202 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
     }
   },
 );
+
+it("aggregates reader-scoped Stores at their binding address without deleting another key", async () => {
+  type Event = { position: number; value: number };
+  type Reservation = { input: Input; after: number; seed: unknown };
+  const reservations = new WeakMap<object, Reservation>();
+  const liveEmitters = new Map<string, (event: Event) => void>();
+  const releases = new WeakMap<object, number>();
+  const openings: Array<{ room: string; reader: object | undefined }> = [];
+
+  const makeChannel = () => {
+    const queued: Event[] = [];
+    const waiters: Array<(result: IteratorResult<Event>) => void> = [];
+    let ended = false;
+    const emit = (event: Event): void => {
+      if (ended) return;
+      const waiter = waiters.shift();
+      if (waiter !== undefined) waiter({ done: false, value: event });
+      else queued.push(event);
+    };
+    const iterable: AsyncIterable<Event> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => {
+            const event = queued.shift();
+            if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
+            if (ended) return Promise.resolve({ done: true as const, value: undefined });
+            return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
+          },
+          return: () => {
+            ended = true;
+            for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+            return Promise.resolve({ done: true as const, value: undefined });
+          },
+        };
+      },
+    };
+    return { iterable, emit };
+  };
+  const reserve = (input: Input, after: number, seed: unknown): object => {
+    const reader = Object.freeze({});
+    reservations.set(reader, { input, after, seed });
+    return reader;
+  };
+  const releaseCount = (reader: object): number => releases.get(reader) ?? 0;
+  const releaseReader = (reader: object): void => releases.set(reader, releaseCount(reader) + 1);
+
+  const stream = createPositionedStream<Input, number, string, number, object>({
+    name: "addressed-reader-store",
+    key: (input) => input.room,
+    source: {
+      open: (input, options) => {
+        const channel = makeChannel();
+        openings.push({ room: input.room, reader: options.reader });
+        if (options.reader === undefined) liveEmitters.set(input.room, channel.emit);
+        return channel.iterable;
+      },
+      validateReader: (input, reader, after, checkpoint, seed) => {
+        const reservation = reservations.get(reader);
+        return (
+          checkpoint === undefined &&
+          reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
+      },
+      isReaderCurrent: (input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        return (
+          reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed
+        );
+      },
+      acknowledge: () => undefined,
+      releaseReader: (_input, reader) => releaseReader(reader),
+    },
+  });
+  const sourceGraph = createGraph({
+    contract: defineContract({ namespace: "addressed-reader-source", operations: { stream } }),
+  });
+  const targetGraph = createGraph({
+    contract: defineContract({ namespace: "addressed-reader-target", operations: { stream } }),
+  });
+  const context = createBindingContext(targetGraph);
+  const binding = bindStream(targetGraph, stream, targetGraph.api.stream, { context });
+  const input = Object.freeze({ room: "one" });
+  const otherInput = Object.freeze({ room: "other" });
+  const source = sourceGraph.api.stream(input);
+  const policy = {
+    kind: "reduce" as const,
+    initial: 0,
+    step: (sum: number, event: number) => sum + event,
+  };
+  const projection = project(source, policy);
+  let firstReader: object | undefined;
+  let secondReader: object | undefined;
+  let firstTransferred = false;
+  let secondTransferred = false;
+
+  try {
+    const folded = new Promise<void>((resolve) => {
+      let stop = (): void => undefined;
+      stop = subscribe(projection.value, (value) => {
+        if (value !== 5) return;
+        stop();
+        resolve();
+      });
+    });
+    const emit = liveEmitters.get(input.room);
+    if (emit === undefined) throw new Error("The genuine source did not open");
+    emit({ position: 1, value: 5 });
+    await folded;
+
+    const checkpoint = capturePositionedStore(source, [projection] as const);
+    if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
+      throw new Error("The genuine source Store has no positioned landing");
+    const after: number = checkpoint.position;
+    const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+
+    const before = inspectBoundAddress(binding, storeKey("one"));
+    if (before.kind !== "stable" || before.state !== "empty")
+      throw new Error("Expected an empty reader address before admission");
+    firstReader = reserve(input, after, seed);
+    secondReader = reserve(input, after, seed);
+    const first = preparePositionedStoreRestore(
+      binding,
+      input,
+      [policy] as const,
+      seed,
+      firstReader,
+    );
+    firstTransferred = true;
+    const second = preparePositionedStoreRestore(
+      binding,
+      input,
+      [policy] as const,
+      seed,
+      secondReader,
+    );
+    secondTransferred = true;
+
+    expect(openings).toHaveLength(1);
+    expect(first.source.identity).not.toBe(second.source.identity);
+    expect(inspectBoundAddress(binding, storeKey("one"), { expected: before.stamp })).toEqual({
+      kind: "changed",
+    });
+    expect(inspectBoundAddress(binding, storeKey("one"))).toMatchObject({
+      kind: "stable",
+      state: "occupied",
+      present: true,
+      basePresent: true,
+    });
+    expect(() => binding.member(input, { expectEmpty: before.condition })).toThrow(TypeError);
+    expect(openings).toHaveLength(1);
+
+    const other = binding.member(otherInput);
+    const otherSession = binding.session(other);
+    expect(openings).toHaveLength(2);
+    expect(inspectBoundAddress(binding, storeKey("other"))).toMatchObject({
+      kind: "stable",
+      state: "occupied",
+    });
+
+    first.discard();
+    expect(releaseCount(firstReader)).toBe(1);
+    expect(inspectBoundAddress(binding, storeKey("one"))).toMatchObject({
+      kind: "stable",
+      state: "occupied",
+      present: true,
+      basePresent: true,
+    });
+    second.discard();
+    expect(releaseCount(secondReader)).toBe(1);
+    expect(inspectBoundAddress(binding, storeKey("one"))).toMatchObject({
+      kind: "stable",
+      state: "empty",
+      present: false,
+      basePresent: false,
+    });
+    expect(inspectBoundAddress(binding, storeKey("other"))).toMatchObject({
+      kind: "stable",
+      state: "occupied",
+    });
+    expect(binding.member(otherInput).identity).toBe(other.identity);
+    expect(binding.session(other).identity).toBe(otherSession.identity);
+    expect(openings).toHaveLength(2);
+  } finally {
+    if (firstReader !== undefined && !firstTransferred && releaseCount(firstReader) === 0)
+      releaseReader(firstReader);
+    if (secondReader !== undefined && !secondTransferred && releaseCount(secondReader) === 0)
+      releaseReader(secondReader);
+    context.dispose();
+    sourceGraph.dispose();
+    targetGraph.dispose();
+  }
+});
+
