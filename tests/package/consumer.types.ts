@@ -530,10 +530,7 @@ function typecheckOnly(): void {
     initial: 0,
     step: (count: number, _event: number) => count + 1,
   };
-  const positionedStorePolicies = [
-    positionedStoreTotalPolicy,
-    positionedStoreCountPolicy,
-  ] as const;
+  const positionedStorePolicies = [positionedStoreTotalPolicy, positionedStoreCountPolicy] as const;
   const positionedStoreViews = [
     project(positionedStoreSource, positionedStoreTotalPolicy),
     project(positionedStoreSource, positionedStoreCountPolicy),
@@ -551,8 +548,7 @@ function typecheckOnly(): void {
     CapturedPositionedStoreValues,
     PositionedStoreValues
   > = true;
-  const capturedPositionedStoreValues: PositionedStoreValues =
-    positionedStoreCheckpoint.values;
+  const capturedPositionedStoreValues: PositionedStoreValues = positionedStoreCheckpoint.values;
   const positionedStoreCurrent: boolean =
     isPositionedStoreCheckpointCurrent(positionedStoreCheckpoint);
   if (positionedStoreCheckpoint.present) {
@@ -562,11 +558,7 @@ function typecheckOnly(): void {
     const uncheckedPosition: number = positionedStoreCheckpoint.position;
     void [positionedLatestEvent, positionedUnknownBoundary, uncheckedPosition];
   }
-  const positionedStoreSeed: PositionedStoreRestoreSeed<
-    number,
-    number,
-    PositionedStoreValues
-  > = {
+  const positionedStoreSeed: PositionedStoreRestoreSeed<number, number, PositionedStoreValues> = {
     after: 4,
     latest: 5,
     values: [{ total: 3 }, 2],
@@ -589,10 +581,8 @@ function typecheckOnly(): void {
     const numericEvent: number = checkpoint.latest;
     void [latestEvent, numericEvent];
   }
-  const contractCheckpointType: ContractPositionedStoreCheckpoint<
-    number,
-    PositionedStoreValues
-  > = positionedStoreCheckpoint;
+  const contractCheckpointType: ContractPositionedStoreCheckpoint<number, PositionedStoreValues> =
+    positionedStoreCheckpoint;
   const contractSeedType: ContractPositionedStoreRestoreSeed<
     number,
     number,
@@ -616,10 +606,8 @@ function typecheckOnly(): void {
     InferredPositionedStoreValues,
     PositionedStoreValues
   > = true;
-  const positionedStoreRestoration: PositionedStoreRestoration<
-    number,
-    PositionedStoreValues
-  > = inferredPositionedStoreRestoration;
+  const positionedStoreRestoration: PositionedStoreRestoration<number, PositionedStoreValues> =
+    inferredPositionedStoreRestoration;
   const positionedStoreWithOptions = preparePositionedStoreRestore(
     positionedMember,
     { id: "fresh-store-options" },
@@ -635,10 +623,8 @@ function typecheckOnly(): void {
       },
     },
   );
-  const positionedStoreWithOptionsType: PositionedStoreRestoration<
-    number,
-    PositionedStoreValues
-  > = positionedStoreWithOptions;
+  const positionedStoreWithOptionsType: PositionedStoreRestoration<number, PositionedStoreValues> =
+    positionedStoreWithOptions;
   preparePositionedStoreRestore(
     positionedMember,
     { id: "wrong-store-initial-option" },
@@ -658,17 +644,13 @@ function typecheckOnly(): void {
     { equals: (left: string, right: string) => left === right },
   );
 
-  const contractRestorationType: ContractPositionedStoreRestoration<
-    number,
-    PositionedStoreValues
-  > = positionedStoreRestoration;
+  const contractRestorationType: ContractPositionedStoreRestoration<number, PositionedStoreValues> =
+    positionedStoreRestoration;
   const positionedRestoredSource: StreamStore<number> = positionedStoreRestoration.source;
   const positionedRestoredTotal: { total: number } =
     positionedStoreRestoration.projections[0].value.get();
-  const positionedRestoredCount: number =
-    positionedStoreRestoration.projections[1].value.get();
-  const positionedActivatedSource: StreamStore<number> =
-    positionedStoreRestoration.activate();
+  const positionedRestoredCount: number = positionedStoreRestoration.projections[1].value.get();
+  const positionedActivatedSource: StreamStore<number> = positionedStoreRestoration.activate();
 
   const positionedStoreAccumulatePolicy = {
     kind: "accumulate" as const,
@@ -688,10 +670,7 @@ function typecheckOnly(): void {
   );
   type MixedPositionedStoreValues = readonly [{ total: number }, readonly number[]];
   type CapturedMixedPositionedStoreValues =
-    typeof positionedStoreMixedCheckpoint extends PositionedStoreCheckpoint<
-      number,
-      infer Values
-    >
+    typeof positionedStoreMixedCheckpoint extends PositionedStoreCheckpoint<number, infer Values>
       ? Values
       : never;
   const capturedMixedPositionedStoreValuesMatch: Equal<
@@ -728,7 +707,6 @@ function typecheckOnly(): void {
     { after: 4, latest: 5, values: [{ total: 3 }, ["wrong-event"]] },
     { token: "reader" },
   );
-
 
   preparePositionedStoreRestore(
     positionedMember,

@@ -400,7 +400,11 @@ function driveStreamSource<T>(
           const positioned = session.positioned;
           if (positioned !== undefined) positioned.diverged = true;
           if (positioned?.reader?.owned) {
-            failStream(runtime, session, new Error("Positioned Store reader reported a history gap"));
+            failStream(
+              runtime,
+              session,
+              new Error("Positioned Store reader reported a history gap"),
+            );
             return;
           }
           publishStreamEvent(runtime, session, { kind: "gap" });
@@ -918,7 +922,6 @@ export function streamMember<T>(
   }
 }
 
-
 /** @internal Issues a private Store/session pair for one admitted positioned reader. */
 export function createPositionedStoreSession<T>(
   state: GraphRuntimeState<any>,
@@ -1120,12 +1123,14 @@ export function activatePositionedStoreSession<T>(
   )
     throw new TypeError("Positioned Store reader session is no longer current");
   const admittedEvent = positioned.completed;
-  if (positioned.provider.isReaderCurrent(
-    positioned.input,
-    reader.reader,
-    reader.after,
-    reader.seed,
-  ) !== true)
+  if (
+    positioned.provider.isReaderCurrent(
+      positioned.input,
+      reader.reader,
+      reader.after,
+      reader.seed,
+    ) !== true
+  )
     throw new TypeError("Positioned Store reader reservation is no longer current");
   if (
     positioned.phase !== "dormant" ||

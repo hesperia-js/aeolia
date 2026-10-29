@@ -650,10 +650,7 @@ async function verifyPositionedStoreConsumer() {
     );
 
     const suffixSourceValue = waitForPositionedStoreValue(sourceB, (value) => value === 4);
-    const suffixCount = waitForPositionedValue(
-      restoration.projections[1],
-      (value) => value === 4,
-    );
+    const suffixCount = waitForPositionedValue(restoration.projections[1], (value) => value === 4);
     providerB.emitReader(readerB, { position: 8, value: 4 });
     await Promise.all([suffixSourceValue, suffixCount]);
     check(

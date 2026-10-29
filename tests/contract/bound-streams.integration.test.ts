@@ -824,9 +824,6 @@ it("refuses an exhausted later stream session before clearing the retained impor
   }
 });
 
-
-
-
 it("keeps same-key restored readers isolated through dormant and active caller abort", async () => {
   type Event = { position: number; value: number };
   type Reservation = { input: Input; after: number; seed: unknown };
@@ -977,23 +974,13 @@ it("keeps same-key restored readers isolated through dormant and active caller a
     const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
     readerA = reserve(input, after, seed);
     readerB = reserve(input, after, seed);
-    const first = preparePositionedStoreRestore(
-      binding,
-      input,
-      [policy] as const,
-      seed,
-      readerA,
-      { abortSignal: abortA.signal },
-    );
+    const first = preparePositionedStoreRestore(binding, input, [policy] as const, seed, readerA, {
+      abortSignal: abortA.signal,
+    });
     readerATransferred = true;
-    const second = preparePositionedStoreRestore(
-      binding,
-      input,
-      [policy] as const,
-      seed,
-      readerB,
-      { abortSignal: abortB.signal },
-    );
+    const second = preparePositionedStoreRestore(binding, input, [policy] as const, seed, readerB, {
+      abortSignal: abortB.signal,
+    });
     readerBTransferred = true;
 
     expect(openings).toHaveLength(1);

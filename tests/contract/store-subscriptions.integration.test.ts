@@ -276,7 +276,6 @@ test("an optimistic value is observable before the first committed query result"
   }
 });
 
-
 test("a dormant restored Store keeps present undefined and direct writes do not fold events", async () => {
   type Input = { readonly room: string };
   type Event = { position: number; value: number | undefined };
@@ -413,11 +412,13 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
     const restoration = preparePositionedStoreRestore(
       targetGraph.api.events,
       input,
-      [{
-        kind: "reduce",
-        initial: 0,
-        step: (count: number) => count + 1,
-      }] as const,
+      [
+        {
+          kind: "reduce",
+          initial: 0,
+          step: (count: number) => count + 1,
+        },
+      ] as const,
       seed,
       reader,
     );
@@ -528,7 +529,10 @@ test("a live equal-value prediction cannot taint the next positioned Store cut",
     ],
   });
   const graph = createGraph({
-    contract: { namespace: "predicted-positioned-store", operations: { events: stream, query, mutation } },
+    contract: {
+      namespace: "predicted-positioned-store",
+      operations: { events: stream, query, mutation },
+    },
   });
   const input = Object.freeze({ room: "one" });
   const source = graph.api.events(input);
@@ -564,7 +568,8 @@ test("a live equal-value prediction cannot taint the next positioned Store cut",
     expect(projection.value.get()).toBe(5);
     expect(isPositionedStoreCheckpointCurrent(original)).toBe(false);
     const predicted = capturePositionedStore(source, [projection] as const);
-    if (!predicted.present) throw new Error("The real source Event is missing from the prediction cut");
+    if (!predicted.present)
+      throw new Error("The real source Event is missing from the prediction cut");
     expect(predicted.latest).toBe(5);
     expect(predicted.values).toStrictEqual([5]);
     expect(predicted.resumable).toBe(false);

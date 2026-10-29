@@ -39,7 +39,12 @@ import { isObject } from "../utils.ts";
 import { __internal as reactiveInternal, signal } from "../reactive.ts";
 import type { Readable } from "../reactive.ts";
 import { assertGraphOpen, assertStoreOpen } from "./faults.ts";
-import { discardPositionedStoreSession, isLive, scheduleSweep, updateCollectionCandidate } from "./collection.ts";
+import {
+  discardPositionedStoreSession,
+  isLive,
+  scheduleSweep,
+  updateCollectionCandidate,
+} from "./collection.ts";
 import type {
   BoundStreamSessionRuntime,
   GraphProjection,
@@ -296,7 +301,6 @@ interface PositionedStoreCheckpointCapture {
 }
 
 const positionedStoreCheckpointByHandle = new WeakMap<object, PositionedStoreCheckpointCapture>();
-;
 
 interface ProjectionRuntime<T, V> {
   boundSession?: BoundStreamSessionRuntime<T>;
@@ -1518,9 +1522,7 @@ export function isPositionedCheckpointCurrent<Value, Position>(
   );
 }
 
-function positionedStoreCaptureCurrent(
-  capture: PositionedStoreCheckpointCapture,
-): boolean {
+function positionedStoreCaptureCurrent(capture: PositionedStoreCheckpointCapture): boolean {
   const { source, runtime, session, group } = capture;
   if (
     runtimeByStore.get(source) !== runtime ||
@@ -1601,10 +1603,7 @@ function positionedStoreCutResumable(capture: PositionedStoreCheckpointCapture):
  * @throws TypeError when the source or a supplied projection lacks matching native session provenance.
  * @throws Fault when the Store graph or binding context is disposed.
  */
-export function capturePositionedStore<
-  Event,
-  const Projections extends readonly Projection<any>[],
->(
+export function capturePositionedStore<Event, const Projections extends readonly Projection<any>[]>(
   source: StreamStore<Event>,
   projections: Projections,
 ): PositionedStoreCheckpoint<Event, PositionedStoreProjectionValues<Projections>> {
@@ -1691,8 +1690,7 @@ export function capturePositionedStore<
     values: Object.freeze(capturedValues),
   };
   const hasPosition = completed !== undefined;
-  const resumable =
-    positionedStoreCaptureCurrent(capture) && positionedStoreCutResumable(capture);
+  const resumable = positionedStoreCaptureCurrent(capture) && positionedStoreCutResumable(capture);
   const checkpoint = Object.freeze({
     sourceIdentity: runtime.identity,
     sessionIdentity: session.token,
@@ -1850,7 +1848,9 @@ export function preparePositionedStoreRestore<
     valuesDescriptor === undefined ||
     !("value" in valuesDescriptor)
   )
-    throw new TypeError("Positioned Store seed requires own after, latest, and values data properties");
+    throw new TypeError(
+      "Positioned Store seed requires own after, latest, and values data properties",
+    );
   const after = afterDescriptor.value as Position;
   const latest = latestDescriptor.value as Event;
   const policyLength = Object.getOwnPropertyDescriptor(policies, "length");
@@ -1877,7 +1877,8 @@ export function preparePositionedStoreRestore<
       capturedPolicies[index] as ProjectionPolicy<Event, unknown>,
       seedValues[index],
     );
-  if (!targetCurrent()) throw new TypeError("Target graph changed while reading positioned Store seed");
+  if (!targetCurrent())
+    throw new TypeError("Target graph changed while reading positioned Store seed");
   const key = storeKey(Reflect.apply(target.definition.key, target.definition, [input]));
   if (!targetCurrent())
     throw new TypeError("Target graph changed while resolving positioned Store input");
@@ -2001,7 +2002,9 @@ export function preparePositionedStoreRestore<
       targetGroup.diverged ||
       targetGroup.completed === undefined ||
       targetGroup.baseRevision !== targetGroup.completed.landingRevision ||
-      reactiveInternal.signalValue(targetRuntime.predictionStack).some((prediction) => !prediction.dead) ||
+      reactiveInternal
+        .signalValue(targetRuntime.predictionStack)
+        .some((prediction) => !prediction.dead) ||
       projections.some((projection, index) => {
         const projectionRuntime = positionedProjectionByHandle.get(projection as object);
         return (
@@ -2535,9 +2538,7 @@ function acknowledgePositionedStoreFold(
     !group.participants.has(participant) ||
     participant.event !== event ||
     participant.failed ||
-    [...group.participants].some(
-      (required) => required.failed || required.event !== event,
-    )
+    [...group.participants].some((required) => required.failed || required.event !== event)
   )
     throw new TypeError("Fold receipt is not at the current completed Store group frontier");
   if (
@@ -2550,9 +2551,7 @@ function acknowledgePositionedStoreFold(
     group.runtime.binding?.context.disposed === true
   )
     throw new TypeError("Positioned Store session is no longer current");
-  if (
-    group.provider.isReaderCurrent(group.input, lease.reader, lease.after, lease.seed) !== true
-  )
+  if (group.provider.isReaderCurrent(group.input, lease.reader, lease.after, lease.seed) !== true)
     throw new TypeError("Positioned Store reader reservation is no longer current");
   const current =
     runtime.positioned === positioned &&
@@ -2582,9 +2581,7 @@ function acknowledgePositionedStoreFold(
     group.runtime.binding?.context.disposed !== true &&
     lease.owned &&
     !lease.released &&
-    [...group.participants].every(
-      (required) => !required.failed && required.event === event,
-    );
+    [...group.participants].every((required) => !required.failed && required.event === event);
   if (!current)
     throw new TypeError("Positioned Store reader changed during provider currentness validation");
   group.provider.acknowledge(group.input, lease.reader, receipt);

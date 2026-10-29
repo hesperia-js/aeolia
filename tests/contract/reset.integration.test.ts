@@ -985,7 +985,6 @@ describe("Graph.reset", () => {
     graph.dispose();
   });
 
-
   it("reset invalidates a dormant Store reader and restores its fold seed without reopening it", async () => {
     type Input = { readonly room: string };
     type Event = { position: number; value: number };
@@ -1009,7 +1008,8 @@ describe("Graph.reset", () => {
           return {
             next: () => {
               const event = queued.shift();
-              if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
+              if (event !== undefined)
+                return Promise.resolve({ done: false as const, value: event });
               if (ended) return Promise.resolve({ done: true as const, value: undefined });
               return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
             },

@@ -122,7 +122,6 @@ export interface StreamSession<T> {
   bound?: BoundStreamSessionRuntime<T>;
 }
 
-
 /** One genuine source dispatch, independent of reactive value equality. */
 export interface PositionedStoreEvent {
   readonly identity: object;

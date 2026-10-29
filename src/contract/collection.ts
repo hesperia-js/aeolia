@@ -9,7 +9,12 @@ import { retireObservation } from "./observation-state.ts";
 import { nextValueRevision } from "./identity.ts";
 import { Fault } from "../fault.ts";
 import type { StreamDetachment, StreamTerminalCapture } from "./stream-binding.ts";
-import { beginStoreAddress, captureStoreRuntime, changeBoundAddress, endStoreAddress } from "./registry.ts";
+import {
+  beginStoreAddress,
+  captureStoreRuntime,
+  changeBoundAddress,
+  endStoreAddress,
+} from "./registry.ts";
 import {
   beginPhysicalWork,
   finishPhysicalWork,
@@ -228,10 +233,7 @@ export function returnStreamIterator<T>(
   }
 }
 
-function closePositionedStoreSession<T>(
-  runtime: StoreRuntime<T>,
-  session: StreamSession<T>,
-): void {
+function closePositionedStoreSession<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): void {
   const positioned = session.positioned;
   if (positioned === undefined || positioned.phase === "closed") return;
   const dormant = positioned.phase === "dormant";

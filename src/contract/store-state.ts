@@ -8,7 +8,12 @@ import type {
 import { Fault } from "../fault.ts";
 import { nextValueRevision } from "./identity.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
-import type { BoundStreamSessionRuntime, Prediction, StoreRuntime, StreamSession } from "./runtime.ts";
+import type {
+  BoundStreamSessionRuntime,
+  Prediction,
+  StoreRuntime,
+  StreamSession,
+} from "./runtime.ts";
 import { scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
 import { assertStoreOpen, graphFault } from "./faults.ts";
@@ -105,7 +110,8 @@ export function recordLanding<T>(
               expectedPositionedSession === runtime.stream &&
               positioned.phase === "dormant" &&
               positioned.reader !== undefined
-            ) positioned.diverged = false;
+            )
+              positioned.diverged = false;
             else positioned.diverged = true;
           }
           runtime.errorCell.set(undefined);

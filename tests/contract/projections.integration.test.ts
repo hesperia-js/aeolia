@@ -1038,7 +1038,6 @@ describe("stream projections", () => {
     }
   });
 
-
   it("captures one Store session across equal source and fold values", async () => {
     const provider = new PositionedProvider();
     const stream = positionedDefinition(provider);
@@ -1117,9 +1116,9 @@ describe("stream projections", () => {
       const foreignSource = foreignGraph.api.events(foreignInput);
       const foreignProjection = project(foreignSource, equalPolicy);
       try {
-        expect(() => capturePositionedStore(source, [equalFold, foreignProjection] as const)).toThrow(
-          TypeError,
-        );
+        expect(() =>
+          capturePositionedStore(source, [equalFold, foreignProjection] as const),
+        ).toThrow(TypeError);
       } finally {
         foreignProjection.close();
         foreignGraph.dispose();
@@ -1224,7 +1223,6 @@ describe("stream projections", () => {
     }
   });
 
-
   it("rejects overlong accumulated and wrong-count Store seeds with valid provider reservations", async () => {
     const provider = new PositionedProvider();
     const stream = positionedDefinition(provider);
@@ -1324,13 +1322,11 @@ describe("stream projections", () => {
     }
   });
 
-
   it("rejects a reader Store equals option that conflicts with its positioned declaration", async () => {
     const provider = new PositionedProvider();
     const declaredEquals = (left: number | undefined, right: number | undefined) =>
       Object.is(left, right);
-    const callerEquals = (left: number | undefined, right: number | undefined) =>
-      left === right;
+    const callerEquals = (left: number | undefined, right: number | undefined) => left === right;
     const stream = createPositionedStream<PositionedInput, number, string, number, object>({
       name: "positioned-store-equals-conflict",
       key: (input) => input.room,

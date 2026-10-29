@@ -178,7 +178,9 @@ export function boundAddressOccupied(binding: StoreBindingRuntime, key: string):
       !reader.disposed &&
       (reader.transitioning ||
         reader.baseAvailable ||
-        reactiveInternal.signalValue(reader.predictionStack).some((prediction) => !prediction.dead) ||
+        reactiveInternal
+          .signalValue(reader.predictionStack)
+          .some((prediction) => !prediction.dead) ||
         reader.requests.size > 0 ||
         (reader.activeRequest !== undefined && !reader.activeRequest.settled) ||
         (reader.stream !== undefined && !reader.stream.ended) ||
@@ -204,7 +206,9 @@ export function boundAddressOccupied(binding: StoreBindingRuntime, key: string):
 function factsCurrent(facts: AddressFacts): boolean {
   const { binding, runtime, address } = facts;
   const state = binding.context.state;
-  const readerStores = [...(binding.readerStores ?? [])].filter((reader) => String(reader.key) === facts.key);
+  const readerStores = [...(binding.readerStores ?? [])].filter(
+    (reader) => String(reader.key) === facts.key,
+  );
   const readerSnapshotsCurrent = facts.readerSnapshots.every(readerAddressSnapshotCurrent);
   return (
     !state.disposed &&
@@ -276,7 +280,9 @@ export function inspectBoundAddress(
     guard: address.guard,
     epoch: state.resetEpoch,
     runtime,
-    readerStores: [...(binding.readerStores ?? [])].filter((reader) => String(reader.key) === checkedKey),
+    readerStores: [...(binding.readerStores ?? [])].filter(
+      (reader) => String(reader.key) === checkedKey,
+    ),
     readerSnapshots: readerAddressSnapshots(binding, checkedKey),
     incarnation: runtime?.incarnation,
     revision: runtime?.valueRevision,
@@ -302,9 +308,12 @@ export function inspectBoundAddress(
     return Object.freeze({ kind: "changed" });
   const present =
     (capture?.kind === "stable" && capture.present) ||
-    readerCaptures.some((readerCapture) => readerCapture.kind === "stable" && readerCapture.present);
+    readerCaptures.some(
+      (readerCapture) => readerCapture.kind === "stable" && readerCapture.present,
+    );
   const basePresent =
-    (runtime?.baseAvailable ?? false) || facts.readerSnapshots.some((snapshot) => snapshot.basePresent);
+    (runtime?.baseAvailable ?? false) ||
+    facts.readerSnapshots.some((snapshot) => snapshot.basePresent);
   const occupied = present || boundAddressOccupied(binding, checkedKey);
   const completed = { ...facts, empty: !occupied };
   const stamp = Object.freeze({}) as BoundAddressStamp;

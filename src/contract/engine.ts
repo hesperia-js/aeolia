@@ -107,8 +107,7 @@ function realmStores(graph: Graph): readonly RealmStoreState[] {
       runtime.baseAvailable &&
       runtime.transferEligible,
   );
-  if (unsupportedReader !== undefined)
-    throw new Fault("encoding", [String(unsupportedReader.key)]);
+  if (unsupportedReader !== undefined) throw new Fault("encoding", [String(unsupportedReader.key)]);
   return graphStores
     .filter((runtime) => !runtime.disposed)
     .map((runtime) => {
@@ -640,17 +639,19 @@ export function retireBindingContextRuntime(context: BindingContextRuntime): Pro
 
 function disposeBindingContext(context: BindingContextRuntime): void {
   const state = context.state;
-  const stores = [...new Set([
-    ...[...context.bindings.values()].flatMap((profiles) =>
-      [...profiles.values()].flatMap((binding) => [...binding.stores.values()]),
-    ),
-    ...[...context.streamBindings.values()].flatMap((members) =>
-      [...members.values()].flatMap((binding) => [
-        ...binding.stores.values(),
-        ...(binding.readerStores ?? []),
-      ]),
-    ),
-  ])];
+  const stores = [
+    ...new Set([
+      ...[...context.bindings.values()].flatMap((profiles) =>
+        [...profiles.values()].flatMap((binding) => [...binding.stores.values()]),
+      ),
+      ...[...context.streamBindings.values()].flatMap((members) =>
+        [...members.values()].flatMap((binding) => [
+          ...binding.stores.values(),
+          ...(binding.readerStores ?? []),
+        ]),
+      ),
+    ]),
+  ];
   const revisions = stores.map((runtime) =>
     state.disposed ? runtime.valueRevision : nextValueRevision(runtime.valueRevision),
   );

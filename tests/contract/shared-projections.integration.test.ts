@@ -215,8 +215,6 @@ it("starts a positioned shared projection at the next event when it joins during
   }
 });
 
-
-
 it("restores shared folds over one dormant source Store without replaying the latest event", async () => {
   type Event = { position: number; value: number };
   const reservations = new WeakMap<object, { after: number; seed: unknown }>();
@@ -298,9 +296,7 @@ it("restores shared folds over one dormant source Store without replaying the la
       isReaderCurrent: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
         return (
-          reservation !== undefined &&
-          reservation.after === after &&
-          reservation.seed === seed
+          reservation !== undefined && reservation.after === after && reservation.seed === seed
         );
       },
       acknowledge: (_input, reader, receipt) => {
@@ -334,10 +330,9 @@ it("restores shared folds over one dormant source Store without replaying the la
   let restoredTotal: Projection<number> | undefined;
   let restoredEqual: Projection<number> | undefined;
   let later: Projection<number> | undefined;
-  let restoration: PositionedStoreRestoration<
-    number,
-    readonly [readonly number[], number, number]
-  > | undefined;
+  let restoration:
+    | PositionedStoreRestoration<number, readonly [readonly number[], number, number]>
+    | undefined;
   let reader: object | undefined;
   let readerTransferred = false;
   let gapReader: object | undefined;
@@ -445,10 +440,7 @@ it("restores shared folds over one dormant source Store without replaying the la
     expect(earlyReceiptAvailable).toBe(true);
     expect(earlyAcknowledgeCount).toBe(0);
     expect(acknowledgements).toHaveLength(0);
-    if (
-      earlyAcknowledgeError !== undefined &&
-      !(earlyAcknowledgeError instanceof TypeError)
-    )
+    if (earlyAcknowledgeError !== undefined && !(earlyAcknowledgeError instanceof TypeError))
       throw earlyAcknowledgeError;
 
     stopEarlyAcknowledge?.();

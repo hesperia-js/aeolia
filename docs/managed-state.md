@@ -843,7 +843,6 @@ The provider's `validateReader` and `isReaderCurrent` callbacks must be synchron
 
 Positions and reader reservations are provider-specific. Aeolia sets no retention window, cursor encoding, authorization rule or fallback for missing history. The provider must reject an expired or invalid reservation before dormant issuance, and it must report an ordered gap through its own source behavior rather than silently skipping events.
 
-
 ### Restore a shared Store session
 
 A graph member call for a positioned declaration returns a genuine `StreamStore<Event>`. Use
@@ -877,12 +876,7 @@ import {
 import type { PositionedStreamSource } from "aeolia";
 
 type Input = { readonly id: string };
-declare const sourceCallbacks: PositionedStreamSource<
-  Input,
-  number | undefined,
-  number,
-  object
->;
+declare const sourceCallbacks: PositionedStreamSource<Input, number | undefined, number, object>;
 
 const events = createPositionedStream({
   name: "orders.events",

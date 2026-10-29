@@ -798,14 +798,16 @@ export interface PositionedRestoreSeed<Value, Position> {
   readonly value: Value;
 }
 
-
 /** Native identity for one coherent Store session and its required projection values. */
 declare const positionedStoreCheckpointBrand: unique symbol;
 /**
  * Non-pulling borrowed capture of one completed positioned Store/session cut.
  * Authenticity belongs to the native issuer, not these descriptive fields.
  */
-export type PositionedStoreCheckpoint<Event, Values extends readonly unknown[] = readonly unknown[]> = {
+export type PositionedStoreCheckpoint<
+  Event,
+  Values extends readonly unknown[] = readonly unknown[],
+> = {
   /** Physical identity of the actual source Store. */
   readonly sourceIdentity: StoreIdentity;
   /** Exact native source session; a replacement session has another identity. */
@@ -848,7 +850,9 @@ export interface PositionedStoreRestoration<Event, Values extends readonly unkno
   /** Actual Store belonging to this reader/session; all returned views share it. */
   readonly source: StreamStore<Event>;
   /** Independent folds over source, seeded without opening or prefix replay. */
-  readonly projections: { readonly [Index in keyof Values]: import("./projection.ts").Projection<Values[Index]> };
+  readonly projections: {
+    readonly [Index in keyof Values]: import("./projection.ts").Projection<Values[Index]>;
+  };
   /**
    * Open this reader once after its admitted boundary, returning source unchanged.
    * @throws TypeError for repeated activation or stale session/reader authority.
@@ -866,7 +870,9 @@ export type PositionedStorePolicyValues<
   Event,
   Policies extends readonly import("./projection.ts").ProjectionPolicy<Event, any>[],
 > = {
-  readonly [Index in keyof Policies]: Policies[Index] extends import("./projection.ts").AccumulatePolicy
+  readonly [
+    Index in keyof Policies
+  ]: Policies[Index] extends import("./projection.ts").AccumulatePolicy
     ? readonly Event[]
     : Policies[Index] extends import("./projection.ts").ReducePolicy<Event, infer Value>
       ? Value
@@ -877,9 +883,9 @@ export type PositionedStorePolicyValues<
 export type PositionedStoreProjectionValues<
   Projections extends readonly import("./projection.ts").Projection<any>[],
 > = {
-  readonly [Index in keyof Projections]: Projections[Index] extends import("./projection.ts").Projection<infer Value>
-    ? Value
-    : never;
+  readonly [
+    Index in keyof Projections
+  ]: Projections[Index] extends import("./projection.ts").Projection<infer Value> ? Value : never;
 };
 
 /**

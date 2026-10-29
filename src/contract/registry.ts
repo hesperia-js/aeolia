@@ -214,17 +214,24 @@ interface StoreAddressOperationRecord {
 const storeAddressOperations = new WeakMap<object, StoreAddressOperationRecord>();
 
 /** Exact native entry address; reader-scoped Stores do not replace the keyed slot. */
-export function storeBindingAddress<T>(runtime: StoreRuntime<T>): BindingAddressRuntime | undefined {
-  return runtime.readerScope?.address ??
-    (runtime.binding === undefined ? undefined : bindingAddress(runtime.binding, String(runtime.key)));
+export function storeBindingAddress<T>(
+  runtime: StoreRuntime<T>,
+): BindingAddressRuntime | undefined {
+  return (
+    runtime.readerScope?.address ??
+    (runtime.binding === undefined
+      ? undefined
+      : bindingAddress(runtime.binding, String(runtime.key)))
+  );
 }
 
 export function beginStoreAddress<T>(runtime: StoreRuntime<T>): object | undefined {
   const address = storeBindingAddress(runtime);
   if (address === undefined) return undefined;
-  const aggregate = runtime.readerScope !== undefined && runtime.binding !== undefined
-    ? bindingAddress(runtime.binding, String(runtime.key))
-    : undefined;
+  const aggregate =
+    runtime.readerScope !== undefined && runtime.binding !== undefined
+      ? bindingAddress(runtime.binding, String(runtime.key))
+      : undefined;
   const token = {};
   address.operations.add(token);
   address.guard = {};
@@ -248,7 +255,6 @@ export function endStoreAddress<T>(runtime: StoreRuntime<T>, token: object | und
   if (operation.address.operations.delete(token)) operation.address.guard = {};
   if (operation.aggregate?.operations.delete(token)) operation.aggregate.guard = {};
 }
-
 
 export function beginBindingAddress(
   binding: StoreBindingRuntime | undefined,
