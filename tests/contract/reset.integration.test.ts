@@ -1030,7 +1030,9 @@ describe("Graph.reset", () => {
       return reader;
     };
     const releaseCount = (reader: object): number => releases.get(reader) ?? 0;
-    const releaseReader = (reader: object): void => releases.set(reader, releaseCount(reader) + 1);
+    const releaseReader = (reader: object): void => {
+      releases.set(reader, releaseCount(reader) + 1);
+    };
     const stream = createPositionedStream<Input, number, string, number, object>({
       name: "reset-reader-store",
       key: (input) => input.room,

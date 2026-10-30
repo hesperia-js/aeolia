@@ -324,7 +324,9 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
     return reader;
   };
   const releaseCount = (reader: object): number => releases.get(reader) ?? 0;
-  const releaseReader = (reader: object): void => releases.set(reader, releaseCount(reader) + 1);
+  const releaseReader = (reader: object): void => {
+    releases.set(reader, releaseCount(reader) + 1);
+  };
 
   const stream = createPositionedStream<Input, number | undefined, string, number, object>({
     name: "undefined-positioned-store",
