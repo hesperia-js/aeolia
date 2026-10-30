@@ -55,6 +55,8 @@ import type {
   PositionedStoreEvent,
   PositionedStoreParticipant,
   PositionedStoreSessionState,
+  PositionedStorePreparation,
+  PositionedContinuationAnchor,
   StreamSession,
   StoreRuntime,
 } from "./runtime.ts";
@@ -63,6 +65,8 @@ import {
   activatePositionedStoreSession,
   attachPositionedStoreAbort,
   createPositionedStoreSession,
+  publishPositionedStoreSession,
+  deliverPositionedStoreSession,
 } from "./stream.ts";
 import {
   beginPhysicalWork,
@@ -71,6 +75,11 @@ import {
   observePhysicalWork,
   physicalCleanup,
   recordCleanupFailure,
+  prepareReaderRetirement,
+  prepareReaderLifetime,
+  readerLifetimeNow,
+  retireOwner,
+  observeUnreturnedReaderRetirement,
 } from "./retirement.ts";
 import {
   beginTransferAdmission,
@@ -299,6 +308,7 @@ interface PositionedStoreCheckpointCapture {
   readonly runtime: StoreRuntime<unknown>;
   readonly session: StreamSession<unknown>;
   readonly group: PositionedStoreSessionState<unknown>;
+  readonly continuation?: PositionedContinuationAnchor;
   readonly completed?: PositionedStoreEvent;
   readonly dispatch?: PositionedStoreEvent;
   readonly baseRevision?: number;
@@ -915,6 +925,7 @@ function newPositionedState(
   record: PositionedMemberRecord,
   input: unknown,
   runtime: ProjectionRuntime<any, any>,
+  preparation?: PositionedStorePreparation,
 ): PositionedProjectionRuntime {
   const value = runtime.policy.kind === "reduce" ? runtime.policy.initial : ([] as unknown[]);
   const positioned: PositionedProjectionRuntime = {
@@ -950,9 +961,13 @@ function newPositionedState(
   if (record.binding !== undefined) {
     const close = (): void => finishPositioned(runtime, false);
     positioned.contextCleanup = close;
-    const projections = record.binding.context.positionedProjections ?? new Set<() => void>();
-    record.binding.context.positionedProjections = projections;
-    projections.add(close);
+    if (preparation !== undefined && !preparation.published) {
+      (preparation.contextStops ??= []).push(close);
+    } else {
+      const projections = record.binding.context.positionedProjections ?? new Set<() => void>();
+      record.binding.context.positionedProjections = projections;
+      projections.add(close);
+    }
   }
   return positioned;
 }
@@ -1027,7 +1042,7 @@ function finishPositioned<T, V>(
   noteTransferChange(runtime);
   noteTransferChange(source);
   noteTransferChange(positioned);
-  if (positioned.binding !== undefined) noteTransferChange(positioned.binding.handle);
+  if (positioned.binding !== undefined && positioned.storeGroup?.preparation?.published !== false) noteTransferChange(positioned.binding.handle);
   positioned.transitioning = true;
   if (positioned.storeGroup !== undefined && positioned.storeParticipant !== undefined) {
     if (failed) {
@@ -1088,6 +1103,7 @@ function finishPositioned<T, V>(
   if (
     state !== undefined &&
     !state.disposed &&
+    positioned.storeGroup?.preparation?.published !== false &&
     runtime.closed &&
     runtime.source === source &&
     source.retired
@@ -1196,7 +1212,7 @@ function acceptPositioned<T, V>(
           Object.is(event.position, position) &&
           Object.is(event.latest, item)
         )
-          participant.event = event;
+          { participant.event = event; participant.anchor = event.identity; }
       },
     );
   } catch (error) {
@@ -1239,6 +1255,7 @@ function initializeProjection<T, V>(
   graph: Graph,
   policy: ProjectionPolicy<T, V>,
   retirement?: RetirementOwner,
+  preparation?: PositionedStorePreparation,
 ): { runtime: ProjectionRuntime<T, V>; projection: Projection<V> } {
   const state = graphRuntimeByGraph.get(graph as object);
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
@@ -1274,7 +1291,7 @@ function initializeProjection<T, V>(
     close,
   });
 
-  runtime.unregister = registerProjection(graph, {
+  const registration: GraphProjection = {
     captureCancellation: () => {
       const source = runtime.source;
       return runtime.closed || source.retired
@@ -1291,7 +1308,15 @@ function initializeProjection<T, V>(
       if (!runtime.closed) runtime.restartSource?.();
     },
     dispose: close,
-  });
+  };
+  if (preparation !== undefined && !preparation.published) {
+    let attached = false;
+    preparation.registrations.push(registration);
+    (preparation.publicationMarkers ??= []).push(() => { attached = true; });
+    runtime.unregister = () => {
+      if (attached && state.projections.has(registration)) { noteTransferChange(state); noteTransferChange(registration); state.projections.delete(registration); }
+    };
+  } else runtime.unregister = registerProjection(graph, registration);
   return { runtime, projection };
 }
 
@@ -1420,8 +1445,9 @@ function openIndependent<T, V>(
 function makeSharedProjection<T, V>(
   source: StreamStore<T>,
   policy: ProjectionPolicy<T, V>,
+  detached = false,
 ): Projection<V> {
-  const store = runtimeForStore(source) as StoreRuntime<T> | undefined;
+  const store = (detached ? runtimeByStore.get(source) : runtimeForStore(source)) as StoreRuntime<T> | undefined;
   const bound = boundStreamByStore.get(source);
   if (
     store === undefined ||
@@ -1445,7 +1471,8 @@ function makeSharedProjection<T, V>(
   const { runtime, projection } = initializeProjection<T, V>(
     store.graph,
     projectionPolicy,
-    bound?.session.physical.owner ?? store.graph.__runtime.retirement,
+    store.stream?.physical.owner ?? store.graph.__runtime.retirement,
+    detached ? store.stream?.positioned?.preparation : undefined,
   );
   projectionSourceRuntimeByOwner.set(runtime, store as StoreRuntime<unknown>);
   if (bound !== undefined) runtime.boundSession = bound as unknown as BoundStreamSessionRuntime<T>;
@@ -1467,6 +1494,7 @@ function makeSharedProjection<T, V>(
         },
         store.streamSource?.input,
         runtime,
+        detached ? store.stream?.positioned?.preparation : undefined,
       );
       if (store.streamSource !== undefined) {
         runtime.positioned!.key = store.key;
@@ -1477,6 +1505,7 @@ function makeSharedProjection<T, V>(
         const participant: PositionedStoreParticipant = {
           projection,
           ...(group.completed === undefined ? {} : { event: group.completed }),
+          ...(group.continuation === undefined ? {} : { anchor: group.continuation.token }),
           failed: false,
         };
         group.participants.add(participant);
@@ -1542,8 +1571,10 @@ function attachSharedProjection<T, V>(
   nextListeners.add(listener);
   session.listeners = nextListeners;
   session.unobservedSince = undefined;
-  updateCollectionCandidate(store);
-  scheduleSweep(store.graph.__runtime);
+  if (session.positioned?.preparation?.published !== false) {
+    updateCollectionCandidate(store);
+    scheduleSweep(store.graph.__runtime);
+  }
   generationSource.detach = () => {
     noteTransferChange(runtime);
     noteTransferChange(generationSource);
@@ -1551,8 +1582,10 @@ function attachSharedProjection<T, V>(
     noteTransferChange(session);
     session.listeners.delete(listener);
     if (store.stream === session && !isLive(store)) session.unobservedSince = Date.now();
-    updateCollectionCandidate(store);
-    scheduleSweep(store.graph.__runtime);
+    if (session.positioned?.preparation?.published !== false) {
+      updateCollectionCandidate(store);
+      scheduleSweep(store.graph.__runtime);
+    }
   };
 }
 
@@ -1676,7 +1709,7 @@ export function isPositionedCheckpointCurrent<Value, Position>(
   );
 }
 
-function positionedStoreCaptureCurrent(capture: PositionedStoreCheckpointCapture): boolean {
+function positionedStoreCaptureCurrent(capture: PositionedStoreCheckpointCapture, now = readerLifetimeNow()): boolean {
   const { source, runtime, session, group } = capture;
   try {
     assertStoreHandlePublished(source);
@@ -1692,6 +1725,8 @@ function positionedStoreCaptureCurrent(capture: PositionedStoreCheckpointCapture
     !Object.is(session.position, capture.position) ||
     group.runtime !== runtime ||
     group.completed !== capture.completed ||
+    group.continuation !== capture.continuation ||
+    group.preparation?.lifetime?.currentAt(now) === false ||
     group.dispatch !== capture.dispatch ||
     group.baseRevision !== capture.baseRevision ||
     group.diverged !== capture.diverged ||
@@ -1702,48 +1737,40 @@ function positionedStoreCaptureCurrent(capture: PositionedStoreCheckpointCapture
     runtime.binding?.context.disposed === true
   )
     return false;
-  return capture.projections.every((item) => {
+  for (let index = 0; index < capture.projections.length; index++) {
+    const item = capture.projections[index]!;
     const positioned = item.runtime.positioned;
-    return (
-      positionedProjectionByHandle.get(item.handle) === item.runtime &&
-      positioned?.storeGroup === group &&
-      positioned.storeParticipant === item.participant &&
-      positioned.tuple === item.tuple &&
-      group.participants.has(item.participant) &&
-      item.participant.event === item.event &&
-      item.participant.failed === item.failed
-    );
-  });
+    if (positionedProjectionByHandle.get(item.handle) !== item.runtime || positioned === undefined ||
+        positioned.storeGroup !== group || positioned.storeParticipant !== item.participant ||
+        positioned.tuple !== item.tuple || !group.participants.has(item.participant) ||
+        item.participant.event !== item.event || item.participant.failed !== item.failed) return false;
+  }
+  return true;
 }
 
 function positionedStoreCutResumable(capture: PositionedStoreCheckpointCapture): boolean {
-  const { runtime, session, group, completed } = capture;
-  return (
-    completed !== undefined &&
-    capture.dispatch === undefined &&
-    !capture.diverged &&
-    group.baseRevision === completed.landingRevision &&
-    session.hasPosition &&
-    Object.is(session.position, completed.position) &&
-    runtime.baseAvailable &&
-    runtime.hasAcceptedLanding &&
-    !runtime.invalidated &&
-    !reactiveInternal.signalValue(runtime.predictionStack).some((prediction) => !prediction.dead) &&
-    capture.projections.every((item) => {
-      const positioned = item.runtime.positioned;
-      return (
-        positioned !== undefined &&
-        item.tuple.hasPosition &&
-        Object.is(item.tuple.position, completed.position) &&
-        item.tuple.status === "open" &&
-        item.tuple.resumable &&
-        !item.failed &&
-        item.event === completed &&
-        item.tuple.generation === item.runtime.source.generation &&
-        !positioned.transitioning
-      );
-    })
-  );
+  const { runtime, session, group, completed, continuation } = capture;
+  if (continuation === undefined || capture.dispatch !== undefined || capture.diverged ||
+      runtime.invalidated || group.phase === "closed") return false;
+  const predictions = reactiveInternal.signalValue(runtime.predictionStack);
+  for (let index = 0; index < predictions.length; index++) if (!predictions[index]!.dead) return false;
+  if (completed !== undefined && (group.baseRevision !== completed.landingRevision ||
+      !session.hasPosition || !Object.is(session.position, completed.position))) return false;
+  if (completed === undefined && continuation.kind === "event" && runtime.readerScope === undefined) return false;
+  for (let index = 0; index < capture.projections.length; index++) {
+    const item = capture.projections[index]!;
+    const positioned = item.runtime.positioned;
+    if (positioned === undefined || item.tuple.status !== "open" || item.failed || positioned.transitioning ||
+        item.tuple.generation !== item.runtime.source.generation) return false;
+    if (completed !== undefined) {
+      if (!item.tuple.hasPosition || !Object.is(item.tuple.position, completed.position) ||
+          !item.tuple.resumable || item.event !== completed) return false;
+    } else if (item.participant.anchor !== continuation.token) return false;
+    else if (continuation.kind === "initial") {
+      if (item.tuple.hasPosition || item.tuple.revision !== 0) return false;
+    } else if (!item.tuple.hasPosition || !item.tuple.resumable || !Object.is(item.tuple.position, continuation.after)) return false;
+  }
+  return true;
 }
 
 /**
@@ -1839,6 +1866,7 @@ export function capturePositionedStore<Event, const Projections extends readonly
     session: session as StreamSession<unknown>,
     group: group as PositionedStoreSessionState<unknown>,
     ...(completed === undefined ? {} : { completed }),
+    ...(group.continuation === undefined ? {} : { continuation: group.continuation }),
     ...(group.dispatch === undefined ? {} : { dispatch: group.dispatch }),
     ...(group.baseRevision === undefined ? {} : { baseRevision: group.baseRevision }),
     diverged: group.diverged,
@@ -1858,6 +1886,7 @@ export function capturePositionedStore<Event, const Projections extends readonly
     ...(hasPosition ? { latest: completed.latest } : {}),
     hasPosition,
     position: hasPosition ? completed.position : undefined,
+    ...(group.continuation === undefined ? {} : { continuation: Object.freeze({ kind: group.continuation.kind, after: group.continuation.after }) }),
     values: capture.values,
     resumable,
   }) as PositionedStoreCheckpoint<Event, PositionedStoreProjectionValues<Projections>>;
@@ -1941,16 +1970,19 @@ function capturePositionedStoreOptions<T>(
 }
 
 /**
- * Admits a provider-authenticated Event and target fold tuple into one fresh Store/session.
+ * Admits a provider-authenticated continuation and fold tuple into one fresh Store/session.
  *
  * The target provider validates the own-property seed and reader before native
  * ownership transfers. Policies are target code; native does not decode data or
- * replay the source prefix. Seed values and the latest Event are borrowed, not
- * cloned. Accumulation seeds must not exceed their target policy maximum;
+ * replay the source prefix. Seed values and any present base are borrowed, not
+ * cloned. Initial anchors and omitted bases create no Event, landing, or fold.
+ * Accumulation seeds must not exceed their target policy maximum;
  * subsequent caller mutation is not monitored.
  *
  * Optional Store options follow ordinary first-opener validation. An authored
- * initial is the Store reset baseline; seed.latest is the current source Event.
+ * initial is the Store reset baseline. The legacy latest form retains its
+ * behavior; the boundary/base form preserves a genuine target base and represents
+ * omitted data separately from a present undefined value.
  * Snapshot, equality, and abort behavior use the supplied first-opener options.
  * A pre-aborted or reentrantly aborted signal before ownership transfer closes
  * staging and leaves the reader with the caller. In that case preparation throws
@@ -1961,250 +1993,263 @@ function capturePositionedStoreOptions<T>(
  * @param member - The exact target graph member or native binding.
  * @param input - Input used for target key and provider validation.
  * @param policies - Target projection policies in seed tuple order.
- * @param seed - Own after, latest, and values data properties authenticated by the provider.
+ * @param seed - Legacy after/latest/values or explicit boundary/base/values, authenticated by the provider.
  * @param reader - Reader already reserved by the target provider.
  * @param options - Optional ordinary Store options for this first reader Store.
- * @returns The actual reader-owned StreamStore and its seeded shared projections.
+ * @returns The actual reader-owned Store, seeded projections, and original resource retirement completion.
  * @throws TypeError when member, seed, tuple, policy, options, reader, or current target authority is invalid.
  * @throws AbortError when caller cancellation happens before native ownership transfer.
  */
 export function preparePositionedStoreRestore<
-  Input,
-  Event,
-  Position,
-  Reader,
+  Input, Event, Position, Reader,
   const Policies extends readonly ProjectionPolicy<NoInfer<Event>, any>[],
 >(
-  member: PositionedStreamAccess<Input, Event, Position, Reader>,
-  input: Input,
-  policies: Policies,
-  seed: PositionedStoreRestoreSeed<
-    NoInfer<Event>,
-    NoInfer<Position>,
-    NoInfer<PositionedStorePolicyValues<Event, Policies>>
-  >,
-  reader: NoInfer<Reader>,
-  options?: ValueOptions<NoInfer<Event>>,
+  member: PositionedStreamAccess<Input, Event, Position, Reader>, input: Input, policies: Policies,
+  seed: PositionedStoreRestoreSeed<NoInfer<Event>, NoInfer<Position>, NoInfer<PositionedStorePolicyValues<Event, Policies>>>,
+  reader: NoInfer<Reader>, options?: ValueOptions<NoInfer<Event>>,
 ): PositionedStoreRestoration<Event, PositionedStorePolicyValues<Event, Policies>> {
+  return preparePositionedStoreGroup(member, input, policies, seed, reader, options, false).restoration as
+    PositionedStoreRestoration<Event, PositionedStorePolicyValues<Event, Policies>>;
+}
+
+export interface PreparedPositionedStoreTransfer {
+  readonly runtime: StoreRuntime<unknown>;
+  readonly session: StreamSession<unknown>;
+  readonly group: PositionedStoreSessionState<unknown>;
+  readonly restoration: PositionedStoreRestoration<unknown, readonly unknown[]>;
+  readonly seed: object;
+  readonly projections: readonly Projection<unknown>[];
+  issue(): void;
+  currentAt(now: number): boolean;
+  validate(): void;
+  publish(): void;
+  deliver(): void;
+  discard(): void;
+  facet(index: number, role: string): Readable<unknown> | undefined;
+}
+
+/** @internal Uses the same native restoration constructor with deferred membership. */
+export function preparePositionedStoreTransfer(
+  member: PositionedStreamAccess<any, any, any, any>, input: unknown,
+  policies: readonly ProjectionPolicy<any, any>[], seed: PositionedStoreRestoreSeed<any, any, readonly unknown[]>,
+  reader: unknown, options?: ValueOptions<unknown>,
+): PreparedPositionedStoreTransfer {
+  return preparePositionedStoreGroup(member, input, policies, seed, reader, options, true);
+}
+
+function positionedOwnData(value: unknown, allowed: readonly string[]): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new TypeError("Positioned preparation requires own data records");
+  const result: Record<string, unknown> = Object.create(null);
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.includes(key)) throw new TypeError("Unknown positioned seed field");
+    const field = Object.getOwnPropertyDescriptor(value, key);
+    if (field === undefined || !("value" in field)) throw new TypeError("Positioned seed fields must be own data");
+    result[key] = field.value;
+  }
+  return result;
+}
+
+function preparePositionedStoreGroup(
+  member: PositionedStreamAccess<any, any, any, any>, input: unknown,
+  policies: readonly ProjectionPolicy<any, any>[], seed: PositionedStoreRestoreSeed<any, any, readonly unknown[]>,
+  reader: unknown, options: ValueOptions<unknown> | undefined, detached: boolean,
+): PreparedPositionedStoreTransfer {
   const target = positionedMemberRecord(member);
   const targetEpoch = target.graphState.resetEpoch;
-  const targetCurrent = (): boolean =>
-    target.graphState.resetEpoch === targetEpoch &&
-    !target.graphState.disposed &&
-    target.binding?.context.disposed !== true;
+  const targetCurrent = (): boolean => target.graphState.resetEpoch === targetEpoch &&
+    !target.graphState.disposed && target.binding?.context.disposed !== true;
   if (target.binding !== undefined) assertBindingContextOpen(target.binding.context);
   else assertGraphOpen(target.graphState);
-  const capturedOptions = capturePositionedStoreOptions(options, targetCurrent);
-  if (seed === null || typeof seed !== "object" || Array.isArray(seed))
-    throw new TypeError("Invalid positioned Store restore seed");
-  const afterDescriptor = Object.getOwnPropertyDescriptor(seed, "after");
-  const latestDescriptor = Object.getOwnPropertyDescriptor(seed, "latest");
-  const valuesDescriptor = Object.getOwnPropertyDescriptor(seed, "values");
-  if (
-    afterDescriptor === undefined ||
-    !("value" in afterDescriptor) ||
-    latestDescriptor === undefined ||
-    !("value" in latestDescriptor) ||
-    valuesDescriptor === undefined ||
-    !("value" in valuesDescriptor)
-  )
-    throw new TypeError(
-      "Positioned Store seed requires own after, latest, and values data properties",
-    );
-  const after = afterDescriptor.value as Position;
-  const latest = latestDescriptor.value as Event;
-  const policyLength = Object.getOwnPropertyDescriptor(policies, "length");
-  if (
-    !Array.isArray(policies) ||
-    policyLength === undefined ||
-    !("value" in policyLength) ||
-    !Number.isSafeInteger(policyLength.value) ||
-    policyLength.value < 0
-  )
-    throw new TypeError("Positioned Store policies must be a tuple");
-  const policyList = readOwnDataArray(policies, policyLength.value, "Positioned Store policies");
-  const seedValues = readOwnDataArray(
-    valuesDescriptor.value,
-    policyList.length,
-    "Positioned Store seed values",
-  );
-  const capturedPolicies = policyList.map((policy) => {
-    if (!isProjectionPolicy(policy)) throw new TypeError("Invalid positioned Store target policy");
-    return capturePositionedPolicy(policy as ProjectionPolicy<Event, unknown>);
-  });
-  for (let index = 0; index < capturedPolicies.length; index += 1)
-    assertPositionedAccumulationSeedWithinMax(
-      capturedPolicies[index] as ProjectionPolicy<Event, unknown>,
-      seedValues[index],
-    );
-  if (!targetCurrent())
-    throw new TypeError("Target graph changed while reading positioned Store seed");
-  const key = storeKey(Reflect.apply(target.definition.key, target.definition, [input]));
-  if (!targetCurrent())
-    throw new TypeError("Target graph changed while resolving positioned Store input");
-  if (target.provider.validateReader(input, reader, after, undefined, seed) !== true)
-    throw new TypeError("Provider reader did not authenticate the positioned Store seed");
-  if (!targetCurrent())
-    throw new TypeError("Target graph changed during positioned Store reader validation");
-  if (target.provider.isReaderCurrent(input, reader, after, seed) !== true)
-    throw new TypeError("Positioned Store reader reservation is no longer current");
-  if (!targetCurrent())
-    throw new TypeError("Target graph changed during positioned Store reader currentness");
-  for (let index = 0; index < capturedPolicies.length; index += 1)
-    assertPositionedAccumulationSeedWithinMax(
-      capturedPolicies[index] as ProjectionPolicy<Event, unknown>,
-      seedValues[index],
-    );
-
-  const source = createPositionedStoreSession(
-    target.graphState,
-    target.definition,
-    input,
-    key,
-    target.member,
-    target.binding,
-    after,
-    latest,
-    reader,
-    seed,
-    capturedOptions,
-  );
-  const targetRuntime = runtimeByStore.get(source as object) as StoreRuntime<Event>;
-  const targetSession = targetRuntime.stream!;
-  const targetGroup = targetSession.positioned!;
-  const projections: Projection<unknown>[] = [];
-  const seededTuples: PositionedProjectionTuple<unknown, unknown>[] = [];
+  const admission = beginTransferAdmission(target.graphState, target.definition, target.binding?.handle, input);
+  const retirement = prepareReaderRetirement(target.binding?.context.retirement ?? target.graphState.retirement);
+  let runtime: StoreRuntime<unknown> | undefined;
+  let session: StreamSession<unknown> | undefined;
   let phase: "dormant" | "active" | "discarded" = "dormant";
-  try {
-    for (let index = 0; index < capturedPolicies.length; index += 1) {
-      const projection = makeSharedProjection(
-        source,
-        capturedPolicies[index] as ProjectionPolicy<Event, unknown>,
-      );
-      const projectionRuntime = positionedProjectionByHandle.get(projection as object) as
-        | ProjectionRuntime<Event, unknown>
-        | undefined;
-      const positioned = projectionRuntime?.positioned;
-      const participant = positioned?.storeParticipant;
-      if (
-        projectionRuntime === undefined ||
-        positioned === undefined ||
-        positioned.storeGroup !== targetGroup ||
-        participant === undefined
-      )
-        throw new TypeError("Target projection did not join its positioned Store session");
-      const tuple: PositionedProjectionTuple<unknown, Position> = {
-        value: seedValues[index],
-        status: "open",
-        error: undefined,
-        hasPosition: true,
-        position: after,
-        generation: projectionRuntime.source.generation,
-        revision: 0,
-        resumable: true,
-      };
-      const previous = positioned.tuple;
-      const current = (): boolean =>
-        targetCurrent() &&
-        targetRuntime.stream === targetSession &&
-        !targetSession.ended &&
-        targetGroup.phase === "dormant" &&
-        targetGroup.completed !== undefined &&
-        targetGroup.baseRevision === targetGroup.completed.landingRevision &&
-        !targetGroup.diverged &&
-        !projectionRuntime.closed &&
-        !positioned.transitioning &&
-        positioned.tuple === previous;
-      if (!writePositionedTuple(projectionRuntime, tuple, current))
-        throw new TypeError("Target positioned projection changed during seed landing");
-      participant.event = targetGroup.completed;
-      projections.push(projection);
-      seededTuples.push(tuple as PositionedProjectionTuple<unknown, unknown>);
-    }
-    const lease = targetGroup.reader;
-    if (lease === undefined) throw new TypeError("Positioned Store reader lease is missing");
-    attachPositionedStoreAbort(targetRuntime, targetSession, capturedOptions?.abortSignal);
-    if (
-      !targetCurrent() ||
-      target.provider.isReaderCurrent(input, reader, after, seed) !== true ||
-      !targetCurrent()
-    )
-      throw new TypeError("Positioned Store target changed while issuing its reader Store");
-    for (let index = 0; index < capturedPolicies.length; index += 1)
-      assertPositionedAccumulationSeedWithinMax(
-        capturedPolicies[index] as ProjectionPolicy<Event, unknown>,
-        seedValues[index],
-      );
-    if (
-      !targetCurrent() ||
-      targetRuntime.stream !== targetSession ||
-      targetSession.ended ||
-      targetGroup.phase !== "dormant" ||
-      targetGroup.completed === undefined ||
-      targetGroup.baseRevision !== targetGroup.completed.landingRevision ||
-      targetGroup.diverged
-    )
-      throw new TypeError("Positioned Store target changed while checking final seed bounds");
-    lease.owned = true;
-  } catch (error) {
-    phase = "discarded";
-    discardPositionedStoreSession(targetRuntime, targetSession);
-    throw error;
-  }
-
-  const activate = (): StreamStore<Event> => {
-    if (phase !== "dormant") throw new TypeError("Positioned Store restoration is one-shot");
-    if (
-      !targetCurrent() ||
-      targetRuntime.stream !== targetSession ||
-      targetSession.ended ||
-      targetGroup.phase !== "dormant" ||
-      targetGroup.diverged ||
-      targetGroup.completed === undefined ||
-      targetGroup.baseRevision !== targetGroup.completed.landingRevision ||
-      reactiveInternal
-        .signalValue(targetRuntime.predictionStack)
-        .some((prediction) => !prediction.dead) ||
-      projections.some((projection, index) => {
-        const projectionRuntime = positionedProjectionByHandle.get(projection as object);
-        const projectionPositioned = projectionRuntime?.positioned;
-        return (
-          projectionPositioned === undefined ||
-          projectionPositioned.tuple !== seededTuples[index] ||
-          projectionPositioned.storeParticipant?.event !== targetGroup.completed
-        );
-      })
-    ) {
-      phase = "discarded";
-      discardPositionedStoreSession(targetRuntime, targetSession);
-      throw new TypeError("Positioned Store restoration is no longer current");
-    }
-    phase = "active";
-    try {
-      activatePositionedStoreSession(targetRuntime, targetSession);
-      if (phase !== "active" || !targetCurrent())
-        throw new TypeError("Positioned Store restoration changed during activation");
-    } catch (error) {
-      phase = "discarded";
-      discardPositionedStoreSession(targetRuntime, targetSession);
-      throw error;
-    }
-    return source;
-  };
-  const discard = (): void => {
+  let published = !detached;
+  let delivered = false;
+  const discard = (abortReason?: unknown): void => {
     if (phase === "discarded") return;
     phase = "discarded";
-    discardPositionedStoreSession(targetRuntime, targetSession);
+    if (runtime !== undefined && session !== undefined) discardPositionedStoreSession(runtime, session, abortReason);
+    else retireOwner(retirement, () => {});
   };
-  return Object.freeze({
-    source,
-    projections: Object.freeze(projections) as PositionedStoreRestoration<
-      Event,
-      PositionedStorePolicyValues<Event, Policies>
-    >["projections"],
-    activate,
-    discard,
-  });
+  try {
+    const capturedOptions = capturePositionedStoreOptions(options, targetCurrent);
+    const data = positionedOwnData(seed, Object.hasOwn(seed, "boundary") ? ["boundary", "base", "values"] : ["after", "latest", "values"]);
+    const legacy = !Object.hasOwn(data, "boundary");
+    let boundary: { readonly kind: "event" | "initial"; readonly after: unknown };
+    let base: { readonly present: false } | { readonly present: true; readonly value: unknown };
+    if (legacy) {
+      if (!Object.hasOwn(data, "after") || !Object.hasOwn(data, "latest"))
+        throw new TypeError("Legacy positioned seed requires own after/latest properties");
+      boundary = { kind: "event", after: data.after };
+      base = { present: true, value: data.latest };
+    } else {
+      const anchor = positionedOwnData(data.boundary, ["kind", "after"]);
+      const presence = positionedOwnData(data.base, ["present", "value"]);
+      if ((anchor.kind !== "event" && anchor.kind !== "initial") || !Object.hasOwn(anchor, "after") ||
+          (presence.present !== true && presence.present !== false) ||
+          (presence.present ? !Object.hasOwn(presence, "value") : Object.hasOwn(presence, "value")))
+        throw new TypeError("Invalid positioned continuation boundary or base presence");
+      boundary = { kind: anchor.kind, after: anchor.after };
+      base = presence.present ? { present: true, value: presence.value } : { present: false };
+    }
+    const length = Object.getOwnPropertyDescriptor(policies, "length");
+    if (!Array.isArray(policies) || length === undefined || !("value" in length) ||
+        !Number.isSafeInteger(length.value) || length.value < 0)
+      throw new TypeError("Positioned Store policies must be a tuple");
+    const capturedPolicies = readOwnDataArray(policies, length.value, "Positioned Store policies").map((policy) => {
+      if (!isProjectionPolicy(policy)) throw new TypeError("Invalid positioned Store target policy");
+      const captured = capturePositionedPolicy(policy as ProjectionPolicy<unknown, unknown>);
+      if (!targetCurrent()) throw new TypeError("Target changed while capturing positioned policy");
+      return captured;
+    });
+    const values = readOwnDataArray(data.values, capturedPolicies.length, "Positioned Store seed values");
+    for (let index = 0; index < capturedPolicies.length; index++)
+      assertPositionedAccumulationSeedWithinMax(capturedPolicies[index]!, values[index]);
+    if (!targetCurrent()) throw new TypeError("Target changed while checking positioned seed");
+    const key = storeKey(Reflect.apply(target.definition.key, target.definition, [input]));
+    if (!targetCurrent()) throw new TypeError("Target changed while resolving positioned input");
+    if (target.provider.validateReader(input, reader, boundary.after, undefined, seed) !== true || !targetCurrent())
+      throw new TypeError("Provider did not authenticate the exact positioned seed");
+    if (target.provider.isReaderCurrent(input, reader, boundary.after, seed) !== true || !targetCurrent())
+      throw new TypeError("Positioned reader is no longer current");
+    if (detached && legacy) throw new TypeError("Required positioned transfer needs explicit boundary/base presence");
+    const source = createPositionedStoreSession(target.graphState, target.definition, input, key, target.member,
+      target.binding, boundary.after, base.present ? base.value : undefined, reader, seed, capturedOptions,
+      { boundary, base, legacy, detached, retirement });
+    runtime = runtimeByStore.get(source as object) as StoreRuntime<unknown>;
+    session = runtime.stream!;
+    const actualRuntime = runtime;
+    const actualSession = session;
+    const group = actualSession.positioned!;
+    const preparation = group.preparation!;
+    const anchor = group.continuation;
+    if (anchor === undefined) throw new TypeError("Positioned restoration has no genuine continuation anchor");
+    const projections: Projection<unknown>[] = [];
+    const tuples: PositionedProjectionTuple<unknown, unknown>[] = [];
+    const projectionRuntimes: ProjectionRuntime<unknown, unknown>[] = [];
+    for (let index = 0; index < capturedPolicies.length; index++) {
+      const projection = makeSharedProjection(source, capturedPolicies[index]!, detached);
+      const projected = positionedProjectionByHandle.get(projection as object)!;
+      const positioned = projected.positioned!;
+      if (positioned.storeGroup !== group || positioned.storeParticipant === undefined)
+        throw new TypeError("Restored projection did not join its actual session");
+      const next: PositionedProjectionTuple<unknown, unknown> = {
+        value: values[index], status: "open", error: undefined,
+        hasPosition: boundary.kind === "event", position: boundary.kind === "event" ? boundary.after : undefined,
+        generation: projected.source.generation, revision: 0, resumable: true,
+      };
+      const before = positioned.tuple;
+      if (!writePositionedTuple(projected, next, () => targetCurrent() && actualRuntime.stream === actualSession &&
+          !actualSession.ended && group.phase === "dormant" && group.continuation === anchor &&
+          !group.diverged && !projected.closed && positioned.tuple === before))
+        throw new TypeError("Target projection changed during seed preparation");
+      positioned.restored = true;
+      positioned.storeParticipant.anchor = anchor.token;
+      if (legacy) positioned.storeParticipant.event = group.completed;
+      projections.push(projection); tuples.push(next); projectionRuntimes.push(projected);
+    }
+    const lease = group.reader!;
+    const incarnation = actualRuntime.incarnation;
+    const currentAt = (now: number): boolean => {
+      if (!(phase !== "discarded" && targetCurrent() && actualRuntime.incarnation === incarnation &&
+      actualRuntime.stream === actualSession && actualRuntime.readerScope?.session === actualSession &&
+      !actualRuntime.disposed && !actualSession.ended && group.phase !== "closed" &&
+      group.continuation === anchor && !group.diverged && group.dispatch === undefined &&
+      !lease.released && preparation.lifetime?.currentAt(now) !== false)) return false;
+      const predictions = reactiveInternal.signalValue(actualRuntime.predictionStack);
+      for (let index = 0; index < predictions.length; index++) if (!predictions[index]!.dead) return false;
+      for (let index = 0; index < projectionRuntimes.length; index++) {
+        const projected = projectionRuntimes[index]!;
+        const positioned = projected.positioned;
+        const participant = positioned?.storeParticipant;
+        if (projected.closed || positioned === undefined || participant === undefined || positioned.tuple !== tuples[index] || positioned.transitioning ||
+            participant.anchor !== anchor.token ||
+            !group.participants.has(participant) ||
+            !Object.is(reactiveInternal.signalValue(projected.valueCell), tuples[index]!.value)) return false;
+      }
+      return true;
+    };
+    attachPositionedStoreAbort(actualRuntime, actualSession, capturedOptions?.abortSignal);
+    if (target.provider.isReaderCurrent(input, reader, boundary.after, seed) !== true || !targetCurrent())
+      throw new TypeError("Reader changed while creating positioned counterparts");
+    const lifetime = target.provider.readerLifetime;
+    if (detached && lifetime === undefined) throw new TypeError("Required reader has no observable lifetime");
+    if (lifetime !== undefined) {
+      const lifetimeValue = lifetime(input, reader, boundary.after, seed);
+      if (!targetCurrent()) throw new TypeError("Reader target changed during lifetime capture");
+      preparation.lifetime = prepareReaderLifetime(lifetimeValue, (abortReason) => {
+        try { discard(abortReason); } catch (cause) { reportGraphContinuationError(actualRuntime.graph, cause); }
+      });
+    }
+    if (!currentAt(readerLifetimeNow())) throw new TypeError("Positioned group changed before ownership transfer");
+    if (detached) {
+      for (const projected of projectionRuntimes)
+        for (const readable of [projected.valueCell, projected.statusCell, projected.errorCell])
+          reactiveInternal.onActualRead(readable, () => {
+            if (!preparation.published) throw new TypeError("The positioned projection is still unpublished");
+          });
+    }
+    const activate = (): StreamStore<unknown> => {
+      if (phase !== "dormant" || !published || !preparation.published)
+        throw new TypeError("Positioned Store activation requires its published dormant group");
+      if (!currentAt(readerLifetimeNow())) { discard(); throw new TypeError("Positioned group is no longer current"); }
+      phase = "active";
+      try { activatePositionedStoreSession(actualRuntime, actualSession); }
+      catch (cause) { discard(); throw cause; }
+      return source;
+    };
+    const restoration: PositionedStoreRestoration<unknown, readonly unknown[]> = Object.freeze({
+      source, projections: Object.freeze(projections), retired: retirement.promise, activate, discard,
+    });
+    const result: PreparedPositionedStoreTransfer = Object.freeze({
+      runtime: actualRuntime, session: actualSession, group, restoration, seed: seed as object,
+      projections: restoration.projections, currentAt,
+      issue() {
+        if (!currentAt(readerLifetimeNow())) throw new TypeError("Positioned reader changed before native issuance");
+        lease.owned = true;
+      },
+      validate() {
+        if (!currentAt(readerLifetimeNow()) ||
+            target.provider.isReaderCurrent(input, reader, boundary.after, seed) !== true ||
+            !currentAt(readerLifetimeNow())) throw new TypeError("Positioned reservation failed final preparation");
+      },
+      publish() {
+        if (published) return;
+        publishPositionedStoreSession(actualRuntime, actualSession);
+        const markers = preparation.publicationMarkers;
+        if (markers !== undefined) for (let index = 0; index < markers.length; index++) markers[index]!();
+        published = true;
+      },
+      deliver() {
+        if (!published || delivered) return;
+        delivered = true;
+        target.graphState.pendingPositionedStores?.delete(actualRuntime);
+        target.binding?.context.pendingPositionedStores?.delete(actualRuntime);
+        deliverPositionedStoreSession(actualRuntime, actualSession, source);
+        updateCollectionCandidate(actualRuntime); scheduleSweep(target.graphState);
+      },
+      discard,
+      facet(index: number, role: string) {
+        const projected = projectionRuntimes[index];
+        if (projected === undefined) return undefined;
+        if (role === "projection-value") return projected.valueCell;
+        if (role === "projection-status") return projected.statusCell;
+        if (role === "projection-error") return projected.errorCell;
+        return undefined;
+      },
+    });
+    if (!detached) result.issue();
+    return result;
+  } catch (cause) {
+    try { discard(); } catch (cleanupCause) { reportGraphContinuationError(target.graphState.graph, cleanupCause); }
+    observeUnreturnedReaderRetirement(retirement.promise);
+    throw cause;
+  } finally {
+    finishTransferAdmission(admission, runtime);
+  }
 }
 
 /**
@@ -2744,6 +2789,8 @@ function acknowledgePositionedStoreFold(
     bindingContextIsOpen() &&
     lease.owned &&
     !lease.released &&
+    (group.preparation?.lifetime === undefined ||
+      group.preparation.lifetime.currentAt(readerLifetimeNow())) &&
     [...group.participants].every((required) => !required.failed && required.event === event);
   if (!current)
     throw new TypeError("Positioned Store reader changed during provider currentness validation");
@@ -2933,4 +2980,38 @@ export function project<I, T, V>(
   } finally {
     if (acquisition !== undefined) finishPhysicalWork(acquisition);
   }
+}
+
+export interface TransferPositionedCheckpoint {
+  readonly runtime: StoreRuntime<unknown>;
+  readonly source: StreamStore<unknown>;
+  readonly seed: { readonly boundary: { readonly kind: "event" | "initial"; readonly after: unknown }; readonly base: { readonly present: false } | { readonly present: true; readonly value: unknown }; readonly values: readonly unknown[] };
+  readonly projections: number;
+  currentAt(now: number): boolean;
+  facet(readable: object): { readonly index: number; readonly role: ProjectionTransferRole } | undefined;
+}
+
+/** @internal Authenticates the exact borrowed Store cut for required transfer. */
+export function transferPositionedCheckpoint(checkpoint: PositionedStoreCheckpoint<any, readonly unknown[]>): TransferPositionedCheckpoint {
+  const capture = positionedStoreCheckpointByHandle.get(checkpoint as object);
+  if (capture === undefined || !positionedStoreCaptureCurrent(capture) || !positionedStoreCutResumable(capture) || capture.continuation === undefined)
+    throw new TypeError("Required positioned capture needs a current resumable native boundary");
+  const runtime = capture.runtime;
+  const seen = new Set<object>();
+  for (const item of capture.projections) { if (seen.has(item.runtime)) throw new TypeError("A required fold must be enrolled once"); seen.add(item.runtime); }
+  const continuation = capture.continuation;
+  const present = runtime.snapshot && runtime.baseAvailable && runtime.transferEligible;
+  const seed = Object.freeze({ boundary: Object.freeze({ kind: continuation.kind, after: continuation.after }),
+    base: present ? Object.freeze({ present: true as const, value: reactiveInternal.signalValue(runtime.committed) }) : Object.freeze({ present: false as const }),
+    values: capture.values });
+  return Object.freeze({ runtime, source: capture.source as StreamStore<unknown>, seed, projections: capture.projections.length,
+    currentAt: (now: number): boolean => positionedStoreCaptureCurrent(capture, now) && positionedStoreCutResumable(capture),
+    facet(readable: object) {
+      const facet = projectionFacetByReadable.get(readable);
+      if (facet === undefined) return undefined;
+      for (let index = 0; index < capture.projections.length; index++)
+        if (capture.projections[index]!.runtime === facet.runtime) return { index, role: facet.role };
+      return undefined;
+    },
+  });
 }

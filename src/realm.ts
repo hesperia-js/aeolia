@@ -13,6 +13,10 @@ import type { Store, QueryStore, StreamStore } from "./contract/types.ts";
 import { prepareTransferPublication, transferGraph, transferEpochCurrent, transferHasAdmission, transferStoreAdmissible, transferStore, transferStoreEligible, transferStoreCurrent, transferStoreSemanticCurrent, transferReadableStore, transferReadableRole, transferProjection, transferAuthority, transferReadableCaller, transferCaller } from "./contract/query-policy.ts";
 import type { TransferPublication } from "./contract/query-policy.ts";
 import { getObservationTransferFacet } from "./contract/observation-state.ts";
+import { transferPositionedCheckpoint, type TransferPositionedCheckpoint } from "./contract/projection.ts";
+import type { PositionedStreamAccess, ProjectionPolicy } from "./contract/projection.ts";
+import type { PositionedStoreCheckpoint, PositionedStoreRestoreSeed, PositionedStoreRestoration, PositionedStorePolicyValues, ValueOptions } from "./contract/types.ts";
+import { readerLifetimeNow } from "./contract/retirement.ts";
 import { Fault } from "./fault.ts";
 import { __internal as graphInternal } from "./contract/engine.ts";
 import { __internal as reactiveInternal } from "./reactive.ts";
@@ -1337,6 +1341,10 @@ export interface RequiredTransferNode {
   readonly facet?: string;
   /** Exact per-caller source when this native facet belongs to one acquisition. */
   readonly caller?: TransferSlot;
+  /** Exact positioned group whose native facet this row names. */
+  readonly positioned?: TransferSlot;
+  /** Actual target fold tuple ordinal within that group. */
+  readonly projection?: number;
   /** Graph index for a native graph authority. */
   readonly graph?: number;
   /** Cached value presence, including present undefined. */
@@ -1389,7 +1397,7 @@ export interface EncodedRequiredTransfer {
   /** Native required-transfer format identifier. */
   readonly format: "aeolia-required-transfer";
   /** Format version. */
-  readonly version: 1;
+  readonly version: 1 | 2;
   /** Native contract namespaces in caller-supplied graph order. */
   readonly graphs: readonly string[];
   /** Exact requested roots. */
@@ -1400,9 +1408,22 @@ export interface EncodedRequiredTransfer {
   readonly stores: readonly RequiredTransferStore[];
   /** Distinct native callers and their exact physical source relationships. */
   readonly callers:readonly RequiredTransferCaller[];
+  /** Genuine positioned groups; present only in version two. */
+  readonly positioned?: readonly {
+    /** Transport-local group matched to one actual reader restoration. */
+    readonly slot: TransferSlot;
+    /** Actual physical source descriptor. */
+    readonly store: TransferSlot;
+    /** One aggregate boundary/base/fold seed in the selected codec arena. */
+    readonly seed: ClosedEncodedValue;
+    /** Number of actual required native fold participants. */
+    readonly projections: number;
+  }[];
 }
 /** Required cached capture arguments. */
 export interface RequiredTransferCaptureOptions {
+  /** Exact native Store checkpoints supplied by the real required source closure. */
+  readonly positioned?: readonly PositionedStoreCheckpoint<any, readonly unknown[]>[];
   /** Actual graphs owning every reached native source. */
   readonly graphs: readonly Graph[];
   /** Authentic required roots and their original native construction associations. */
@@ -1412,6 +1433,8 @@ export interface RequiredTransferCaptureOptions {
 }
 /** Required receiver mapping and prospective live State writes. */
 export interface RequiredTransferAdoptionOptions {
+  /** Exact native positioned claims and same-arena decoded seeds for group slots. */
+  readonly positioned?: readonly { readonly slot: TransferSlot; readonly claim: PassiveTransferClaim; readonly seed: PositionedStoreRestoreSeed<any, any, readonly unknown[]> }[];
   /** Actual receiver graphs, in matching namespace order. */
   readonly graphs: readonly Graph[];
   /** Genuine passive claims for source slots. */
@@ -1489,6 +1512,7 @@ function requiredGraphStates(graphs: readonly Graph[]) {
  */
 export function prepareRequiredTransferCapture(options: RequiredTransferCaptureOptions): TransferPublication & { readonly image: EncodedRequiredTransfer; readonly sources: readonly TransferSourceWitness[] } {
   const graphHandles=Array.from(options.graphs);
+  const positionedInputs=Array.from(options.positioned??[]);
   const roots=Array.from(options.roots,(root)=>({source:root.source,construction:root.construction}));
   const codec=options.codec;const encodeValue=codec.encodeValue.bind(codec);const encodeFailure=codec.encodeFailure.bind(codec);
   const graphStates = requiredGraphStates(graphHandles);
@@ -1504,19 +1528,22 @@ export function prepareRequiredTransferCapture(options: RequiredTransferCaptureO
   const callerSlots=new Map<object,string>();
   const nodes: RequiredTransferNode[] = [];
   const now = Date.now();
+  const positionedRecords: {slot:string;capture:TransferPositionedCheckpoint}[]=[];
+  const positionedByRuntime=new Map<StoreRuntime<any>,{slot:string;capture:TransferPositionedCheckpoint}>();
+  for(const checkpoint of positionedInputs){const capture=transferPositionedCheckpoint(checkpoint);if(positionedByRuntime.has(capture.runtime))throw new TypeError("Required positioned session must be enrolled once");const record={slot:"p"+positionedRecords.length,capture};positionedRecords.push(record);positionedByRuntime.set(capture.runtime,record);}
   for (let index=0;index<cached.nodes.length;index+=1) nodeSlots.set(cached.nodes[index]!.source,"n"+index);
   const sourceSlot = (runtime: StoreRuntime<any>): string => {
     let slot = sourceSlots.get(runtime); if (slot !== undefined) return slot;
     const graph = graphHandles.indexOf(runtime.graph);
     if (graph < 0 || !transferStoreAdmissible(runtime) || (runtime.baseAvailable && !runtime.transferEligible && !runtime.failing)) throw new TypeError("Required native source is ineligible");
     slot = "s"+sourceSlots.size; sourceSlots.set(runtime,slot);
-    let sourceStore:Store<unknown>=runtime.store;
+    let sourceStore:Store<unknown>=positionedByRuntime.get(runtime)?.capture.source??runtime.store;
     for(let index=runtime.callers.length-1;index>=0;index-=1){const actual=transferCaller(runtime.callers[index]!);if(actual!==undefined){sourceStore=actual.store;break;}}
     const witness: TransferSourceWitness = Object.freeze({slot,readable:runtime.value,store:sourceStore});
     witnesses.push(witness); guards.push(transferStoreCurrent(runtime,cached.nodes.some((node)=>node.hasError)));
-    if(runtime.readerScope!==undefined&&runtime.snapshot&&runtime.baseAvailable&&runtime.transferEligible)throw new Fault("encoding",[String(runtime.key)]);
+    if(runtime.readerScope!==undefined&&!positionedByRuntime.has(runtime)&&runtime.snapshot&&runtime.baseAvailable&&runtime.transferEligible)throw new Fault("encoding",[String(runtime.key)]);
     const kind = runtime.binding?.kind ?? (runtime.streamSource !== undefined ? "stream" : runtime.source !== undefined ? "query" : "store");
-    const hasValue = runtime.snapshot && runtime.baseAvailable && transferStoreEligible(runtime);
+    const hasValue = !positionedByRuntime.has(runtime) && runtime.snapshot && runtime.baseAvailable && transferStoreEligible(runtime);
     stores.push({slot,graph,key:String(runtime.key),bound:runtime.binding!==undefined,kind,hasValue,
       ...(hasValue ? {value:encodeValue(reactiveInternal.signalValue(runtime.committed),witness)} : {}),
       generation:runtime.generation,...(runtime.lastLandingAt===undefined?{}:{age:Math.max(0,now-runtime.lastLandingAt)})});
@@ -1546,7 +1573,8 @@ export function prepareRequiredTransferCapture(options: RequiredTransferCaptureO
       if(facet?.startsWith("observation-")&&getObservationTransferFacet(runtime,facet)!==node.source)throw new TypeError("Required observation metadata is not owned by the current native publisher");
       if (facet===undefined) throw new TypeError("Required native facet has no authenticated receiver role");
       const caller=callerSlot(node.source);
-      nodes.push({slot,kind:"native",store:sourceSlot(runtime),...(caller===undefined?{}:{caller}),facet,sources:dependencies,hasValue:false,hasError:false});
+      const group=positionedByRuntime.get(runtime);
+      nodes.push({slot,kind:"native",store:sourceSlot(runtime),...(group===undefined?{}:{positioned:group.slot}),...(caller===undefined?{}:{caller}),facet,sources:dependencies,hasValue:false,hasError:false});
       continue;
     }
     let authority: RequiredTransferNode | undefined;
@@ -1560,16 +1588,24 @@ export function prepareRequiredTransferCapture(options: RequiredTransferCaptureO
       authority={slot,kind:"authority",store:sourceSlot(transferReadableStore(owned.source)!),facet:nativeAuthority.kind,sources:dependencies,hasValue:false,hasError:false};
     }
     if(authority!==undefined){nodes.push(authority);continue;}
-    if(transferProjection(node.source)!==undefined) throw new TypeError("Required projection needs an authenticated passive projection target");
+    if(transferProjection(node.source)!==undefined){
+      let found=false;
+      for(const record of positionedRecords){const facet=record.capture.facet(node.source as object);if(facet===undefined)continue;nodes.push({slot,kind:"native",store:sourceSlot(record.capture.runtime),positioned:record.slot,projection:facet.index,facet:facet.role,sources:dependencies,hasValue:false,hasError:false});found=true;break;}
+      if(!found)throw new TypeError("Required projection needs its enrolled authentic positioned group");
+      continue;
+    }
     if(!node.hasRun || (!node.hasValue && !node.hasError)) throw new TypeError("Required cache is uninitialized");
     const witness:TransferSourceWitness=Object.freeze({slot,readable:node.source}); witnesses.push(witness);
     nodes.push({slot,kind:node.kind,sources:dependencies,hasValue:node.hasValue,hasError:node.hasError,
       ...(node.hasValue?{value:encodeValue(node.value,witness)}:{}),
       ...(node.hasError?{error:encodeFailure(node.error,witness)}:{})});
   }
-  const image=closedRequiredCopy<EncodedRequiredTransfer>({format:"aeolia-required-transfer",version:1,graphs:graphStates.map((state)=>state.namespace),roots:roots.map((root)=>nodeSlots.get(root.source)!),nodes,stores,callers});
+  const positioned=positionedRecords.map((record)=>{const store=sourceSlot(record.capture.runtime);const witness:TransferSourceWitness=Object.freeze({slot:record.slot,readable:record.capture.runtime.value,store:record.capture.source});witnesses.push(witness);return {slot:record.slot,store,seed:encodeValue(record.capture.seed,witness),projections:record.capture.projections};});
+  const image=closedRequiredCopy<EncodedRequiredTransfer>({format:"aeolia-required-transfer",version:positioned.length?2:1,graphs:graphStates.map((state)=>state.namespace),roots:roots.map((root)=>nodeSlots.get(root.source)!),nodes,stores,callers,...(positioned.length?{positioned}:{} )});
   const current=():boolean=>{
     if(!cached.current())return false;
+    const positionedNow=readerLifetimeNow();
+    for(let index=0;index<positionedRecords.length;index++)if(!positionedRecords[index]!.capture.currentAt(positionedNow))return false;
     for(let index=0;index<graphHandles.length;index+=1)if(graphStates[index]!.disposed||transferHasAdmission(graphHandles[index]!))return false;
     for(let index=0;index<guards.length;index+=1)if(!guards[index]!())return false;
     return true;
@@ -1584,24 +1620,53 @@ export function prepareRequiredTransferCapture(options: RequiredTransferCaptureO
  * @param source - Genuine raw member or native binding.
  * @param input - Already-prepared native input, used once for native address derivation.
  * @param options - Existing native value policy.
+ * @param positioned - Admitted reader, exact decoded seed, and actual target fold policies for a positioned source.
  * @returns Opaque pending claim with safe metadata and publication-gated body access.
  * @throws TypeError for unsupported, fabricated, crossed or stale source preparation.
  */
-export function preparePassiveTransferClaim<Source extends NativeTransferSource>(graph:Graph,source:Source,input:unknown,options?:ExistingNativeValueOptions<Source>):PassiveTransferClaim<Source>{
-  const native=graphInternal.prepareNativePassiveTransferClaim(graph,source,input,options as import("./contract/types.ts").StoreOptions<unknown>|undefined);
+export function preparePassiveTransferClaim<Input, Event, Position, Reader, const Policies extends readonly ProjectionPolicy<NoInfer<Event>, any>[]>(
+  graph: Graph, source: PositionedStreamAccess<Input, Event, Position, Reader>, input: Input,
+  options: ValueOptions<NoInfer<Event>> | undefined,
+  positioned: {
+    /** Actual target policies in the required native tuple order. */ readonly policies: Policies;
+    /** Same decoded object authenticated by the admitted provider reader. */ readonly seed: PositionedStoreRestoreSeed<NoInfer<Event>, NoInfer<Position>, NoInfer<PositionedStorePolicyValues<Event, Policies>>>;
+    /** Genuine already-admitted reader for that exact seed. */ readonly reader: NoInfer<Reader>;
+  },
+): PassiveTransferClaim<PositionedStreamAccess<Input, Event, Position, Reader>> & {
+  /** Actual reader-owned Store shared by the returned native folds. */ readonly store: StreamStore<Event>;
+  /** Genuine one-shot group; its retired completion is physical resource cleanup. */ readonly restoration: PositionedStoreRestoration<Event, PositionedStorePolicyValues<Event, Policies>>;
+};
+export function preparePassiveTransferClaim<Source extends NativeTransferSource>(graph:Graph,source:Source,input:unknown,options?:ExistingNativeValueOptions<Source>):PassiveTransferClaim<Source>;
+export function preparePassiveTransferClaim<Source extends NativeTransferSource>(graph:Graph,source:Source,input:unknown,options?:ExistingNativeValueOptions<Source>,positioned?:{readonly policies:readonly ProjectionPolicy<any,any>[];readonly seed:PositionedStoreRestoreSeed<any,any,readonly unknown[]>;readonly reader:unknown}):PassiveTransferClaim<Source>{
+  const native=graphInternal.prepareNativePassiveTransferClaim(graph,source,input,options as import("./contract/types.ts").StoreOptions<unknown>|undefined,positioned);
+  try {
   let observation:PreparedPassiveObservation<NativeTransferValue<Source>>|undefined;
   const prepareObservation=(existingLease?:import("./contract/observation.ts").ObservationLease<NativeTransferValue<Source>>):PreparedPassiveObservation<NativeTransferValue<Source>>=>{
     const participant=native.prepareObservation(existingLease as import("./contract/observation.ts").ObservationLease<unknown>|undefined);
     if(observation===undefined)observation=Object.freeze({lease:participant.lease as import("./contract/observation.ts").ObservationLease<NativeTransferValue<Source>>,retired:native.retired,discard:native.discard});
     return observation;
   };
-  const claim=Object.freeze({store:native.store,discard:native.discard,retired:native.retired,...(native.kind==="query"?{prepareObservation}:{})}) as PassiveTransferClaim<Source>;
+  const claim=Object.freeze({store:native.store,discard:native.discard,retired:native.retired,...(native.restoration===undefined?{}:{restoration:native.restoration}),...(native.kind==="query"?{prepareObservation}:{})}) as PassiveTransferClaim<Source>;
   requiredClaims.set(claim,native);
+  native.positioned?.issue();
   return claim;
+  } catch (cause) {
+    try { native.discard(); } catch (cleanupCause) { graphInternal.reportContinuationError(graph, cleanupCause); }
+    throw cause;
+  }
 }
 
 function requiredNativeFacet(native:NativePassiveClaim,facet:string):Readable<unknown>{
   const runtime=native.runtime;
+  if(native.positioned?.session.bound!==undefined){
+    const store=native.store as StreamStore<unknown>;
+    if(facet==="stream-value")return store.value;
+    if(facet==="stream-available")return store.available;
+    if(facet==="stream-status")return store.status;
+    if(facet==="stream-pending")return store.pending;
+    if(facet==="stream-error")return store.error;
+    if(facet==="stream-lifecycle")return native.positioned.session.bound.lifecycle;
+  }
   if(facet.startsWith("passive-")){
     switch(facet.slice(8)){
       case "value":case "stream-value":return native.store.value;
@@ -1647,11 +1712,13 @@ function requiredNativeFacet(native:NativePassiveClaim,facet:string):Readable<un
 export function prepareRequiredTransferAdoption(input:unknown,options:RequiredTransferAdoptionOptions):TransferPublication{
   const graphHandles=Array.from(options.graphs);
   const sourceEntries=Array.from(options.sources,(entry)=>({slot:entry.slot,claim:entry.claim}));
+  const positionedEntries=Array.from(options.positioned??[],(entry)=>({slot:entry.slot,claim:entry.claim,seed:entry.seed}));
   const reactiveEntries=Array.from(options.reactive,(entry)=>({slot:entry.slot,target:entry.target,construction:entry.construction}));
   const mappedWrites=Array.from(options.mappedStateWrites,(entry)=>({target:entry.target,construction:entry.construction,value:entry.value}));
   const codec=options.codec;const decodeValue=codec.decodeValue.bind(codec);const decodeFailure=codec.decodeFailure.bind(codec);
   const image=closedRequiredCopy(input) as EncodedRequiredTransfer;
-  if(image===null||typeof image!=="object"||image.format!=="aeolia-required-transfer"||image.version!==1||!Array.isArray(image.graphs)||!Array.isArray(image.nodes)||!Array.isArray(image.stores)||!Array.isArray(image.callers)||!Array.isArray(image.roots))throw new TypeError("Invalid required-transfer image");
+  if(image===null||typeof image!=="object"||image.format!=="aeolia-required-transfer"||(image.version!==1&&image.version!==2)||!Array.isArray(image.graphs)||!Array.isArray(image.nodes)||!Array.isArray(image.stores)||!Array.isArray(image.callers)||!Array.isArray(image.roots))throw new TypeError("Invalid required-transfer image");
+  if((image.version===1&&image.positioned!==undefined)||(image.version===2&&(!Array.isArray(image.positioned)||image.positioned.length===0)))throw new TypeError("Invalid positioned image version");
   const states=requiredGraphStates(graphHandles);
   if(image.graphs.length!==states.length||image.graphs.some((namespace,index)=>namespace!==states[index]!.namespace))throw new TypeError("Required-transfer graph namespaces differ");
   const guards:(()=>boolean)[]=states.map((state)=>transferEpochCurrent(state));
@@ -1686,6 +1753,27 @@ export function prepareRequiredTransferAdoption(input:unknown,options:RequiredTr
     if(row.status!=="empty"&&row.status!=="ready"&&row.status!=="stale"&&row.status!=="failed")throw new TypeError("Required caller metadata is not settled");
     usedCallers.add(native.caller);callerBySlot.set(row.slot,native);callerRows.set(row.slot,row);
   }
+  const positionedBySlot=new Map<string,NativePassiveClaim>();
+  const positionedSeedByNative=new Map<NativePassiveClaim,PositionedStoreRestoreSeed<any,any,readonly unknown[]>>();
+  const positionedRows=image.positioned??[];
+  const groupInputs=new Map(positionedEntries.map((entry)=>[entry.slot,entry]));
+  if(groupInputs.size!==positionedEntries.length||groupInputs.size!==positionedRows.length)throw new TypeError("Required positioned group mapping is incomplete");
+  for(const row of positionedRows){
+    const entry=groupInputs.get(row.slot);
+    const native=entry===undefined?undefined:requiredClaims.get(entry.claim);
+    const physical=nativeBySlot.get(row.store);
+    if(typeof row.slot!=="string"||storeRows.has(row.slot)||callerRows.has(row.slot)||positionedBySlot.has(row.slot)||
+       native===undefined||native!==physical||native.positioned===undefined||positionedSeedByNative.has(native)||
+       !Number.isSafeInteger(row.projections)||row.projections<0||native.positioned.projections.length!==row.projections||
+       storeRows.get(row.store)?.hasValue!==false)throw new TypeError("Positioned source, reader or projection tuple mapping differs");
+    const witness:TransferTargetWitness=Object.freeze({slot:row.slot,readable:native.store.value,store:native.store});
+    const seed=decodeValue(row.seed,witness);
+    if(!Object.is(seed,entry!.seed)||!Object.is(seed,native.positioned.seed))throw new TypeError("Positioned reader did not receive the same decoded seed object");
+    const data=seed as {base?:{present?:boolean;value?:unknown}};
+    if(data.base?.present===true&&!native.policy.snapshot)throw new TypeError("Positioned seed cannot import an excluded source base");
+    positionedBySlot.set(row.slot,native);positionedSeedByNative.set(native,entry!.seed);
+  }
+  for(const native of natives)if(native.positioned!==undefined&&!positionedSeedByNative.has(native))throw new TypeError("Positioned claim lacks its exact required group row");
   const observations:NonNullable<ReturnType<NativePassiveClaim["observation"]>>[]=[];
   const observationByRuntime=new Map<StoreRuntime<unknown>,NonNullable<ReturnType<NativePassiveClaim["observation"]>>>();
   for(const native of natives){
@@ -1704,7 +1792,7 @@ export function prepareRequiredTransferAdoption(input:unknown,options:RequiredTr
   const targets=new Map<string,Readable<unknown>>();
   const nodeRows=new Map<string,RequiredTransferNode>();
   for(const row of image.nodes){
-    if(typeof row.slot!=="string"||nodeRows.has(row.slot)||storeRows.has(row.slot)||callerRows.has(row.slot)||!Array.isArray(row.sources)||typeof row.hasValue!=="boolean"||typeof row.hasError!=="boolean")throw new TypeError("Malformed required cached node");
+    if(typeof row.slot!=="string"||nodeRows.has(row.slot)||storeRows.has(row.slot)||callerRows.has(row.slot)||positionedBySlot.has(row.slot)||!Array.isArray(row.sources)||typeof row.hasValue!=="boolean"||typeof row.hasError!=="boolean")throw new TypeError("Malformed required cached node");
     nodeRows.set(row.slot,row);
     if((row.kind==="native"||row.kind==="authority")&&(row.hasValue||row.hasError||Object.hasOwn(row,"value")||Object.hasOwn(row,"error")))throw new TypeError("Native private facets cannot carry authored State payloads");
     if(row.kind==="native"){
@@ -1712,13 +1800,19 @@ export function prepareRequiredTransferAdoption(input:unknown,options:RequiredTr
       if(row.caller!==undefined&&(callerRows.get(row.caller)?.store!==row.store||native?.runtime!==nativeBySlot.get(row.store!)?.runtime))throw new TypeError("Native facet belongs to a crossed caller");
       if(native===undefined||typeof row.facet!=="string")throw new TypeError("Native cached node lacks its genuine source claim");
       const observation=observationByRuntime.get(native.runtime);
-      targets.set(row.slot,row.facet.startsWith("observation-")?(observation?.getFacet(row.facet)??requiredNativeFacet(native,row.facet)):requiredNativeFacet(native,row.facet));
+      const group=row.positioned===undefined?undefined:positionedBySlot.get(row.positioned);
+      if(row.positioned!==undefined&&(group!==native||group.positioned===undefined))throw new TypeError("Native facet crossed its actual positioned group");
+      if(row.projection!==undefined){
+        if(group?.positioned===undefined||!Number.isSafeInteger(row.projection)||row.projection<0)throw new TypeError("Missing actual positioned fold ordinal");
+        const facet=group.positioned.facet(row.projection,row.facet);if(facet===undefined)throw new TypeError("Positioned fold facet has no genuine native counterpart");targets.set(row.slot,facet);
+      }else targets.set(row.slot,row.facet.startsWith("observation-")?(observation?.getFacet(row.facet)??requiredNativeFacet(native,row.facet)):requiredNativeFacet(native,row.facet));
       if((row.facet==="observation-issue"||row.facet==="observation-issue-cell")&&reactiveInternal.signalValue(observation?.state.issue??native.runtime.observation!.issue)!==undefined)throw new TypeError("Required observation issue has no compatible closed payload");
     }else if(row.kind==="authority"){
       if(row.facet==="graph-reset"&&row.graph!==undefined&&states[row.graph]!==undefined)targets.set(row.slot,states[row.graph]!.resetVersion);
       else if((row.facet==="context-active"||row.facet==="context-active-cell")&&row.store!==undefined){const runtime=nativeBySlot.get(row.store)?.runtime;if(runtime?.binding===undefined)throw new TypeError("Missing genuine receiver context");targets.set(row.slot,row.facet==="context-active-cell"?runtime.binding.context.activeCell:runtime.binding.context.handle.active);}
       else throw new TypeError("Unknown required native authority");
     }else if(row.kind==="state"||row.kind==="computed"){
+      if(row.positioned!==undefined||row.projection!==undefined)throw new TypeError("Authored State cannot impersonate a positioned native facet");
       const entry=explicit.get(row.slot);
       if(entry===undefined||entry.construction.kind!==row.kind)throw new TypeError("Required construction mapping is incomplete or crossed");
       if(transferReadableStore(entry.target)!==undefined||transferProjection(entry.target)!==undefined)throw new TypeError("Private native State cannot be mapped as authored reactive state");
@@ -1741,7 +1835,7 @@ export function prepareRequiredTransferAdoption(input:unknown,options:RequiredTr
   for(const row of image.stores){
     const native=nativeBySlot.get(row.slot)!;const runtime=native.runtime;
     if(!transferStoreAdmissible(runtime))throw new TypeError("Required receiver address is ineligible");
-    if(!row.hasValue||!native.policy.snapshot||(native.existing&&runtime.baseAvailable))continue;
+    if(native.positioned!==undefined||!row.hasValue||!native.policy.snapshot||(native.existing&&runtime.baseAvailable))continue;
     const witness:TransferTargetWitness=Object.freeze({slot:row.slot,readable:native.store.value,store:native.store});
     const value=decodeValue(row.value,witness);
     if(runtime.generation>=Number.MAX_SAFE_INTEGER||row.generation>=Number.MAX_SAFE_INTEGER||runtime.valueRevision>=Number.MAX_SAFE_INTEGER)throw new RangeError("Required native ordering exhausted");
@@ -1807,7 +1901,8 @@ export function prepareRequiredTransferAdoption(input:unknown,options:RequiredTr
     if(entry.construction.kind!=="state"||transferReadableStore(entry.target)!==undefined||transferProjection(entry.target)!==undefined)throw new TypeError("Mapped live-slot writes require genuine authored native State");
     stageWrite(entry.target,entry.value);
   }
-  const importedByRuntime=new Map(metadata.map((row)=>[row.runtime,row]));
+  const importedByRuntime=new Map<StoreRuntime<any>,{value:unknown}>(metadata.map((row)=>[row.runtime,row]));
+  for(const [native,seed]of positionedSeedByNative){const base=(seed as {base?:{present:boolean;value?:unknown}}).base;if(base?.present&&Object.is(reactiveInternal.signalValue(native.runtime.committed),base.value))importedByRuntime.set(native.runtime,{value:base.value});}
   function compatibleCache(slot:string,valueFor:(target:WritableSignal<unknown>)=>unknown):boolean{
     const seen=new Set<string>();const pending=[...nodeRows.get(slot)!.sources];
     for(let index=0;index<pending.length;index+=1){
@@ -1819,6 +1914,13 @@ export function prepareRequiredTransferAdoption(input:unknown,options:RequiredTr
         const actual=writeValues.has(target)?valueFor(target):reactiveInternal.signalValue(target);
         if(!Object.is(actual,expectedStates.get(dependency)))return false;
       }else if(row.kind==="native"&&row.store!==undefined){
+        if(row.projection!==undefined){
+          const native=positionedBySlot.get(row.positioned!)!;const seed=positionedSeedByNative.get(native)!;
+          const expected=row.facet==="projection-value"?seed.values[row.projection]:row.facet==="projection-status"?"open":undefined;
+          if(!Object.is(valueFor(targets.get(dependency)as WritableSignal<unknown>),expected))return false;
+          for(let sourceIndex=0;sourceIndex<row.sources.length;sourceIndex++)pending.push(row.sources[sourceIndex]!);
+          continue;
+        }
         const runtime=nativeBySlot.get(row.store)!.runtime;
         if(runtime.baseAvailable&&!importedByRuntime.has(runtime))return false;
         const imported=importedByRuntime.get(runtime);
@@ -1846,13 +1948,14 @@ export function prepareRequiredTransferAdoption(input:unknown,options:RequiredTr
     linkByTarget.set(target,dependencies);
   }
   const links=[...linkByTarget].map(([target,sources])=>({target,sources}));
-  const claimPlan=graphInternal.prepareNativePassiveTransferClaims(natives);
   const reactivePlan=reactiveInternal.transferPrepare(writes,adoptions,links);
   for(const row of semanticCells)row.after=writeValues.has(row.cell)?reactivePlan.valueFor(row.cell):row.before;
   for(const slot of adoptionSlots)if(!compatibleCache(slot,reactivePlan.valueFor))throw new TypeError("Required server cache conflicts with a browser-winning dependency");
+  const claimPlan=graphInternal.prepareNativePassiveTransferClaims(natives);
   const current=():boolean=>{
-    if(!claimPlan.current()||!reactivePlan.current())return false;
-    for(let index=0;index<natives.length;index+=1)if(!natives[index]!.current()||!transferStoreAdmissible(natives[index]!.runtime))return false;
+    const positionedNow=readerLifetimeNow();
+    if(!claimPlan.current(positionedNow)||!reactivePlan.current())return false;
+    for(let index=0;index<natives.length;index+=1){const native=natives[index]!;if(!(native.currentAt?native.currentAt(positionedNow):native.current())||!transferStoreAdmissible(native.runtime))return false;}
     for(let index=0;index<observations.length;index+=1)if(!observations[index]!.current())return false;
     for(let index=0;index<graphHandles.length;index+=1)if(states[index]!.disposed||transferHasAdmission(graphHandles[index]!))return false;
     for(let index=0;index<guards.length;index+=1)if(!guards[index]!())return false;

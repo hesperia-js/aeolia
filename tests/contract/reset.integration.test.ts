@@ -28,9 +28,19 @@ import {
   snapshot,
   subscribe as subscribeStore,
   captureReactiveConstruction,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
   prepareRequiredTransferCapture,
 } from "../../src/index.ts";
-import type { ClosedEncodedValue, RequiredTransferCodec } from "../../src/index.ts";
+import type {
+  ClosedEncodedValue,
+  PositionedStoreRestoration,
+  RequiredTransferCodec,
+  StreamStore,
+} from "../../src/index.ts";
+import type { PositionedStreamSource } from "../../src/contract/index.ts";
+
+const providerClockNow = Date.now;
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -991,7 +1001,315 @@ describe("Graph.reset", () => {
     graph.dispose();
   });
 
-  it("reset invalidates a dormant Store reader and restores its fold seed without reopening it", async () => {
+  it("reset invalidates pending and published positioned transfer claims", async () => {
+  type Input = { readonly room: string };
+  type Event = { readonly position: number; readonly value: number };
+  type Reservation = {
+    readonly input: Input;
+    readonly after: number;
+    readonly seed: unknown;
+    readonly controller: AbortController;
+    readonly expiresAt: number;
+  };
+  const makeProvider = () => {
+    const reservations = new WeakMap<object, Reservation>();
+    const readers = new WeakMap<object, (event: Event) => void>();
+    const releases = new WeakMap<object, number>();
+    const openings: Array<{ readonly reader: object | undefined }> = [];
+    let emitLive: ((event: Event) => void) | undefined;
+    const makeChannel = () => {
+      const waiters: Array<(result: IteratorResult<Event>) => void> = [];
+      let ended = false;
+      return {
+        iterable: {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => {
+                if (ended) return Promise.resolve({ done: true as const, value: undefined });
+                return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
+              },
+              return: () => {
+                ended = true;
+                for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+                return Promise.resolve({ done: true as const, value: undefined });
+              },
+            };
+          },
+        } as AsyncIterable<Event>,
+        emit(event: Event) {
+          const waiter = waiters.shift();
+          if (waiter === undefined) throw new Error("The positioned stream has no pending next call");
+          waiter({ done: false, value: event });
+        },
+      };
+    };
+    const source: PositionedStreamSource<Input, number, number, object> = {
+      open: (_input, options) => {
+        const channel = makeChannel();
+        openings.push({ reader: options.reader });
+        if (options.reader === undefined) emitLive = channel.emit;
+        else readers.set(options.reader, channel.emit);
+        return channel.iterable;
+      },
+      readerLifetime: (_input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        if (reservation === undefined || reservation.input !== _input || reservation.after !== after || reservation.seed !== seed)
+          throw new TypeError("The reader lifetime does not match its exact reservation");
+        return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
+      },
+      validateReader: (input, reader, after, _checkpoint, seed) => {
+        const reservation = reservations.get(reader);
+        return reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed;
+      },
+      isReaderCurrent: (input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        return reservation !== undefined &&
+          reservation.input === input &&
+          reservation.after === after &&
+          reservation.seed === seed;
+      },
+      acknowledge: () => undefined,
+      releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
+    };
+    return {
+      source,
+      openings,
+      reserve(input: Input, after: number, seed: unknown) {
+        const reader = Object.freeze({});
+        reservations.set(reader, { input, after, seed, controller: new AbortController(), expiresAt: providerClockNow() + 60_000 });
+        return reader;
+      },
+      emitLive(event: Event) {
+        if (emitLive === undefined) throw new Error("The source positioned Store did not open");
+        emitLive(event);
+      },
+      releaseCount(reader: object) {
+        return releases.get(reader) ?? 0;
+      },
+    };
+  };
+  const sourceProvider = makeProvider();
+  const makeDefinition = (provider: ReturnType<typeof makeProvider>) =>
+    createPositionedStream<Input, number, string, number, object>({
+      name: "reset-required-positioned",
+      key: (input) => input.room,
+      source: provider.source,
+    });
+  const namespace = "reset-required-positioned";
+  const sourceDefinition = makeDefinition(sourceProvider);
+  const sourceGraph = createGraph({
+    contract: defineContract({ namespace, operations: { events: sourceDefinition } }),
+  });
+  const input = Object.freeze({ room: "one" });
+  const policy = {
+    kind: "reduce" as const,
+    initial: 0,
+    step: (sum: number, event: number) => sum + event,
+  };
+  const source = sourceGraph.api.events(input);
+  const projection = project(source, policy);
+  let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
+  let pendingGraph: ReturnType<typeof createGraph> | undefined;
+  let pendingClaim: {
+    readonly store: StreamStore<number>;
+    readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+    readonly retired: Promise<void>;
+    discard(): void;
+  } | undefined;
+  let pendingAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+  let pendingReader: object | undefined;
+  let pendingProvider: ReturnType<typeof makeProvider> | undefined;
+  let activeGraph: ReturnType<typeof createGraph> | undefined;
+  let activeClaim: {
+    readonly store: StreamStore<number>;
+    readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+    readonly retired: Promise<void>;
+    discard(): void;
+  } | undefined;
+  let activeAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+  let activeReader: object | undefined;
+  let activeProvider: ReturnType<typeof makeProvider> | undefined;
+  let capturePublished = false;
+  let activePublished = false;
+  try {
+    const sourceLanding = new Promise<void>((resolve) => {
+      let stop: () => void = () => undefined;
+      stop = subscribe(projection.value, (value) => {
+        if (value !== 3) return;
+        stop();
+        resolve();
+      });
+    });
+    sourceProvider.emitLive({ position: 5, value: 3 });
+    await sourceLanding;
+    const checkpoint = capturePositionedStore(source, [projection] as const);
+    expect(checkpoint.present).toBe(true);
+    expect(checkpoint.hasPosition).toBe(true);
+    expect(checkpoint.position).toBe(5);
+    const seed = {
+      boundary: { kind: "event" as const, after: 5 },
+      base: { present: true as const, value: 3 },
+      values: checkpoint.values,
+    };
+    const seedId = "p0-seed";
+    const decodedSeeds = new Map<string, unknown>([[seedId, seed]]);
+    const codec: RequiredTransferCodec = {
+      encodeValue: (value) =>
+        value !== null && typeof value === "object" &&
+        Object.hasOwn(value, "boundary") && Object.hasOwn(value, "base")
+          ? ({ $ref: seedId } as ClosedEncodedValue)
+          : (value as ClosedEncodedValue),
+      encodeFailure: (cause) => String(cause),
+      decodeValue: (value) => {
+        if (
+          value !== null && typeof value === "object" &&
+          Object.hasOwn(value, "$ref") &&
+          (value as { readonly $ref?: unknown }).$ref === seedId
+        ) {
+          const decoded = decodedSeeds.get(seedId);
+          if (decoded === undefined) throw new Error("The positioned seed reference is missing");
+          return decoded;
+        }
+        return value;
+      },
+      decodeFailure: (failure) => new Error(String(failure)),
+    };
+    const sourceRoot = computed(() => projection.value.get());
+    expect(sourceRoot.get()).toBe(3);
+    capture = prepareRequiredTransferCapture({
+      graphs: [sourceGraph],
+      roots: [{ source: sourceRoot, construction: captureReactiveConstruction(sourceRoot) }],
+      positioned: [checkpoint],
+      codec,
+    });
+    const image = capture.image;
+    const captureCommit = capture.seal();
+    if (captureCommit === undefined) throw new Error("The source positioned capture did not seal");
+    captureCommit.publish();
+    capturePublished = true;
+    captureCommit.notifications.deliver();
+    await capture.retired;
+
+    const pendingTargetProvider = makeProvider();
+    pendingProvider = pendingTargetProvider;
+    const pendingDefinition = makeDefinition(pendingTargetProvider);
+    pendingGraph = createGraph({
+      contract: defineContract({ namespace, operations: { events: pendingDefinition } }),
+    });
+    const pendingReaderLocal = pendingTargetProvider.reserve(input, 5, seed);
+    pendingReader = pendingReaderLocal;
+    const pendingClaimValue = preparePassiveTransferClaim(
+      pendingGraph,
+      pendingGraph.api.events,
+      input,
+      undefined,
+      { policies: [policy] as const, seed, reader: pendingReaderLocal },
+    );
+    pendingClaim = pendingClaimValue;
+    const pendingTarget = computed(() => pendingClaimValue.restoration.projections[0]!.value.get());
+    pendingAdoption = prepareRequiredTransferAdoption(image, {
+      graphs: [pendingGraph],
+      sources: [{ slot: "s0", claim: pendingClaimValue }],
+      positioned: [{ slot: "p0", claim: pendingClaimValue, seed }],
+      reactive: [{
+        slot: image.roots[0]!,
+        target: pendingTarget,
+        construction: captureReactiveConstruction(pendingTarget),
+      }],
+      codec,
+      mappedStateWrites: [],
+    });
+    await pendingGraph.reset();
+    expect(pendingAdoption.seal()).toBeUndefined();
+    expect(pendingTargetProvider.openings).toHaveLength(0);
+    pendingAdoption.discard();
+    pendingClaimValue.discard();
+    await Promise.all([pendingClaimValue.retired, pendingClaimValue.restoration.retired]);
+    expect(pendingTargetProvider.openings).toHaveLength(0);
+    expect(pendingTargetProvider.releaseCount(pendingReaderLocal)).toBe(1);
+    expect(() => pendingClaimValue.restoration.activate()).toThrow(TypeError);
+
+    const activeProviderLocal = makeProvider();
+    activeProvider = activeProviderLocal;
+    const activeDefinition = makeDefinition(activeProviderLocal);
+    activeGraph = createGraph({
+      contract: defineContract({ namespace, operations: { events: activeDefinition } }),
+    });
+    const activeReaderLocal = activeProviderLocal.reserve(input, 5, seed);
+    activeReader = activeReaderLocal;
+    const activeClaimValue = preparePassiveTransferClaim(
+      activeGraph,
+      activeGraph.api.events,
+      input,
+      undefined,
+      { policies: [policy] as const, seed, reader: activeReaderLocal },
+    );
+    activeClaim = activeClaimValue;
+    expect(activeClaimValue.retired).not.toBe(activeClaimValue.restoration.retired);
+    const activeTarget = computed(() => activeClaimValue.restoration.projections[0]!.value.get());
+    activeAdoption = prepareRequiredTransferAdoption(image, {
+      graphs: [activeGraph],
+      sources: [{ slot: "s0", claim: activeClaimValue }],
+      positioned: [{ slot: "p0", claim: activeClaimValue, seed }],
+      reactive: [{
+        slot: image.roots[0]!,
+        target: activeTarget,
+        construction: captureReactiveConstruction(activeTarget),
+      }],
+      codec,
+      mappedStateWrites: [],
+    });
+    const activeCommit = activeAdoption.seal();
+    if (activeCommit === undefined) throw new Error("The active positioned adoption did not seal");
+    activeCommit.publish();
+    activePublished = true;
+    activeCommit.notifications.deliver();
+    await Promise.all([activeAdoption.retired, activeClaimValue.retired]);
+    expect(activeProviderLocal.openings).toHaveLength(0);
+
+    await activeGraph.reset();
+    expect(activeProviderLocal.openings).toHaveLength(0);
+    await activeClaimValue.restoration.retired;
+    expect(activeProviderLocal.releaseCount(activeReaderLocal)).toBe(1);
+    expect(() => activeClaimValue.restoration.activate()).toThrow(TypeError);
+    expect(activeClaimValue.store.available.get()).toBe(true);
+    expect(activeClaimValue.store.value.get()).toBe(3);
+    expect(activeClaimValue.restoration.projections[0]!.value.get()).toBe(0);
+  } finally {
+    if (!capturePublished) capture?.discard();
+    pendingAdoption?.discard();
+    pendingClaim?.discard();
+    if (!activePublished) activeAdoption?.discard();
+    if (activePublished) activeClaim?.restoration.discard();
+    else activeClaim?.discard();
+    projection.close();
+    sourceGraph.dispose();
+    pendingGraph?.dispose();
+    activeGraph?.dispose();
+    if (pendingReader !== undefined && pendingClaim === undefined && pendingProvider !== undefined &&
+      pendingProvider.releaseCount(pendingReader) === 0)
+      pendingProvider.source.releaseReader(input, pendingReader);
+    if (activeReader !== undefined && activeClaim === undefined && activeProvider !== undefined &&
+      activeProvider.releaseCount(activeReader) === 0)
+      activeProvider.source.releaseReader(input, activeReader);
+    if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
+    if (pendingAdoption !== undefined) await pendingAdoption.retired.then(() => undefined, () => undefined);
+    if (activeAdoption !== undefined) await activeAdoption.retired.then(() => undefined, () => undefined);
+    if (pendingClaim !== undefined) {
+      await pendingClaim.retired.then(() => undefined, () => undefined);
+      await pendingClaim.restoration.retired.then(() => undefined, () => undefined);
+    }
+    if (activeClaim !== undefined) {
+      await activeClaim.retired.then(() => undefined, () => undefined);
+      await activeClaim.restoration.retired.then(() => undefined, () => undefined);
+    }
+  }
+});
+
+it("reset invalidates a dormant Store reader and restores its fold seed without reopening it", async () => {
     type Input = { readonly room: string };
     type Event = { position: number; value: number };
     const reservations = new WeakMap<object, { input: Input; after: number; seed: unknown }>();

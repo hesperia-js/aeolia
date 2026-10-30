@@ -1002,6 +1002,23 @@ The provider's `validateReader` and `isReaderCurrent` callbacks must be synchron
 
 Positions and reader reservations are provider-specific. Aeolia sets no retention window, cursor encoding, authorization rule or fallback for missing history. The provider must reject an expired or invalid reservation before dormant issuance, and it must report an ordered gap through its own source behavior rather than silently skipping events.
 
+A provider may define `initialBoundary(input, options)` on the same positioned
+source. Aeolia captures that callback with the source declaration and calls it
+with the same input and per-open options passed to `open`, after `open` returns
+a valid iterable and before pulling an event. The result must name the real
+exclusive start or history position for that opening. If an empty source has
+no available initial boundary, required continuation refuses. Aeolia does not
+invent a default cursor or represent the anchor as an event.
+
+A provider may also define
+`readerLifetime(input, reader, after, seed)` on that source. Required positioned
+transfer needs this capability. It returns the genuine abort signal for that
+exact reservation and may return its already-issued immutable expiry as an
+absolute epoch time in the native clock domain. Every allowed reservation
+invalidation must be visible through the signal before the reservation becomes
+stale. A deadline does not renew or extend a reservation, and one reader's
+validation must not revoke another reader.
+
 ### Restore a shared Store session
 
 A graph member call for a positioned declaration returns a genuine `StreamStore<Event>`. Use
@@ -1015,14 +1032,15 @@ projection its continuation requires.
 
 The checkpoint records the source Store identity, session identity, latest-event
 presence, provider position, required projection values in tuple order, and
-whether the cut is resumable. `hasPosition` records whether a positioned event
-established a boundary. It is separate from `present`: a Store value can exist
-without a positioned boundary, so presence alone does not establish a resumable cut. Narrow
-`checkpoint.present` before reading
-`checkpoint.latest`. A present event can have the value `undefined`.
-`checkpoint.position` has type `unknown` because a Store does not carry its
-declaration's provider `Position` type. The provider codec must validate and
-narrow that value.
+whether the cut is resumable. `hasPosition` and `present` still describe an
+actual completed event and its source base. A present event may have the value
+`undefined`.
+
+When present, `continuation` identifies a genuine event boundary or initial
+provider anchor. An initial anchor can make an empty source resumable without
+making `present` true or adding a `latest` event. `continuation.after` and
+`checkpoint.position` have type `unknown`; the provider codec must validate
+and narrow these positions.
 
 ```ts
 import {
@@ -1095,32 +1113,42 @@ provider owns those gates.
 `preparePositionedStoreRestore(member, input, policies, seed, reader, options?)` creates the
 target group from a genuine target member and the target provider's admitted
 reader. The policy tuple determines the projection tuple and its value types.
-Target policies are code in the target runtime, not decoded wire callbacks. The
-seed has the shape `{ after, latest, values }`. Its own `latest` property is
-required, including when its value is `undefined`. `values` contains one
-decoded fold value for each target policy. The target member fixes the
-`Event`, `Position`, and `Reader` types. The options
-argument does not widen `Event`. The target provider must authenticate the full
-seed and reservation before Aeolia transfers ownership of the reader.
+Target policies are code in the target runtime, not decoded wire callbacks.
+Ordinary restore keeps the legacy seed `{ after, latest, values }`; `latest` is
+an own property even when its value is `undefined`.
+
+Required positioned transfer uses `{ boundary, base, values }`. `boundary` is
+`{ kind: "event" | "initial", after }`; `base` is either `{ present: false }`
+or `{ present: true, value }`. The boundary and source base are independent.
+A present base requires its own `value` property, including when that value is
+`undefined`. An omitted base has no `latest` or `value` payload. The target
+member fixes the `Event`, `Position`, and `Reader` types. The options argument
+does not widen `Event`. The target provider authenticates the full seed and
+reservation before Aeolia transfers ownership of the reader.
 
 Pass an optional sixth `ValueOptions<Event>` argument for the target source Store.
 Options belong to the target runtime and are not part of the decoded seed.
-`options.initial` supplies the target Store's authored reset baseline;
-`seed.latest` remains the restored current source value. Store equality,
-snapshot settings, defaults, and conflicting-option faults follow the ordinary
-native stream configuration rules.
+`options.initial` supplies the target Store's authored reset baseline.
+For the legacy seed, `latest` remains the restored source value. For a
+boundary/base seed, `base.value` is the source value only when `base.present`
+is true. Store equality, snapshot settings, defaults, and conflicting-option
+faults follow the ordinary native stream configuration rules.
 
-`options.abortSignal` owns the target reader session from preparation through
-activation. If it aborts while the restoration is dormant, the session closes
-and releases its reader without opening the source. The same signal governs the
-active reader after activation.
+`options.abortSignal` remains the caller's cancellation signal for the target
+session. If it aborts while the restoration is dormant, the session closes and
+releases its reader without opening the source. The same signal governs the
+active reader after activation. For required transfer, the separate signal from
+`readerLifetime` reports invalidation of the provider's exact reservation.
 
 Preparation does not open the source or run reducers over a prefix. The returned
-`source` is the actual target `StreamStore`. It exposes the seeded latest event
-as a present Store value. While the restoration is dormant, the source status
-is `"empty"` and `pending` is false. Reads and subscriptions do not activate
-the reader. The returned projections attach to that same source and begin with
-their decoded fold values.
+`source` is the actual target `StreamStore`. A present base installs its exact
+value, including `undefined`; an omitted base installs no imported source value
+or committed landing. A genuine target-authored or browser base keeps its normal
+precedence. Without one, the source remains unavailable until a real event
+lands. While the restoration is dormant, its source status is `"empty"` and
+`pending` is false. Reads and subscriptions do not activate the reader. The
+returned projections attach to that same source and begin with their decoded
+fold values. An initial boundary creates no source event, fold, or acknowledgment.
 
 After the target accepts the transfer at its publication boundary, activate the
 restoration:
@@ -1178,16 +1206,17 @@ stop();
 restoration.discard();
 ```
 
-`activate()` enters `opening`, opens the admitted reader once after `seed.after`,
-and returns the same Store. The source is pending while it waits for the first
-genuine suffix event. That event changes its status to `"live"` and ends the
-pending wait. Source failure or completion also ends the wait under the existing
-stream contract. An admitted restored reader enters `failed` and releases its
-reader on any reported gap after `seed.after`, even before the first suffix
-event, while an ordinary unreserved `StreamStore` keeps its existing gap
-behavior. A later `project(restoration.source, policy)` starts from that
-policy's initial state and folds future events. It does not receive the restored
-event or refold the transferred prefix.
+`activate()` enters `opening`, opens the admitted reader once after the
+selected boundary, and returns the same Store. With an initial boundary, the
+first real suffix event establishes the source landing and folds once; the
+initial anchor itself is not acknowledged as an event. The source is pending
+while it waits for that event. Source failure or completion also ends the wait
+under the existing stream contract. An admitted restored reader enters
+`failed` and releases its reader on any reported gap after its boundary, even
+before the first suffix event, while an ordinary unreserved `StreamStore`
+keeps its existing gap behavior. A later `project(restoration.source, policy)`
+starts from that policy's initial state and folds future events. It does not
+receive the restored event or refold the transferred prefix.
 
 Each restoration owns a separate Store identity, session, and reader. Two
 admitted restorations may use the same declaration and logical key without
@@ -1210,21 +1239,27 @@ authority, so an eligible entry fails encoding instead of being flattened into
 a different identity.
 
 A disposed, `snapshot: false`, base-absent, or otherwise ineligible reader Store
-stays excluded under the ordinary rules. It does not block unrelated snapshot
-entries. The `snapshot` option does not add reader authority to the wire format.
-The existing `positionedFoldReceipt` and `acknowledgePositionedFold` functions
+stays excluded under ordinary key-only snapshot rules. It does not block
+unrelated snapshot entries. Required positioned transfer may still carry an
+otherwise eligible continuation with `base.present: false`; it does not import
+a source value or bypass external-operation and source eligibility guards.
+The `snapshot` option does not add reader authority to the wire format. The
+existing `positionedFoldReceipt` and `acknowledgePositionedFold` functions
 continue to report native successful folds. A capture
 or fold acknowledgement does not report an operation result, complete
 affected-operation coverage, an external commit, or physical retirement. The
 host or provider owns those gates.
 
-`discard()` revokes the group synchronously and releases its reader once. If an
-active iterator has asynchronous cleanup, the original `graph.retire()` or
-`context.retire()` promise joins that work and rejects on cleanup faults. The
-`void` return from `discard()` is not cleanup completion. Cleanup faults remain
-separate from source and projection outcomes. Reset, cancellation, or disposal
-invalidates the one-shot reader. A later continuation requires a fresh provider
-admission.
+`discard()` revokes the group synchronously and releases its reader once.
+`restoration.retired` is the original completion for that session's physical
+cleanup. It is separate from a passive claim's registration-only `retired`
+promise and from graph or context retirement. Normal preparation does not wait
+for this long-lived resource completion. If an active iterator has asynchronous
+cleanup, the original `graph.retire()` or `context.retire()` promise also joins
+that work and rejects on cleanup faults. The `void` return from `discard()` is
+not cleanup completion. Cleanup faults remain separate from source and
+projection outcomes. Reset, cancellation, or disposal invalidates the one-shot
+reader. A later continuation requires a fresh provider admission.
 
 These APIs support in-memory transfer when the provider admits a target reader.
 They do not enable durable restart or failover recovery. Durable persistence

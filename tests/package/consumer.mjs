@@ -70,6 +70,256 @@ async function expectPending(promise, message) {
   }
 }
 
+async function verifyPositionedRequiredTransferConsumer() {
+  const providerA = new ConsumerPositionedSource({ initialBoundary: true, after: 5 });
+  const providerB = new ConsumerPositionedSource({ initialBoundary: true, readerLifetime: true });
+  let targetSteps = 0;
+  const policy = {
+    kind: "reduce",
+    initial: 10,
+    step: (total, event) => {
+      targetSteps += 1;
+      return total + event;
+    },
+  };
+  let sourceSteps = 0;
+  const sourcePolicy = {
+    ...policy,
+    step: (total, event) => {
+      sourceSteps += 1;
+      return total + event;
+    },
+  };
+  const definitionA = createPositionedStream({
+    name: "positioned.required-transfer",
+    key: (input) => input.id,
+    snapshot: false,
+    source: providerA,
+  });
+  const definitionB = createPositionedStream({
+    name: "positioned.required-transfer",
+    key: (input) => input.id,
+    snapshot: false,
+    source: providerB,
+  });
+  const inputA = { id: "one" };
+  const inputB = { id: "one" };
+  const graphA = createGraph({
+    contract: defineContract({
+      namespace: "positioned-required-transfer",
+      operations: { events: definitionA },
+    }),
+  });
+  const graphB = createGraph({
+    contract: defineContract({
+      namespace: "positioned-required-transfer",
+      operations: { events: definitionB },
+    }),
+  });
+  let projectionA;
+  let sourceRoot;
+  let capture;
+  let claim;
+  let adoption;
+  let published = false;
+  let reader;
+  try {
+    const sourceA = graphA.api.events(inputA);
+    projectionA = project(sourceA, sourcePolicy);
+    check(providerA.opens.length === 1, "The source Store did not open exactly once");
+    check(providerA.initialBoundaries.length === 1, "The source did not report its genuine initial boundary");
+    check(
+      providerA.initialBoundaries[0].options === providerA.opens[0].options,
+      "The source boundary used a different opening options object",
+    );
+    check(
+      providerA.opens[0].hasAfter === false && providerA.opens[0].hasReader === false,
+      "The initial source opening was not unreserved",
+    );
+    check(sourceA.available.get() === false, "An empty initial boundary created a Store landing");
+    check(projectionA.value.get() === 10 && sourceSteps === 0, "The initial anchor ran a reducer");
+    check(
+      positionedFoldReceipt(projectionA) === undefined && providerA.acknowledgements.length === 0,
+      "The initial anchor created or acknowledged an Event fold receipt",
+    );
+
+    const checkpoint = capturePositionedStore(sourceA, [projectionA]);
+    check(
+      checkpoint.present === false &&
+        checkpoint.hasPosition === false &&
+        !Object.hasOwn(checkpoint, "latest") &&
+        checkpoint.resumable === true,
+      "The genuine initial boundary was not captured separately from source presence",
+    );
+    sourceRoot = computed(() => projectionA.value.get());
+    check(sourceRoot.get() === 10, "The source root did not read its authored initial fold value");
+    const decodedSeed = {
+      boundary: { kind: "initial", after: 5 },
+      base: { present: false },
+      values: [10],
+    };
+    const seedId = "p0-seed";
+    const decodedSeeds = new Map([[seedId, decodedSeed]]);
+    const codec = {
+      encodeValue: (value) =>
+        value !== null &&
+        typeof value === "object" &&
+        Object.hasOwn(value, "boundary") &&
+        Object.hasOwn(value, "base")
+          ? { $ref: seedId }
+          : value,
+      encodeFailure: (cause) => String(cause),
+      decodeValue: (value) => {
+        if (
+          value !== null &&
+          typeof value === "object" &&
+          Object.hasOwn(value, "$ref") &&
+          value.$ref === seedId
+        ) {
+          const decoded = decodedSeeds.get(seedId);
+          check(decoded !== undefined, "The positioned seed reference is missing");
+          return decoded;
+        }
+        return value;
+      },
+      decodeFailure: (failure) => new Error(String(failure)),
+    };
+    capture = prepareRequiredTransferCapture({
+      graphs: [graphA],
+      roots: [{ source: sourceRoot, construction: captureReactiveConstruction(sourceRoot) }],
+      positioned: [checkpoint],
+      codec,
+    });
+    check(capture.image.version === 2, "The positioned capture did not use image version 2");
+    check(capture.image.stores[0].hasValue === false, "The snapshot:false base was copied into the Store row");
+    const positionedRows = capture.image.positioned;
+    check(Array.isArray(positionedRows) && positionedRows.length === 1, "The positioned group row was omitted");
+    const group = positionedRows[0];
+    check(JSON.stringify(group.seed) === JSON.stringify({ $ref: seedId }), "The group seed did not use its stable codec reference");
+    check(decodedSeeds.get(seedId) === decodedSeed, "The codec arena lost the exact decoded seed object");
+    check(
+      group.slot === "p0" &&
+        group.store === "s0" &&
+        group.projections === 1,
+      "The positioned group did not preserve its Store and projection ordinal",
+    );
+    check(
+      decodedSeed.boundary.kind === "initial" &&
+        decodedSeed.boundary.after === 5 &&
+        decodedSeed.base.present === false &&
+        decodedSeed.values[0] === 10 &&
+        !Object.hasOwn(decodedSeed, "latest"),
+      "The decoded initial seed fabricated a source event or base value",
+    );
+    check(
+      capture.image.nodes.some(
+        (node) =>
+          node.positioned === "p0" &&
+          node.projection === 0 &&
+          node.facet === "projection-value" &&
+          node.kind === "native" &&
+          node.hasValue === false &&
+          node.hasError === false,
+      ),
+      "The cached fold did not retain its native projection tuple mapping",
+    );
+
+    reader = providerB.reserve(inputB, 5, undefined, decodedSeed);
+    claim = preparePassiveTransferClaim(
+      graphB,
+      graphB.api.events,
+      inputB,
+      undefined,
+      { policies: [policy], seed: decodedSeed, reader },
+    );
+    check(claim.restoration.source === claim.store, "The positioned claim did not own its restoration Store");
+    check(providerB.opens.length === 0, "Claim preparation opened the target source");
+    check(providerB.lifetimeCalls.length === 1, "The target reader lifetime was not captured");
+    check(
+      claim.retired !== claim.restoration.retired,
+      "Claim registration retirement replaced the restoration resource completion",
+    );
+
+    let targetRuns = 0;
+    const targetValue = computed(() => {
+      targetRuns += 1;
+      return claim.restoration.projections[0].value.get();
+    });
+    adoption = prepareRequiredTransferAdoption(capture.image, {
+      graphs: [graphB],
+      sources: [{ slot: "s0", claim }],
+      positioned: [{ slot: "p0", claim, seed: decodedSeed }],
+      reactive: [{
+        slot: capture.image.roots[0],
+        target: targetValue,
+        construction: captureReactiveConstruction(targetValue),
+      }],
+      codec,
+      mappedStateWrites: [],
+    });
+    const commit = adoption.seal();
+    check(commit !== undefined, "The initial-boundary adoption did not seal");
+    commit.publish();
+    published = true;
+    commit.notifications.deliver();
+    await Promise.all([capture.retired, claim.retired, adoption.retired]);
+    check(providerB.opens.length === 0, "Publication opened the target source early");
+    check(claim.store.available.get() === false, "An omitted base became a target Store landing");
+    check(targetValue.get() === 10 && targetRuns === 0, "The cached initial fold was not adopted");
+    check(targetSteps === 0, "Adoption replayed a source event through the reducer");
+    check(
+      positionedFoldReceipt(claim.restoration.projections[0]) === undefined &&
+        providerB.acknowledgements.length === 0,
+      "The target initial boundary fabricated or acknowledged an Event fold receipt",
+    );
+
+    check(
+      claim.restoration.activate() === claim.store,
+      "Activation returned a different native Store",
+    );
+    check(providerB.opens.length === 1, "Activation did not open the target reader once");
+    check(
+      providerB.initialBoundaries[0].options === providerB.opens[0].options &&
+        providerB.opens[0].hasAfter &&
+        providerB.opens[0].after === 5 &&
+        providerB.opens[0].hasReader,
+      "The target initial boundary did not keep its original reader opening",
+    );
+    check(providerB.acknowledgements.length === 0, "Opening the initial boundary acknowledged a fold");
+
+    const folded = waitForPositionedValue(claim.restoration.projections[0], (value) => value === 12);
+    providerB.emitReader(reader, { position: 6, value: 2 });
+    await folded;
+    check(targetSteps === 1, "The first suffix event did not fold exactly once");
+    check(claim.store.available.get() && claim.store.value.get() === 2, "The first suffix did not create the source landing");
+    const receipt = positionedFoldReceipt(claim.restoration.projections[0]);
+    check(receipt !== undefined && receipt.position === 6, "The suffix did not create a native fold receipt");
+    acknowledgePositionedFold(claim.restoration.projections[0], receipt);
+    check(
+      providerB.acknowledgements.length === 1 &&
+        providerB.acknowledgements[0].receipt === receipt,
+      "The first suffix fold did not acknowledge its exact native receipt",
+    );
+    claim.restoration.discard();
+    await claim.restoration.retired;
+    check(providerB.releaseCount(reader) === 1, "The restoration did not release its reader once");
+  } finally {
+    if (!published) {
+      adoption?.discard();
+      claim?.discard();
+    } else claim?.restoration.discard();
+    projectionA?.close();
+    graphA.dispose();
+    graphB.dispose();
+    if (capture !== undefined) await capture.retired.catch(() => {});
+    if (adoption !== undefined) await adoption.retired.catch(() => {});
+    if (claim !== undefined) await claim.retired.catch(() => {});
+    if (claim !== undefined) await claim.restoration.retired.catch(() => {});
+    if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
+      providerB.releaseReader(inputB, reader);
+  }
+}
+
 export async function verifyConsumer() {
   await verifyRequiredTransferConsumer();
   await verifyTransferConsumer();
@@ -78,6 +328,7 @@ export async function verifyConsumer() {
   await verifyAcquisitionConsumer();
   await verifyPositionedConsumer();
   await verifyPositionedStoreConsumer();
+  await verifyPositionedRequiredTransferConsumer();
   const count = signal(2);
   const doubled = computed(() => count.get() * 2);
   const signalValues = [];
@@ -229,10 +480,46 @@ class ConsumerPositionedSource {
   #releaseCounts = new WeakMap();
   opens = [];
   acknowledgements = [];
+  initialBoundaries = [];
+  lifetimeCalls = [];
+
+  constructor({ initialBoundary = false, readerLifetime = false, after = 5 } = {}) {
+    if (initialBoundary) {
+      this.initialBoundary = (input, options) => {
+        this.initialBoundaries.push({ input, options });
+        const boundary = Object.hasOwn(options, "after") ? options.after : after;
+        return { available: true, after: boundary };
+      };
+    }
+    if (readerLifetime) {
+      this.readerLifetime = (input, reader, after, seed) => {
+        const reservation = this.#reservations.get(reader);
+        check(
+          reservation !== undefined &&
+            reservation.input === input &&
+            reservation.after === after &&
+            reservation.seed === seed,
+          "The positioned lifetime did not match its exact reader reservation",
+        );
+        this.lifetimeCalls.push({ input, reader, after, seed });
+        return {
+          signal: reservation.controller.signal,
+          expiresAt: reservation.expiresAt,
+        };
+      };
+    }
+  }
 
   reserve(input, after, checkpoint, seed) {
     const reader = Object.freeze({});
-    this.#reservations.set(reader, { input, after, checkpoint, seed });
+    this.#reservations.set(reader, {
+      input,
+      after,
+      checkpoint,
+      seed,
+      controller: new AbortController(),
+      expiresAt: Date.now() + 60_000,
+    });
     return reader;
   }
 
@@ -252,7 +539,7 @@ class ConsumerPositionedSource {
     const channel = positionedChannel();
     const hasAfter = Object.hasOwn(options, "after");
     const hasReader = Object.hasOwn(options, "reader");
-    this.opens.push({ input, hasAfter, after: options.after, hasReader });
+    this.opens.push({ input, hasAfter, after: options.after, hasReader, options });
     if (options.reader !== undefined) this.#readerEmitters.set(options.reader, channel.emit);
     else this.#liveEmitters.set(input.id, channel.emit);
     return channel.source;

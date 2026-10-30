@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, it, jest } from "bun:test";
 import {
   bindStream,
+  captureReactiveConstruction,
+  computed,
   createBindingContext,
   createGraph,
   createStream,
@@ -13,6 +15,9 @@ import {
   isPositionedCheckpointCurrent,
   isPositionedStoreCheckpointCurrent,
   preparePositionedStoreRestore,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
+  prepareRequiredTransferCapture,
   positionedFoldReceipt,
   acknowledgePositionedFold,
   type PositionedProjectionCheckpoint,
@@ -20,8 +25,14 @@ import {
   type Projection,
   type PositionedStoreRestoration,
   type PositionedFoldReceipt,
+  type StreamStore,
+  type PositionedStreamSource,
+  type RequiredTransferCodec,
+  type ClosedEncodedValue,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
+
+const providerClockNow = Date.now;
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -535,6 +546,338 @@ it("restores shared folds over one dormant source Store without replaying the la
       releaseReader(reader);
     sourceGraph.dispose();
     targetGraph.dispose();
+  }
+});
+
+it("resumes a genuine initial boundary without inventing an Event or fold receipt", async () => {
+  type Event = { readonly position: number; readonly value: number };
+  type Reservation = {
+    readonly input: void;
+    readonly after: number;
+    readonly seed: unknown;
+    readonly controller: AbortController;
+    readonly expiresAt: number;
+  };
+  type Opening = {
+    readonly options: object;
+    readonly reader: object | undefined;
+  };
+  const makeProvider = () => {
+    const reservations = new WeakMap<object, Reservation>();
+    const readerEmitters = new WeakMap<object, (event: Event) => void>();
+    const releases = new WeakMap<object, number>();
+    const openings: Opening[] = [];
+    const boundaries: Array<{ readonly options: object; readonly after: number }> = [];
+    const trace: string[] = [];
+    const acknowledgements: Array<{ readonly reader: object; readonly receipt: PositionedFoldReceipt<number> }> = [];
+    const makeChannel = () => {
+      const waiters: Array<(result: IteratorResult<Event>) => void> = [];
+      const iterable: AsyncIterable<Event> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              trace.push("pull");
+              return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
+            },
+            return: () => {
+              trace.push("return");
+              for (const waiter of waiters.splice(0)) waiter({ done: true, value: undefined });
+              return Promise.resolve({ done: true as const, value: undefined });
+            },
+          };
+        },
+      };
+      return {
+        iterable,
+        emit(event: Event) {
+          const waiter = waiters.shift();
+          if (waiter === undefined) throw new Error("The positioned reader has no pending next call");
+          waiter({ done: false, value: event });
+        },
+      };
+    };
+    const source: PositionedStreamSource<void, number, number, object> = {
+      open: (_input, options) => {
+        trace.push("open");
+        const channel = makeChannel();
+        openings.push({ options, reader: options.reader });
+        if (options.reader !== undefined) readerEmitters.set(options.reader, channel.emit);
+        return channel.iterable;
+      },
+      initialBoundary: (_input, options) => {
+        trace.push("boundary");
+        const after = Object.hasOwn(options, "after") ? options.after : 5;
+        if (typeof after !== "number") throw new Error("The genuine initial boundary was not numeric");
+        boundaries.push({ options, after });
+        return { available: true, after };
+      },
+      readerLifetime: (_input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        if (reservation === undefined || reservation.input !== _input || reservation.after !== after || reservation.seed !== seed)
+          throw new TypeError("The provider lifetime does not match its exact reservation");
+        return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
+      },
+      validateReader: (_input, reader, after, _checkpoint, seed) => {
+        const reservation = reservations.get(reader);
+        return reservation !== undefined && reservation.after === after && reservation.seed === seed;
+      },
+      isReaderCurrent: (_input, reader, after, seed) => {
+        const reservation = reservations.get(reader);
+        return reservation !== undefined && reservation.after === after && reservation.seed === seed;
+      },
+      acknowledge: (_input, reader, receipt) => acknowledgements.push({ reader, receipt }),
+      releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
+    };
+    return {
+      source,
+      openings,
+      boundaries,
+      trace,
+      acknowledgements,
+      reserve(after: number, seed: unknown) {
+        const reader = Object.freeze({});
+        reservations.set(reader, { input: undefined, after, seed, controller: new AbortController(), expiresAt: providerClockNow() + 60_000 });
+        return reader;
+      },
+      emit(reader: object, event: Event) {
+        const emit = readerEmitters.get(reader);
+        if (emit === undefined) throw new Error("The admitted positioned reader did not open");
+        emit(event);
+      },
+      releaseCount(reader: object) {
+        return releases.get(reader) ?? 0;
+      },
+    };
+  };
+  const providerA = makeProvider();
+  const providerB = makeProvider();
+  const definitionA = createPositionedStream<void, number, string, number, object>({
+    name: "shared-initial-boundary",
+    key: () => "shared-initial-boundary/one",
+    snapshot: false,
+    source: providerA.source,
+  });
+  const definitionB = createPositionedStream<void, number, string, number, object>({
+    name: "shared-initial-boundary",
+    key: () => "shared-initial-boundary/one",
+    snapshot: false,
+    source: providerB.source,
+  });
+  const namespace = "shared-initial-boundary";
+  const sourceGraph = createGraph({
+    contract: defineContract({ namespace, operations: { events: definitionA } }),
+  });
+  const targetGraph = createGraph({
+    contract: defineContract({ namespace, operations: { events: definitionB } }),
+  });
+  let targetSteps = 0;
+  let sourceSteps = 0;
+  const policy = {
+    kind: "reduce" as const,
+    initial: 10,
+    step: (sum: number, event: number) => {
+      targetSteps += 1;
+      return sum + event;
+    },
+  };
+  const sourcePolicy = {
+    ...policy,
+    step: (sum: number, event: number) => {
+      sourceSteps += 1;
+      return sum + event;
+    },
+  };
+  let sourceProjection: Projection<number> | undefined;
+  let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
+  let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+  let claim: {
+    readonly store: StreamStore<number>;
+    readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+    readonly retired: Promise<void>;
+    discard(): void;
+  } | undefined;
+  let reader: object | undefined;
+  let capturePublished = false;
+  let adoptionPublished = false;
+
+  try {
+    const source = sourceGraph.api.events(undefined);
+    sourceProjection = project(source, sourcePolicy);
+    expect(providerA.openings).toHaveLength(1);
+    expect(providerA.boundaries).toHaveLength(1);
+    expect(providerA.boundaries[0]!.options).toBe(providerA.openings[0]!.options);
+    expect(providerA.trace.indexOf("boundary")).toBeLessThan(providerA.trace.indexOf("pull"));
+    expect(source.available.get()).toBe(false);
+    expect(sourceProjection.value.get()).toBe(10);
+    expect(sourceSteps).toBe(0);
+    expect(positionedFoldReceipt(sourceProjection)).toBeUndefined();
+    expect(providerA.acknowledgements).toHaveLength(0);
+
+    const checkpoint = capturePositionedStore(source, [sourceProjection] as const);
+    expect(checkpoint.present).toBe(false);
+    expect(checkpoint.hasPosition).toBe(false);
+    expect(Object.hasOwn(checkpoint, "latest")).toBe(false);
+    expect(checkpoint.values).toStrictEqual([10]);
+    expect(checkpoint.resumable).toBe(true);
+    expect(isPositionedStoreCheckpointCurrent(checkpoint)).toBe(true);
+
+    const seed = {
+      boundary: { kind: "initial" as const, after: 5 },
+      base: { present: false as const },
+      values: [10] as const,
+    };
+    const seedId = "p0-seed";
+    const decodedSeeds = new Map<string, unknown>([[seedId, seed]]);
+    const codec: RequiredTransferCodec = {
+      encodeValue: (value) =>
+        value !== null &&
+        typeof value === "object" &&
+        Object.hasOwn(value, "boundary") &&
+        Object.hasOwn(value, "base")
+          ? ({ $ref: seedId } as ClosedEncodedValue)
+          : (value as ClosedEncodedValue),
+      encodeFailure: (cause) => String(cause),
+      decodeValue: (value) => {
+        if (
+          value !== null &&
+          typeof value === "object" &&
+          Object.hasOwn(value, "$ref") &&
+          (value as { readonly $ref?: unknown }).$ref === seedId
+        ) {
+          const decoded = decodedSeeds.get(seedId);
+          if (decoded === undefined) throw new Error("The positioned seed reference is missing");
+          return decoded;
+        }
+        return value;
+      },
+      decodeFailure: (failure) => new Error(String(failure)),
+    };
+    const sourceRoot = computed(() => sourceProjection!.value.get());
+    expect(sourceRoot.get()).toBe(10);
+    capture = prepareRequiredTransferCapture({
+      graphs: [sourceGraph],
+      roots: [{ source: sourceRoot, construction: captureReactiveConstruction(sourceRoot) }],
+      positioned: [checkpoint],
+      codec,
+    });
+    expect(capture.image.version).toBe(2);
+    const positionedRows = capture.image.positioned;
+    if (positionedRows === undefined) throw new Error("The initial positioned group row was omitted");
+    expect(positionedRows).toMatchObject([
+      {
+        slot: "p0",
+        store: "s0",
+        projections: 1,
+        seed: { $ref: "p0-seed" },
+      },
+    ]);
+    expect(decodedSeeds.get("p0-seed")).toBe(seed);
+    expect(decodedSeeds.get("p0-seed")).toBe(seed);
+    expect(seed.boundary).toEqual({ kind: "initial", after: 5 });
+    expect(seed.base).toEqual({ present: false });
+    expect(seed.values).toEqual([10]);
+    expect(capture.image.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "native",
+        positioned: "p0",
+        projection: 0,
+        facet: "projection-value",
+        hasValue: false,
+        hasError: false,
+      }),
+    ]));
+    const captureCommit = capture.seal();
+    if (captureCommit === undefined) throw new Error("The genuine initial capture did not seal");
+    captureCommit.publish();
+    capturePublished = true;
+    captureCommit.notifications.deliver();
+    await capture.retired;
+
+    const targetReader = providerB.reserve(5, seed);
+    reader = targetReader;
+    const receiverClaim = preparePassiveTransferClaim(
+      targetGraph,
+      targetGraph.api.events,
+      undefined,
+      undefined,
+      { policies: [policy] as const, seed, reader: targetReader },
+    );
+    claim = receiverClaim;
+    expect(receiverClaim.restoration.source).toBe(receiverClaim.store);
+    expect(receiverClaim.retired).not.toBe(receiverClaim.restoration.retired);
+    expect(providerB.openings).toHaveLength(0);
+    expect(providerB.acknowledgements).toHaveLength(0);
+
+    let targetRuns = 0;
+    const targetValue = computed(() => {
+      targetRuns += 1;
+      return receiverClaim.restoration.projections[0]!.value.get();
+    });
+    adoption = prepareRequiredTransferAdoption(capture.image, {
+      graphs: [targetGraph],
+      sources: [{ slot: "s0", claim: receiverClaim }],
+      positioned: [{ slot: "p0", claim: receiverClaim, seed }],
+      reactive: [{
+        slot: capture.image.roots[0]!,
+        target: targetValue,
+        construction: captureReactiveConstruction(targetValue),
+      }],
+      codec,
+      mappedStateWrites: [],
+    });
+    const commit = adoption.seal();
+    if (commit === undefined) throw new Error("The initial boundary adoption did not seal");
+    commit.publish();
+    adoptionPublished = true;
+    commit.notifications.deliver();
+    await Promise.all([adoption.retired, claim.retired]);
+    expect(providerB.openings).toHaveLength(0);
+    expect(receiverClaim.store.available.get()).toBe(false);
+    expect(targetValue.get()).toBe(10);
+    expect(targetRuns).toBe(0);
+    expect(targetSteps).toBe(0);
+    expect(positionedFoldReceipt(receiverClaim.restoration.projections[0]!)).toBeUndefined();
+    expect(providerB.acknowledgements).toHaveLength(0);
+
+    expect(receiverClaim.restoration.activate()).toBe(receiverClaim.store);
+    expect(providerB.openings).toHaveLength(1);
+    expect(providerB.boundaries).toHaveLength(1);
+    expect(providerB.boundaries[0]!.options).toBe(providerB.openings[0]!.options);
+    expect(providerB.boundaries[0]!.after).toBe(5);
+    expect(providerB.trace.indexOf("boundary")).toBeLessThan(providerB.trace.indexOf("pull"));
+    expect(providerB.acknowledgements).toHaveLength(0);
+
+    const suffixFold = until(receiverClaim.restoration.projections[0]!.value, (value) => value === 12);
+    providerB.emit(targetReader, { position: 6, value: 2 });
+    await suffixFold;
+    expect(targetSteps).toBe(1);
+    expect(receiverClaim.store.available.get()).toBe(true);
+    expect(receiverClaim.store.value.get()).toBe(2);
+    const receipt = positionedFoldReceipt(receiverClaim.restoration.projections[0]!);
+    if (receipt === undefined) throw new Error("The real suffix did not produce a fold receipt");
+    acknowledgePositionedFold(receiverClaim.restoration.projections[0]!, receipt);
+    expect(providerB.acknowledgements).toEqual([{ reader, receipt }]);
+
+    receiverClaim.restoration.discard();
+    await receiverClaim.restoration.retired;
+    expect(providerB.releaseCount(targetReader)).toBe(1);
+  } finally {
+    if (!capturePublished) capture?.discard();
+    if (!adoptionPublished) {
+      adoption?.discard();
+      claim?.discard();
+    } else claim?.restoration.discard();
+    sourceProjection?.close();
+    sourceGraph.dispose();
+    targetGraph.dispose();
+    if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
+      providerB.source.releaseReader(undefined, reader);
+    if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
+    if (adoption !== undefined) await adoption.retired.then(() => undefined, () => undefined);
+    if (claim !== undefined) {
+      await claim.retired.then(() => undefined, () => undefined);
+      await claim.restoration.retired.then(() => undefined, () => undefined);
+    }
   }
 });
 

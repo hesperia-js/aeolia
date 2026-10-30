@@ -36,6 +36,7 @@ import { validateContract } from "./validation.ts";
 import {
   positionedStreamSourceByDefinition,
   positionedPositionWriterByOpenOptions,
+  positionedInitialBoundaryWriterByOpenOptions,
   positionedOpenRequestByOpenOptions,
 } from "./registry.ts";
 export { createGraph } from "./engine.ts";
@@ -192,6 +193,12 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
   const currentSourceReader = sourceInput.isReaderCurrent;
   const acknowledgeSourceReader = sourceInput.acknowledge;
   const releaseSourceReader = sourceInput.releaseReader;
+  const initialBoundarySource = sourceInput.initialBoundary;
+  const readerLifetimeSource = sourceInput.readerLifetime;
+  if (initialBoundarySource !== undefined && typeof initialBoundarySource !== "function")
+    throw new TypeError("Positioned stream initialBoundary must be a function.");
+  if (readerLifetimeSource !== undefined && typeof readerLifetimeSource !== "function")
+    throw new TypeError("Positioned stream readerLifetime must be a function.");
   if (
     typeof openSource !== "function" ||
     typeof validateSourceReader !== "function" ||
@@ -221,6 +228,18 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
     ) => Reflect.apply(acknowledgeSourceReader, sourceInput, [value, reader, receipt]),
     releaseReader: (value: Input, reader: Reader) =>
       Reflect.apply(releaseSourceReader, sourceInput, [value, reader]),
+    ...(typeof initialBoundarySource === "function"
+      ? {
+          initialBoundary: (value: Input, options: PositionedStreamOpenOptions<Position, Reader>) =>
+            Reflect.apply(initialBoundarySource, sourceInput, [value, options]),
+        }
+      : {}),
+    ...(typeof readerLifetimeSource === "function"
+      ? {
+          readerLifetime: (value: Input, reader: Reader, after: Position, seed: unknown) =>
+            Reflect.apply(readerLifetimeSource, sourceInput, [value, reader, after, seed]),
+        }
+      : {}),
   });
   const normalizedInput = {
     name,
@@ -242,6 +261,10 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
       typeof events[Symbol.asyncIterator] !== "function"
     )
       throw new TypeError("Positioned stream open must return an AsyncIterable.");
+    const initialBoundary = capturedSource.initialBoundary === undefined
+      ? undefined
+      : Reflect.apply(capturedSource.initialBoundary, capturedSource, [value, positionedOptions]);
+    positionedInitialBoundaryWriterByOpenOptions.get(options)?.(initialBoundary);
     return (async function* (): AsyncGenerator<Value> {
       for await (const event of events as AsyncIterable<PositionedStreamEvent<Position, Value>>) {
         if (

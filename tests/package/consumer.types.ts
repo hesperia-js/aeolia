@@ -196,6 +196,11 @@ const positionedSource: PositionedStreamSource<PositionedInput, number, number, 
     isReaderCurrent: (_input, _reader, _after, _seed) => true,
     acknowledge: (_input, _reader, _receipt) => undefined,
     releaseReader: (_input, _reader) => undefined,
+    initialBoundary: (_input, _options) => ({ available: true, after: 0 }),
+    readerLifetime: (_input, _reader, _after, _seed) => ({
+      signal: new AbortController().signal,
+      expiresAt: Date.now() + 60_000,
+    }),
   };
 const positionedDefinition = createPositionedStream({
   name: "items.positioned",
@@ -1413,3 +1418,78 @@ function publicRequiredTransferTypeSurface(
 
 void publicPassiveTransferTypeSurface;
 void publicRequiredTransferTypeSurface;
+
+function positionedTransferConsumerTypesOnly(): void {
+  const transferPolicy = {
+    kind: "reduce" as const,
+    initial: { total: 0 },
+    step: (accumulator: { total: number }, event: number) => ({
+      total: accumulator.total + event,
+    }),
+  };
+  const omittedBase: PositionedStoreRestoreSeed<
+    number,
+    number,
+    readonly [{ readonly total: number }]
+  > = {
+    boundary: { kind: "event", after: 4 },
+    base: { present: false },
+    values: [{ total: 7 }],
+  };
+  const presentUndefined: PositionedStoreRestoreSeed<
+    number | undefined,
+    number | undefined,
+    readonly [number]
+  > = {
+    boundary: { kind: "initial", after: undefined },
+    base: { present: true, value: undefined },
+    values: [3],
+  };
+  const claim = preparePassiveTransferClaim(
+    positionedGraph,
+    positionedGraph.api.positioned,
+    { id: "positioned-transfer" },
+    undefined,
+    {
+      policies: [transferPolicy] as const,
+      seed: omittedBase,
+      reader: { token: "reader" },
+    },
+  );
+  const restoration: PositionedStoreRestoration<
+    number,
+    readonly [{ readonly total: number }]
+  > = claim.restoration;
+  const restoredStore: StreamStore<number> = claim.store;
+  const restoredValue: { readonly total: number } = restoration.projections[0].value.get();
+  const registrationRetired: Promise<void> = claim.retired;
+  const resourceRetired: Promise<void> = restoration.retired;
+  const sameSource: boolean = restoration.source === claim.store;
+
+  const invalidOmittedBase: PositionedStoreRestoreSeed<number, number, readonly [number]> = {
+    boundary: { kind: "event", after: 4 },
+    // @ts-expect-error An omitted base cannot carry an event value.
+    base: { present: false, value: undefined },
+    values: [3],
+  };
+  const invalidPresentBase: PositionedStoreRestoreSeed<number | undefined, number, readonly [number]> = {
+    boundary: { kind: "event", after: 4 },
+    // @ts-expect-error A present base must own a value, even when its value is undefined.
+    base: { present: true },
+    values: [3],
+  };
+
+  claim.discard();
+  void [
+    presentUndefined,
+    restoredStore,
+    restoredValue,
+    registrationRetired,
+    resourceRetired,
+    sameSource,
+    invalidOmittedBase,
+    invalidPresentBase,
+  ];
+}
+
+void positionedTransferConsumerTypesOnly;

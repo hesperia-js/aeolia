@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import {
   Fault,
+  captureReactiveConstruction,
+  computed,
   createGraph,
   defineContract,
   createStream,
@@ -10,6 +12,9 @@ import {
   projectPositioned,
   capturePositionedStore,
   isPositionedStoreCheckpointCurrent,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
+  prepareRequiredTransferCapture,
   preparePositionedStoreRestore,
   capturePositionedProjection,
   isPositionedCheckpointCurrent,
@@ -24,13 +29,20 @@ import {
   type Projection,
   type StreamDefinition,
   type PositionedStreamSource,
+  type PositionedStreamDefinition,
   type PositionedStreamEvent,
   type PositionedStreamOpenOptions,
   type PositionedProjectionCheckpoint,
   type PositionedFoldReceipt,
   type PositionedStoreRestoreSeed,
+  type PositionedStoreRestoration,
+  type StreamStore,
+  type ClosedEncodedValue,
+  type RequiredTransferCodec,
 } from "../../src/index.ts";
 import { testBackend, type TestBackend } from "../../src/testing.ts";
+
+const providerClockNow = Date.now;
 
 let ownsFakeTimers = false;
 beforeEach(() => {
@@ -106,26 +118,26 @@ function waitForProjectionStatus(
 }
 
 type PositionedInput = { readonly room: string };
-type PositionedEvent = PositionedStreamEvent<number, number>;
+type PositionedEvent<Value = number> = PositionedStreamEvent<number, Value>;
 type PositionedCheckpoint = PositionedProjectionCheckpoint<unknown, number>;
 
-function positionedChannel() {
-  const queued: PositionedEvent[] = [];
-  const waiters: Array<(result: IteratorResult<PositionedEvent>) => void> = [];
+function positionedChannel<Value = number>() {
+  const queued: PositionedEvent<Value>[] = [];
+  const waiters: Array<(result: IteratorResult<PositionedEvent<Value>>) => void> = [];
   let ended = false;
-  const emit = (event: PositionedEvent): void => {
+  const emit = (event: PositionedEvent<Value>): void => {
     const waiter = waiters.shift();
     if (waiter !== undefined) waiter({ done: false, value: event });
     else queued.push(event);
   };
-  const source: AsyncIterable<PositionedEvent> = {
-    [Symbol.asyncIterator](): AsyncIterator<PositionedEvent> {
+  const source: AsyncIterable<PositionedEvent<Value>> = {
+    [Symbol.asyncIterator](): AsyncIterator<PositionedEvent<Value>> {
       return {
         next: () => {
           const event = queued.shift();
           if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
           if (ended) return Promise.resolve({ done: true as const, value: undefined });
-          return new Promise<IteratorResult<PositionedEvent>>((resolve) => waiters.push(resolve));
+          return new Promise<IteratorResult<PositionedEvent<Value>>>((resolve) => waiters.push(resolve));
         },
         return: () => {
           ended = true;
@@ -138,9 +150,9 @@ function positionedChannel() {
   return { source, emit };
 }
 
-class PositionedProvider implements PositionedStreamSource<
+class PositionedProvider<Value = number> implements PositionedStreamSource<
   PositionedInput,
-  number,
+  Value,
   number,
   object
 > {
@@ -162,10 +174,12 @@ class PositionedProvider implements PositionedStreamSource<
       after: number;
       checkpoint: PositionedCheckpoint | undefined;
       seed: unknown;
+      controller: AbortController;
+      expiresAt: number;
     }
   >();
-  readonly #readerEmitters = new WeakMap<object, (event: PositionedEvent) => void>();
-  readonly #liveEmitters = new Map<string, (event: PositionedEvent) => void>();
+  readonly #readerEmitters = new WeakMap<object, (event: PositionedEvent<Value>) => void>();
+  readonly #liveEmitters = new Map<string, (event: PositionedEvent<Value>) => void>();
   readonly #releaseCounts = new WeakMap<object, number>();
 
   reserve(
@@ -175,17 +189,24 @@ class PositionedProvider implements PositionedStreamSource<
     seed: unknown,
   ): object {
     const reader = Object.freeze({});
-    this.#reservations.set(reader, { input, after, checkpoint, seed });
+    this.#reservations.set(reader, {
+      input,
+      after,
+      checkpoint,
+      seed,
+      controller: new AbortController(),
+      expiresAt: providerClockNow() + 60_000,
+    });
     return reader;
   }
 
-  emitLive(input: PositionedInput, event: PositionedEvent): void {
+  emitLive(input: PositionedInput, event: PositionedEvent<Value>): void {
     const emit = this.#liveEmitters.get(input.room);
     if (emit === undefined) throw new Error("The live provider opening is missing");
     emit(event);
   }
 
-  emitReader(reader: object, event: PositionedEvent): void {
+  emitReader(reader: object, event: PositionedEvent<Value>): void {
     const emit = this.#readerEmitters.get(reader);
     if (emit === undefined) throw new Error("The reserved provider opening is missing");
     emit(event);
@@ -198,8 +219,8 @@ class PositionedProvider implements PositionedStreamSource<
   open(
     input: PositionedInput,
     options: PositionedStreamOpenOptions<number, object>,
-  ): AsyncIterable<PositionedEvent> {
-    const channel = positionedChannel();
+  ): AsyncIterable<PositionedEvent<Value>> {
+    const channel = positionedChannel<Value>();
     const hasAfter = Object.hasOwn(options, "after");
     const hasReader = Object.hasOwn(options, "reader");
     this.opens.push({ room: input.room, hasAfter, after: options.after, hasReader });
@@ -247,6 +268,27 @@ class PositionedProvider implements PositionedStreamSource<
     this.acknowledgements.push({ reader, receipt });
   }
 
+  readonly readerLifetime = (
+    input: PositionedInput,
+    reader: object,
+    after: number,
+    seed: unknown,
+  ): { readonly signal: AbortSignal; readonly expiresAt: number } => {
+    const reservation = this.#reservations.get(reader);
+    if (
+      reservation === undefined ||
+      reservation.input !== input ||
+      reservation.after !== after ||
+      reservation.seed !== seed
+    )
+      throw new TypeError("The positioned lifetime does not match its reader reservation");
+    return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
+  };
+
+  abortReader(reader: object, reason?: unknown): void {
+    this.#reservations.get(reader)?.controller.abort(reason);
+  }
+
   releaseReader(_input: PositionedInput, reader: object): void {
     this.#releaseCounts.set(reader, this.releaseCount(reader) + 1);
   }
@@ -260,7 +302,10 @@ function positionedDefinition(provider: PositionedProvider) {
   });
 }
 
-function positionedGraph(stream: ReturnType<typeof positionedDefinition>, namespace: string) {
+function positionedGraph<Value>(
+  stream: PositionedStreamDefinition<PositionedInput, Value, string, number, object>,
+  namespace: string,
+) {
   return createGraph({
     contract: defineContract({ namespace, operations: { events: stream } }),
     idleMs: 10,
@@ -1127,6 +1172,529 @@ describe("stream projections", () => {
       equalFold.close();
       progress.close();
       graph.dispose();
+    }
+  });
+
+  it("preserves omitted and present undefined bases in positioned transfer seeds", async () => {
+    const cases = [
+      { snapshot: false, event: 17, basePresent: false },
+      { snapshot: true, event: undefined, basePresent: true },
+    ] as const;
+
+    for (const [index, scenario] of cases.entries()) {
+      const provider = new PositionedProvider<number | undefined>();
+      const stream = createPositionedStream<PositionedInput, number | undefined, string, number, object>({
+        name: "positioned-transfer-base-" + index,
+        key: (input) => input.room,
+        snapshot: scenario.snapshot,
+        source: provider,
+      });
+      const namespace = "positioned-transfer-base-" + index;
+      const sourceGraph = positionedGraph(stream, namespace);
+      const targetGraph = positionedGraph(stream, namespace);
+      const input = Object.freeze({ room: "one" });
+      let sourceSteps = 0;
+      let targetSteps = 0;
+      let targetRuns = 0;
+      const sourcePolicy = {
+        kind: "reduce" as const,
+        initial: 10,
+        step: (sum: number, event: number | undefined) => {
+          sourceSteps += 1;
+          return sum + (event ?? 0);
+        },
+      };
+      const targetPolicy = {
+        kind: "reduce" as const,
+        initial: 10,
+        step: (sum: number, event: number | undefined) => {
+          targetSteps += 1;
+          return sum + (event ?? 0);
+        },
+      };
+      let sourceProjection: Projection<number> | undefined;
+      let capturePlan: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
+      let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+      let claim: {
+        readonly store: StreamStore<number | undefined>;
+        readonly restoration: PositionedStoreRestoration<number | undefined, readonly [number]>;
+        readonly retired: Promise<void>;
+        discard(): void;
+      } | undefined;
+      let reader: object | undefined;
+      let capturePublished = false;
+      let adoptionPublished = false;
+      try {
+        const source = sourceGraph.api.events(input);
+        sourceProjection = project(source, sourcePolicy);
+        const sourceLanding = new Promise<void>((resolve) => {
+          let stop: () => void = () => undefined;
+          stop = subscribe(source.available, (available) => {
+            if (!available) return;
+            stop();
+            resolve();
+          });
+        });
+        provider.emitLive(input, { position: 5, value: scenario.event });
+        await sourceLanding;
+        const sourceValue = scenario.event === undefined ? undefined : scenario.event;
+        const checkpoint = capturePositionedStore(source, [sourceProjection] as const);
+        expect(checkpoint.present).toBe(true);
+        expect(Object.hasOwn(checkpoint, "latest")).toBe(true);
+        expect(checkpoint.latest).toBe(sourceValue);
+        expect(checkpoint.hasPosition).toBe(true);
+        expect(checkpoint.position).toBe(5);
+        expect(checkpoint.values).toStrictEqual([10 + (scenario.event ?? 0)]);
+        expect(checkpoint.resumable).toBe(true);
+        expect(sourceSteps).toBe(1);
+        expect(isPositionedStoreCheckpointCurrent(checkpoint)).toBe(true);
+
+        const after = checkpoint.position;
+        if (typeof after !== "number") throw new Error("The source checkpoint lost its exact event position");
+        const base = scenario.basePresent
+          ? { present: true as const, value: checkpoint.latest }
+          : { present: false as const };
+        const seed = {
+          boundary: { kind: "event" as const, after },
+          base,
+          values: checkpoint.values,
+        };
+        const seedId = "p0-seed";
+        const decodedSeeds = new Map<string, unknown>([[seedId, seed]]);
+        const codec: RequiredTransferCodec = {
+          encodeValue: (value) =>
+            value !== null &&
+            typeof value === "object" &&
+            Object.hasOwn(value, "boundary") &&
+            Object.hasOwn(value, "base")
+              ? ({ $ref: seedId } as ClosedEncodedValue)
+              : (value as ClosedEncodedValue),
+          encodeFailure: (cause) => String(cause),
+          decodeValue: (value) => {
+            if (
+              value !== null &&
+              typeof value === "object" &&
+              Object.hasOwn(value, "$ref") &&
+              (value as { readonly $ref?: unknown }).$ref === seedId
+            ) {
+              const decoded = decodedSeeds.get(seedId);
+              if (decoded === undefined) throw new Error("The positioned seed reference is missing");
+              return decoded;
+            }
+            return value;
+          },
+          decodeFailure: (failure) => new Error(String(failure)),
+        };
+        const sourceRoot = computed(() => sourceProjection!.value.get());
+        expect(sourceRoot.get()).toBe(10 + (scenario.event ?? 0));
+        capturePlan = prepareRequiredTransferCapture({
+          graphs: [sourceGraph],
+          roots: [{ source: sourceRoot, construction: captureReactiveConstruction(sourceRoot) }],
+          positioned: [checkpoint],
+          codec,
+        });
+        const image = capturePlan.image;
+        expect(image.version).toBe(2);
+        expect(image.stores).toHaveLength(1);
+        const positionedRows = image.positioned;
+        if (positionedRows === undefined) throw new Error("The positioned group rows were omitted");
+        expect(positionedRows).toHaveLength(1);
+        const storeRow = image.stores[0]!;
+        const groupRow = positionedRows[0]!;
+        expect(storeRow).toMatchObject({ slot: "s0", hasValue: false });
+        expect(Object.hasOwn(storeRow, "value")).toBe(false);
+        expect(groupRow).toMatchObject({ slot: "p0", store: storeRow.slot, projections: 1 });
+        expect(groupRow.seed).toEqual({ $ref: "p0-seed" });
+        expect(decodedSeeds.get("p0-seed")).toBe(seed);
+        expect(seed.boundary).toEqual({ kind: "event", after: 5 });
+        expect(seed.base.present).toBe(scenario.basePresent);
+        expect(Object.hasOwn(seed.base, "value")).toBe(scenario.basePresent);
+        expect(seed.base.value).toBe(sourceValue);
+        expect(seed.values).toStrictEqual([10 + (scenario.event ?? 0)]);
+        expect(image.nodes).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            kind: "native",
+            positioned: "p0",
+            projection: 0,
+            facet: "projection-value",
+            hasValue: false,
+            hasError: false,
+          }),
+        ]));
+
+        const captureCommit = capturePlan.seal();
+        if (captureCommit === undefined) throw new Error("The stable positioned base capture did not seal");
+        captureCommit.publish();
+        capturePublished = true;
+        captureCommit.notifications.deliver();
+        await capturePlan.retired;
+
+        const targetReader = provider.reserve(input, after, undefined, seed);
+        reader = targetReader;
+        const receiverClaim = preparePassiveTransferClaim(
+          targetGraph,
+          targetGraph.api.events,
+          input,
+          undefined,
+          { policies: [targetPolicy] as const, seed, reader: targetReader },
+        );
+        claim = receiverClaim;
+        expect(receiverClaim.restoration.source).toBe(receiverClaim.store);
+        expect(provider.opens).toHaveLength(1);
+        const targetProjection = receiverClaim.restoration.projections[0];
+        const targetValue = computed(() => {
+          targetRuns += 1;
+          return targetProjection.value.get();
+        });
+        adoption = prepareRequiredTransferAdoption(image, {
+          graphs: [targetGraph],
+          sources: [{ slot: storeRow.slot, claim: receiverClaim }],
+          positioned: [{ slot: groupRow.slot, claim: receiverClaim, seed }],
+          reactive: [{
+            slot: image.roots[0]!,
+            target: targetValue,
+            construction: captureReactiveConstruction(targetValue),
+          }],
+          codec,
+          mappedStateWrites: [],
+        });
+        const activeAdoption = adoption;
+        const readerSignal = provider.readerLifetime(input, targetReader, after, seed).signal;
+        const readerSignalDescriptor = Object.getOwnPropertyDescriptor(readerSignal, "aborted");
+        const previousClock = Date.now;
+        let shadowedClockReads = 0;
+        let shadowedAbortReads = 0;
+        let commit: ReturnType<typeof activeAdoption.seal> = undefined;
+        try {
+          Object.defineProperty(readerSignal, "aborted", {
+            configurable: true,
+            get() {
+              shadowedAbortReads += 1;
+              throw new Error("The final native seal read the shadowed reader signal");
+            },
+          });
+          Date.now = () => {
+            shadowedClockReads += 1;
+            throw new Error("The final native seal read the shadowed clock");
+          };
+          commit = activeAdoption.seal();
+          if (commit !== undefined) {
+            commit.publish();
+            adoptionPublished = true;
+          }
+        } finally {
+          Date.now = previousClock;
+          if (readerSignalDescriptor === undefined)
+            Reflect.deleteProperty(readerSignal, "aborted");
+          else Object.defineProperty(readerSignal, "aborted", readerSignalDescriptor);
+        }
+        expect(shadowedClockReads).toBe(0);
+        expect(shadowedAbortReads).toBe(0);
+        if (commit === undefined) throw new Error("The positioned base adoption did not seal");
+        commit.notifications.deliver();
+        await Promise.all([adoption.retired, claim.retired]);
+
+        expect(receiverClaim.store.available.get()).toBe(scenario.basePresent);
+        expect(receiverClaim.store.value.get()).toBe(scenario.basePresent ? sourceValue : undefined);
+        expect(targetValue.get()).toBe(10 + (scenario.event ?? 0));
+        expect(targetRuns).toBe(0);
+        expect(targetSteps).toBe(0);
+        expect(positionedFoldReceipt(targetProjection)).toBeUndefined();
+        expect(provider.acknowledgements).toHaveLength(0);
+
+        const targetLanding = new Promise<void>((resolve) => {
+          let stop: () => void = () => undefined;
+          stop = subscribe(targetProjection.value, (value) => {
+            if (value !== 12 + (scenario.event ?? 0)) return;
+            stop();
+            resolve();
+          });
+        });
+        expect(receiverClaim.restoration.activate()).toBe(receiverClaim.store);
+        expect(provider.opens).toHaveLength(2);
+        expect(provider.opens[1]).toMatchObject({ hasAfter: true, after: 5, hasReader: true });
+        provider.emitReader(targetReader, { position: 6, value: 2 });
+        await targetLanding;
+        expect(targetSteps).toBe(1);
+        expect(receiverClaim.store.available.get()).toBe(true);
+        expect(receiverClaim.store.value.get()).toBe(2);
+        const receipt = positionedFoldReceipt(targetProjection);
+        expect(receipt).toMatchObject({ position: 6 });
+        acknowledgePositionedFold(targetProjection, receipt!);
+        expect(provider.acknowledgements).toEqual([{ reader, receipt }]);
+        receiverClaim.restoration.discard();
+        await receiverClaim.restoration.retired;
+        expect(provider.releaseCount(targetReader)).toBe(1);
+      } finally {
+        if (!capturePublished) capturePlan?.discard();
+        if (!adoptionPublished) {
+          if (adoption !== undefined) adoption.discard();
+          claim?.discard();
+        } else claim?.restoration.discard();
+        sourceProjection?.close();
+        sourceGraph.dispose();
+        targetGraph.dispose();
+        if (reader !== undefined && provider.releaseCount(reader) === 0)
+          provider.releaseReader(input, reader);
+        if (capturePlan !== undefined) await capturePlan.retired.then(() => undefined, () => undefined);
+        if (adoption !== undefined) await adoption.retired.then(() => undefined, () => undefined);
+        if (claim !== undefined) {
+          await claim.retired.then(() => undefined, () => undefined);
+          await claim.restoration.retired.then(() => undefined, () => undefined);
+        }
+      }
+    }
+  });
+
+  it("rechecks an earlier reader after a later provider callback invalidates it", async () => {
+    const sourceProviderA = new PositionedProvider<number>();
+    const sourceProviderB = new PositionedProvider<number>();
+    const targetProviderA = new PositionedProvider<number>();
+    const targetProviderB = new PositionedProvider<number>();
+    const sourceStreamA = positionedDefinition(sourceProviderA);
+    const sourceStreamB = positionedDefinition(sourceProviderB);
+    const targetStreamA = positionedDefinition(targetProviderA);
+    const targetStreamB = positionedDefinition(targetProviderB);
+    const namespace = "positioned-reader-reentry";
+    const sourceGraphA = createGraph({
+      contract: defineContract({ namespace, operations: { events: sourceStreamA } }),
+    });
+    const sourceGraphB = createGraph({
+      contract: defineContract({ namespace, operations: { events: sourceStreamB } }),
+    });
+    const targetGraphA = createGraph({
+      contract: defineContract({ namespace, operations: { events: targetStreamA } }),
+    });
+    const targetGraphB = createGraph({
+      contract: defineContract({ namespace, operations: { events: targetStreamB } }),
+    });
+    const input = Object.freeze({ room: "one" });
+    const sourcePolicyA = {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (sum: number, event: number) => sum + event,
+    };
+    const sourcePolicyB = {
+      kind: "reduce" as const,
+      initial: 10,
+      step: (sum: number, event: number) => sum + event,
+    };
+    const targetPolicyA = {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (sum: number, event: number) => sum + event,
+    };
+    const targetPolicyB = {
+      kind: "reduce" as const,
+      initial: 10,
+      step: (sum: number, event: number) => sum + event,
+    };
+    const sourceStoreA = sourceGraphA.api.events(input);
+    const sourceStoreB = sourceGraphB.api.events(input);
+    const sourceProjectionA = project(sourceStoreA, sourcePolicyA);
+    const sourceProjectionB = project(sourceStoreB, sourcePolicyB);
+    let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
+    let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+    type PositionedClaim = {
+      readonly store: StreamStore<number>;
+      readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+      readonly retired: Promise<void>;
+      discard(): void;
+    };
+    let claimA: PositionedClaim | undefined;
+    let claimB: PositionedClaim | undefined;
+    let readerA: object | undefined;
+    let readerB: object | undefined;
+    let capturePublished = false;
+    try {
+      const landedA = until(sourceProjectionA.value, (value) => value === 2);
+      const landedB = until(sourceProjectionB.value, (value) => value === 14);
+      sourceProviderA.emitLive(input, { position: 5, value: 2 });
+      sourceProviderB.emitLive(input, { position: 7, value: 4 });
+      await Promise.all([landedA, landedB]);
+      const checkpointA = capturePositionedStore(sourceStoreA, [sourceProjectionA] as const);
+      const checkpointB = capturePositionedStore(sourceStoreB, [sourceProjectionB] as const);
+      expect(checkpointA.position).toBe(5);
+      expect(checkpointB.position).toBe(7);
+      expect(checkpointA.resumable && checkpointB.resumable).toBe(true);
+      const seedA = {
+        boundary: { kind: "event" as const, after: 5 },
+        base: { present: true as const, value: 2 },
+        values: checkpointA.values,
+      };
+      const seedB = {
+        boundary: { kind: "event" as const, after: 7 },
+        base: { present: true as const, value: 4 },
+        values: checkpointB.values,
+      };
+      const seedIds = new Map<string, unknown>([["p0-seed", seedA], ["p1-seed", seedB]]);
+      let encodedGroup = 0;
+      const codec: RequiredTransferCodec = {
+        encodeValue: (value) => {
+          if (
+            value !== null && typeof value === "object" &&
+            Object.hasOwn(value, "boundary") && Object.hasOwn(value, "base")
+          ) {
+            const id = encodedGroup++ === 0 ? "p0-seed" : "p1-seed";
+            return { $ref: id } as ClosedEncodedValue;
+          }
+          return value as ClosedEncodedValue;
+        },
+        encodeFailure: (cause) => String(cause),
+        decodeValue: (value) => {
+          if (
+            value !== null && typeof value === "object" &&
+            Object.hasOwn(value, "$ref")
+          ) {
+            const id = (value as { readonly $ref?: unknown }).$ref;
+            if (typeof id === "string" && seedIds.has(id)) return seedIds.get(id);
+          }
+          return value;
+        },
+        decodeFailure: (failure) => new Error(String(failure)),
+      };
+      const sourceRootA = computed(() => sourceProjectionA.value.get());
+      const sourceRootB = computed(() => sourceProjectionB.value.get());
+      expect([sourceRootA.get(), sourceRootB.get()]).toEqual([2, 14]);
+      capture = prepareRequiredTransferCapture({
+        graphs: [sourceGraphA, sourceGraphB],
+        roots: [
+          { source: sourceRootA, construction: captureReactiveConstruction(sourceRootA) },
+          { source: sourceRootB, construction: captureReactiveConstruction(sourceRootB) },
+        ],
+        positioned: [checkpointA, checkpointB],
+        codec,
+      });
+      const image = capture.image;
+      const groups = image.positioned;
+      if (groups === undefined || groups.length !== 2)
+        throw new Error("Both positioned reader groups were not captured");
+      expect(groups.map((group) => group.slot)).toEqual(["p0", "p1"]);
+      expect(groups.map((group) => group.seed)).toEqual([{ $ref: "p0-seed" }, { $ref: "p1-seed" }]);
+      const sourceRowA = image.stores.find((row) => row.graph === 0);
+      const sourceRowB = image.stores.find((row) => row.graph === 1);
+      if (sourceRowA === undefined || sourceRowB === undefined)
+        throw new Error("The same-key source Stores were not kept independent");
+      expect([groups[0]!.store, groups[1]!.store]).toEqual([sourceRowA.slot, sourceRowB.slot]);
+      expect(seedIds.get("p0-seed")).toBe(seedA);
+      expect(seedIds.get("p1-seed")).toBe(seedB);
+      const captureCommit = capture.seal();
+      if (captureCommit === undefined) throw new Error("The two-reader source capture did not seal");
+      captureCommit.publish();
+      capturePublished = true;
+      captureCommit.notifications.deliver();
+      await capture.retired;
+
+      const readerALocal = targetProviderA.reserve(input, 5, undefined, seedA);
+      readerA = readerALocal;
+      const receiverA = preparePassiveTransferClaim(
+        targetGraphA,
+        targetGraphA.api.events,
+        input,
+        undefined,
+        { policies: [targetPolicyA] as const, seed: seedA, reader: readerALocal },
+      );
+      claimA = receiverA;
+      const readerBLocal = targetProviderB.reserve(input, 7, undefined, seedB);
+      readerB = readerBLocal;
+      const receiverB = preparePassiveTransferClaim(
+        targetGraphB,
+        targetGraphB.api.events,
+        input,
+        undefined,
+        { policies: [targetPolicyB] as const, seed: seedB, reader: readerBLocal },
+      );
+      claimB = receiverB;
+      const lifetimeA = targetProviderA.readerLifetime(input, readerALocal, 5, seedA);
+      expect(lifetimeA.signal.aborted).toBe(false);
+      expect(targetProviderA.releaseCount(readerALocal)).toBe(0);
+      let reentered = false;
+      targetProviderB.currentCheckHook = () => {
+        if (reentered) return;
+        reentered = true;
+        targetProviderA.abortReader(readerALocal, new Error("B validation invalidated A"));
+      };
+      const targetRootA = computed(() => receiverA.restoration.projections[0]!.value.get());
+      const targetRootB = computed(() => receiverB.restoration.projections[0]!.value.get());
+      let preparationError: unknown;
+      try {
+        adoption = prepareRequiredTransferAdoption(image, {
+          graphs: [targetGraphA, targetGraphB],
+          sources: [
+            { slot: sourceRowA.slot, claim: receiverA },
+            { slot: sourceRowB.slot, claim: receiverB },
+          ],
+          positioned: [
+            { slot: groups[0]!.slot, claim: receiverA, seed: seedA },
+            { slot: groups[1]!.slot, claim: receiverB, seed: seedB },
+          ],
+          reactive: [
+            { slot: image.roots[0]!, target: targetRootA, construction: captureReactiveConstruction(targetRootA) },
+            { slot: image.roots[1]!, target: targetRootB, construction: captureReactiveConstruction(targetRootB) },
+          ],
+          codec,
+          mappedStateWrites: [],
+        });
+      } catch (cause) {
+        preparationError = cause;
+      }
+      expect(reentered).toBe(true);
+      expect(targetProviderB.currentChecks.length).toBeGreaterThan(0);
+      expect(lifetimeA.signal.aborted).toBe(true);
+      expect(targetProviderA.opens).toHaveLength(0);
+      expect(targetProviderB.opens).toHaveLength(0);
+      if (preparationError !== undefined) {
+        expect(preparationError).toBeInstanceOf(TypeError);
+      } else {
+        if (adoption === undefined) throw new Error("The stale aggregate plan was not retained");
+        let commit: ReturnType<typeof adoption.seal> | undefined;
+        let sealError: unknown;
+        try {
+          commit = adoption.seal();
+        } catch (cause) {
+          sealError = cause;
+        }
+        expect(commit).toBeUndefined();
+        if (sealError !== undefined) expect(sealError).toBeInstanceOf(TypeError);
+        adoption.discard();
+      }
+      expect(() => receiverA.store.value.get()).toThrow(TypeError);
+      expect(() => receiverB.store.value.get()).toThrow(TypeError);
+
+      receiverA.discard();
+      receiverB.discard();
+      await Promise.all([
+        receiverA.retired,
+        receiverA.restoration.retired,
+        receiverB.retired,
+        receiverB.restoration.retired,
+      ]);
+      expect(targetProviderA.releaseCount(readerALocal)).toBe(1);
+      expect(targetProviderB.releaseCount(readerBLocal)).toBe(1);
+    } finally {
+      adoption?.discard();
+      claimA?.discard();
+      claimB?.discard();
+      sourceProjectionA.close();
+      sourceProjectionB.close();
+      sourceGraphA.dispose();
+      sourceGraphB.dispose();
+      targetGraphA.dispose();
+      targetGraphB.dispose();
+      if (readerA !== undefined && claimA === undefined && targetProviderA.releaseCount(readerA) === 0)
+        targetProviderA.source.releaseReader(input, readerA);
+      if (readerB !== undefined && claimB === undefined && targetProviderB.releaseCount(readerB) === 0)
+        targetProviderB.source.releaseReader(input, readerB);
+      if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
+      if (adoption !== undefined) await adoption.retired.then(() => undefined, () => undefined);
+      if (claimA !== undefined) {
+        await claimA.retired.then(() => undefined, () => undefined);
+        await claimA.restoration.retired.then(() => undefined, () => undefined);
+      }
+      if (claimB !== undefined) {
+        await claimB.retired.then(() => undefined, () => undefined);
+        await claimB.restoration.retired.then(() => undefined, () => undefined);
+      }
     }
   });
 

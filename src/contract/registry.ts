@@ -224,6 +224,8 @@ export const positionedStreamSourceByDefinition = new WeakMap<
 >();
 
 /** Native event-position writer attached only to one active source-open call. */
+export const positionedInitialBoundaryWriterByOpenOptions = new WeakMap<object, (result: unknown) => void>();
+
 export const positionedPositionWriterByOpenOptions = new WeakMap<
   object,
   (position: unknown) => void

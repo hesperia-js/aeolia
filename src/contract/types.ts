@@ -801,7 +801,7 @@ export interface PositionedRestoreSeed<Value, Position> {
 /** Native identity for one coherent Store session and its required projection values. */
 declare const positionedStoreCheckpointBrand: unique symbol;
 /**
- * Non-pulling borrowed capture of one completed positioned Store/session cut.
+ * Non-pulling borrowed capture of one coherent positioned Store/session cut.
  * Authenticity belongs to the native issuer, not these descriptive fields.
  */
 export type PositionedStoreCheckpoint<
@@ -814,6 +814,16 @@ export type PositionedStoreCheckpoint<
   readonly sessionIdentity: import("./stream-binding.ts").StreamSessionIdentity;
   /** Whether the source has completed a genuine positioned event landing. */
   readonly hasPosition: boolean;
+  /**
+   * Genuine continuation anchor when the source can resume. An initial anchor
+   * precedes the first event and does not make a source base value present.
+   */
+  readonly continuation?: {
+    /** Whether the anchor follows a completed event or precedes the first event. */
+    readonly kind: "event" | "initial";
+    /** Exclusive provider boundary, including an explicitly present undefined. */
+    readonly after: unknown;
+  };
   /** Borrowed provider boundary; the source Store does not carry its Position type. */
   readonly position: unknown;
   /** Borrowed required projection values, in the supplied projection order. */
@@ -835,15 +845,39 @@ export type PositionedStoreCheckpoint<
     }
 );
 
-/** Decoded ordinary data admitted by a provider for one fresh Store/session. */
-export interface PositionedStoreRestoreSeed<Event, Position, Values extends readonly unknown[]> {
-  /** Exclusive provider boundary authenticated by the admitted reader. */
-  readonly after: Position;
-  /** Own latest source-event property; undefined remains a present event. */
-  readonly latest: Event;
-  /** One decoded accumulator per target policy, in matching tuple order. */
-  readonly values: Values;
-}
+/** Legacy or boundary-aware decoded data admitted for one fresh Store/session. */
+export type PositionedStoreRestoreSeed<Event, Position, Values extends readonly unknown[]> =
+  | {
+      /** Legacy ordinary-restore seed. */
+      readonly after: Position;
+      /** Own latest source-event property; undefined remains a present event. */
+      readonly latest: Event;
+      /** One decoded accumulator per target policy, in matching tuple order. */
+      readonly values: Values;
+    }
+  | {
+      /** Continuation boundary; an initial anchor creates no event or fold receipt. */
+      readonly boundary: {
+        /** Initial is a real provider anchor; event follows an actual completed event. */
+        readonly kind: "event" | "initial";
+        /** Own-property presence is meaningful even when Position is undefined. */
+        readonly after: Position;
+      };
+      /** Present false omits the committed base; present true requires an own value, including undefined. */
+      readonly base:
+        | {
+            /** Preserve the target-authored base without importing a source value. */
+            readonly present: false;
+          }
+        | {
+            /** Import the committed source base. */
+            readonly present: true;
+            /** Own value property; undefined is a present base. */
+            readonly value: Event;
+          };
+      /** One decoded accumulator per target policy, in matching tuple order. */
+      readonly values: Values;
+    };
 
 /** Genuine dormant source Store and its seeded, shared native projections. */
 export interface PositionedStoreRestoration<Event, Values extends readonly unknown[]> {
@@ -853,6 +887,8 @@ export interface PositionedStoreRestoration<Event, Values extends readonly unkno
   readonly projections: {
     readonly [Index in keyof Values]: import("./projection.ts").Projection<Values[Index]>;
   };
+  /** Original child-session resource completion, separate from claim and graph/context retirement. */
+  readonly retired: Promise<void>;
   /**
    * Open this reader once after its admitted boundary, returning source unchanged.
    * @throws TypeError for repeated activation or stale session/reader authority.
@@ -892,9 +928,10 @@ export type PositionedStoreProjectionValues<
  * Provider-backed source contract for a positioned stream.
  *
  * The returned iterable must emit strictly ordered positions after the supplied boundary.
- * Reader validation, currentness checks, acknowledgement, and release must be
- * synchronous, local operations on the same provider opening that owns the
- * reservation. They must not perform SQL or other external publication.
+ * Reader validation, currentness checks, acknowledgement, release, and optional
+ * continuation-lifetime callbacks must be synchronous local operations on the same
+ * provider opening that owns the reservation. They must not perform SQL or other
+ * external publication.
  */
 export interface PositionedStreamSource<Input, Value, Position, Reader> {
   /** Opens a live iterable or a prepared reader after the supplied position. */
@@ -902,6 +939,29 @@ export interface PositionedStreamSource<Input, Value, Position, Reader> {
     input: Input,
     options: PositionedStreamOpenOptions<Position, Reader>,
   ) => AsyncIterable<PositionedStreamEvent<Position, Value>>;
+  /**
+   * Reports a real exclusive starting boundary for this opening. Aeolia calls
+   * this with the same input and options as open, after validating its iterable
+   * and before pulling an event. It creates no event or fold receipt.
+   */
+  readonly initialBoundary?: (
+    input: Input,
+    options: PositionedStreamOpenOptions<Position, Reader>,
+  ) =>
+    | { readonly available: false }
+    | { readonly available: true; readonly after: Position };
+  /**
+   * Reports the genuine invalidation signal and any already-issued immutable
+   * expiry for this exact reservation. Required-transfer restoration needs this
+   * capability; legacy restoration does not. A deadline is an absolute epoch time
+   * in the native clock domain and is not renewed by Aeolia.
+   */
+  readonly readerLifetime?: (
+    input: Input,
+    reader: Reader,
+    after: Position,
+    seed: unknown,
+  ) => { readonly signal: AbortSignal; readonly expiresAt?: number };
   /** Authenticates a provider reservation and target seed before dormant issuance. */
   readonly validateReader: (
     input: Input,

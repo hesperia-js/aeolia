@@ -25,7 +25,7 @@ import type { Fault, Unsubscribe } from "../fault.ts";
 import type { Computed, WritableSignal } from "../reactive.ts";
 import type { BindingContext } from "./query-binding.ts";
 import type { BoundStreamSession, StreamDetachment } from "./stream-binding.ts";
-import type { PhysicalWork, RetirementOwner } from "./retirement.ts";
+import type { PhysicalWork, RetirementOwner, PreparedReaderLifetime } from "./retirement.ts";
 
 export type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -138,6 +138,7 @@ export interface PositionedStoreCompletedEvent extends PositionedStoreEvent {
 
 export interface PositionedStoreParticipant {
   readonly projection: object;
+  anchor?: object;
   event?: PositionedStoreEvent;
   failed: boolean;
 }
@@ -148,6 +149,25 @@ export interface PositionedStoreReaderLease {
   readonly seed: unknown;
   owned: boolean;
   released: boolean;
+}
+
+export interface PositionedContinuationAnchor {
+  readonly kind: "event" | "initial";
+  readonly after: unknown;
+  readonly token: object;
+}
+
+export interface PositionedStorePreparation {
+  published: boolean;
+  discarded: boolean;
+  observed?: boolean;
+  readonly retirement: RetirementOwner;
+  readonly retired: Promise<void>;
+  lifetime?: PreparedReaderLifetime;
+  readonly registrations: GraphProjection[];
+  readonly registerStops: (() => void)[];
+  publicationMarkers?: (() => void)[];
+  contextStops?: (() => void)[];
 }
 
 /** Actual Store/session ownership shared by its positioned projections. */
@@ -165,6 +185,8 @@ export interface PositionedStoreSessionState<T> {
   hasPendingPosition: boolean;
   dispatch?: PositionedStoreEvent;
   completed?: PositionedStoreCompletedEvent;
+  continuation?: PositionedContinuationAnchor;
+  preparation?: PositionedStorePreparation;
   /** Last committed base landing, distinct from visible prediction revisions. */
   baseRevision?: ValueRevision;
   diverged: boolean;
@@ -382,8 +404,9 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly bindingContexts: Set<BindingContextRuntime>;
   readonly declaredStores: Map<string, StoreDefinition<unknown>>;
   readonly faultObservers: Set<(fault: Fault) => void>;
-  readonly activeControllers: Set<AbortController>;
-  readonly projections: Set<GraphProjection>;
+  activeControllers: Set<AbortController>;
+  projections: Set<GraphProjection>;
+  pendingPositionedStores?: Set<StoreRuntime<unknown>>;
   readonly collectionHeap: CollectionCandidate[];
   disposal?: GraphDisposalProgress;
   stopAbort?: Unsubscribe;
@@ -410,6 +433,7 @@ export interface BindingContextRuntime {
   readonly mutationControllers: Set<AbortController>;
   /** Independent native projections opened through this context stream bindings. */
   positionedProjections?: Set<() => void>;
+  pendingPositionedStores?: Set<StoreRuntime<unknown>>;
   disposed: boolean;
 }
 
@@ -432,7 +456,7 @@ export interface StreamBindingRuntime {
   readonly definition: NativeStreamDefinition<any, any, any, any, any>;
   readonly originalMember: object;
   readonly stores: Map<string, StoreRuntime<unknown>>;
-  readonly addresses: Map<string, BindingAddressRuntime>;
+  addresses: Map<string, BindingAddressRuntime>;
   handle: object;
 }
 

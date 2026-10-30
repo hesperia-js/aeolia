@@ -15,6 +15,8 @@ import type {
   StoreDefinition,
   StoreOptions,
   PositionedStreamDefinition,
+  PositionedStoreRestoreSeed,
+  PositionedStoreRestoration,
   NativeStreamDefinition,
   StoreIdentity,
   StoreKey,
@@ -72,6 +74,9 @@ import type {
   QueryBindingRuntime,
   QueryCaller,
   ObservationState,
+  StreamBindingRuntime,
+  GraphProjection,
+  BindingAddressRuntime,
 } from "./runtime.ts";
 import { collectDeclaredStores, finiteBound, graphIdleMs } from "./runtime-validation.ts";
 import { AbortError, assertGraphOpen, assertStoreOpen, graphFault, reportContinuationError } from "./faults.ts";
@@ -97,6 +102,7 @@ import {
   armCollectionTimer,
   collectExpired,
   endStream,
+  discardPositionedStoreSession,
   touch,
   updateCollectionCandidate,
 } from "./collection.ts";
@@ -104,6 +110,8 @@ import { admitDetachedStore, getOrCreateStore, makeStore, observeStoreReadable, 
 import { addCaller, createQueryRuntimeActivation, makeQueryStore, ready } from "./query.ts";
 import { runMutation } from "./mutation.ts";
 import { createStreamRuntimeActivation, streamMember } from "./stream.ts";
+import { preparePositionedStoreTransfer, type PreparedPositionedStoreTransfer } from "./projection.ts";
+import type { ProjectionPolicy } from "./projection.ts";
 import { asWindow, createCaller, isCurrentRequest, queryIsStale } from "./status.ts";
 import { prepareQueryProgressCell } from "./query-progress.ts";
 import type { PreparedQueryProgressCell } from "./query-progress.ts";
@@ -126,6 +134,9 @@ import {
   recordCleanupFailure,
   retireOwner,
   type PhysicalWork,
+  readerLifetimeNow,
+  observeReaderCompletion,
+  observeUnreturnedReaderRetirement,
 } from "./retirement.ts";
 
 /** @internal Default keyed-store retention period, in milliseconds. */
@@ -644,6 +655,21 @@ function normalizeMutationCall(
   return { input: call.input, options: call.options };
 }
 
+
+function closePendingPositionedStores(owner: GraphRuntimeState<any> | BindingContextRuntime): void {
+  const pending = owner.pendingPositionedStores;
+  if (pending === undefined) return;
+  const failures: unknown[] = [];
+  for (const runtime of [...pending]) {
+    const session = runtime.stream;
+    if (session?.positioned?.preparation?.published !== false) continue;
+    try { discardPositionedStoreSession(runtime, session); }
+    catch (cause) { failures.push(cause); }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "Pending positioned reader cleanup failed");
+}
+
 function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?: unknown): void {
   if (state.disposed) return;
   const cancellation = reason === undefined ? new AbortError("Graph work was canceled.") : reason;
@@ -678,6 +704,7 @@ function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?:
       endStream(runtime, session, "closed", undefined, { abortReason: cancellation });
     });
   for (const cancel of projections) attempt(() => cancel(cancellation));
+  attempt(() => closePendingPositionedStores(state));
   if (failures.length > 0)
     throw new AggregateError(failures, "Several graph cancellation operations failed");
 }
@@ -727,6 +754,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   const positionedProjections = [...(context.positionedProjections ?? [])];
   context.positionedProjections?.clear();
   context.disposed = true;
+  closePendingPositionedStores(context);
   for (const profiles of context.bindings.values())
     for (const binding of profiles.values()) binding.addresses.clear();
   for (const members of context.streamBindings.values())
@@ -867,6 +895,7 @@ function disposeGraph<C extends Contract>(
       progress = createGraphDisposalProgress(state);
       state.disposal = progress;
       state.disposed = true;
+      closePendingPositionedStores(state);
     }
     progress.active = true;
     disposeGraphContents(state, progress, physical !== undefined);
@@ -1210,7 +1239,13 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
   Object.assign(graph, {
     api,
     resetVersion: computed(() => state.resetVersion.get(), { label: `graph:${id}:reset-version` }),
-    reset: () => resetGraph(state),
+    reset: () => {
+      const before = state.resetEpoch;
+      try { return resetGraph(state); }
+      finally { if (state.resetEpoch !== before) {
+        try { closePendingPositionedStores(state); } catch (cause) { reportContinuationError(state, cause); }
+      } }
+    },
     cancelPending: (reason?: unknown) => cancelPending(state, reason),
     store: graphStore,
     at: graphAt,
@@ -1276,12 +1311,15 @@ interface PreparedNativePassiveTransferClaim {
   prepareObservation(existingLease?: ObservationLease<unknown>): PreparedObservationTransfer<unknown>;
   observation(): PreparedObservationTransfer<unknown> | undefined;
   readonly current: () => boolean;
+  readonly positioned?: PreparedPositionedStoreTransfer;
+  readonly restoration?: PositionedStoreRestoration<unknown, readonly unknown[]>;
+  currentAt?(now: number): boolean;
   discard(): void;
   readonly retired: Promise<void>;
 }
 
 export interface PreparedNativePassiveTransferClaims {
-  current(): boolean;
+  current(now?: number): boolean;
   publish(): void;
   deliver(): void;
 }
@@ -2511,10 +2549,16 @@ export function prepareNativePassiveTransferClaim(
   source: object,
   input: unknown,
   options?: StoreOptions<unknown>,
+  positioned?: { readonly policies: readonly ProjectionPolicy<any, any>[]; readonly seed: PositionedStoreRestoreSeed<any, any, readonly unknown[]>; readonly reader: unknown },
 ): PreparedNativePassiveTransferClaim {
   const info = transferSource(source);
   if (info === undefined || info.graph !== graph)
     throw new TypeError("Passive transfer claims require a genuine source on this graph");
+  if (positioned !== undefined) {
+    if (info.kind !== "stream" || (info.definition as NativeStreamDefinition<any, any, any, any, any>).kind !== "positioned-stream")
+      throw new TypeError("Positioned preparation requires its genuine positioned source");
+    return preparePositionedPassiveClaim(source, input, options, positioned);
+  }
   if (info.kind === "store")
     return prepareNativeStoreTransferClaim(graph, source, info, input, options);
   if (info.kind === "stream")
@@ -2694,13 +2738,79 @@ export function prepareNativePassiveTransferClaim(
     finishAdmission();
   }
 }
+
+interface PositionedClaimRecord {
+  readonly transfer: PreparedPositionedStoreTransfer;
+  inAggregate: boolean;
+  published: boolean;
+  discarded: boolean;
+  resolve(): void;
+  reject(cause: unknown): void;
+}
+const positionedPassiveClaims = new WeakMap<object, PositionedClaimRecord>();
+
+function preparePositionedPassiveClaim(source: object, input: unknown, options: ValueOptions<unknown> | undefined,
+  request: { readonly policies: readonly ProjectionPolicy<any, any>[]; readonly seed: PositionedStoreRestoreSeed<any, any, readonly unknown[]>; readonly reader: unknown },
+): PreparedNativePassiveTransferClaim {
+  const info = transferSource(source)!;
+  const state = transferGraph(info.graph)!;
+  const admission = beginTransferAdmission(state, info.definition, info.binding, input);
+  let prepared: PreparedPositionedStoreTransfer | undefined;
+  try {
+    const policies = request.policies;
+    const seed = request.seed;
+    const reader = request.reader;
+    const transfer = preparePositionedStoreTransfer(source as Parameters<typeof preparePositionedStoreTransfer>[0], input, policies, seed, reader, options);
+    prepared = transfer;
+    const completion = createPhysicalCompletion<void>();
+    const record: PositionedClaimRecord = { transfer, inAggregate: false, published: false, discarded: false,
+      resolve: completion.resolve, reject: completion.reject };
+    const currentAt = (now: number): boolean => !record.published && !record.discarded && transfer.currentAt(now);
+    const discard = (): void => {
+      if (record.published || record.discarded) return;
+      record.discarded = true;
+      try { transfer.discard(); completion.resolve(); }
+      catch (cause) { completion.reject(cause); throw cause; }
+    };
+    const claim: PreparedNativePassiveTransferClaim = Object.freeze({
+      kind: "stream", runtime: transfer.runtime, policy: passiveQueryPolicy(transfer.runtime),
+      store: transfer.restoration.source, facets: Object.freeze([]), existing: false,
+      incarnation: transfer.runtime.incarnation!, positioned: transfer, restoration: transfer.restoration,
+      currentAt, current: () => currentAt(readerLifetimeNow()), discard, retired: completion.promise,
+      prepareObservation: () => { throw new TypeError("A positioned stream has no query observation"); },
+      observation: () => undefined,
+    });
+    positionedPassiveClaims.set(claim, record);
+    observeReaderCompletion(transfer.restoration.retired, () => {
+      if (!record.published && !record.discarded) { record.discarded = true; completion.resolve(); }
+    }, (cause) => {
+      if (!record.published && !record.discarded) { record.discarded = true; completion.reject(cause); }
+    });
+    return claim;
+  } catch (cause) {
+    if (prepared !== undefined) {
+      try { prepared.discard(); } catch (cleanupCause) { reportContinuationError(state, cleanupCause); }
+      observeUnreturnedReaderRetirement(prepared.restoration.retired);
+    }
+    throw cause;
+  } finally { finishTransferAdmission(admission, prepared?.runtime); }
+}
+
 /** Prepares one successor per graph, binding, caller, source, progress, and incarnation owner; publish only flips those prepared fields. */
 export function prepareNativePassiveTransferClaims(
   claims: readonly PreparedNativePassiveTransferClaim[],
 ): PreparedNativePassiveTransferClaims {
   const records: PassiveQueryClaimRecord[] = [];
+  const positionedRecords: PositionedClaimRecord[] = [];
+  const seenPositioned = new Set<PositionedClaimRecord>();
   const seen = new Set<PassiveQueryClaimRecord>();
   for (const claim of claims) {
+    const positioned = positionedPassiveClaims.get(claim);
+    if (positioned !== undefined) {
+      if (seenPositioned.has(positioned) || positioned.inAggregate || positioned.published || positioned.discarded ||
+          positioned.transfer.group.reader?.owned !== true || !positioned.transfer.currentAt(readerLifetimeNow())) throw new TypeError("Positioned claim is not current and unique");
+      seenPositioned.add(positioned); positionedRecords.push(positioned); continue;
+    }
     const record = passiveQueryClaims.get(claim);
     if (record === undefined || seen.has(record) || record.inAggregate || !record.current())
       throw new TypeError("Passive transfer aggregate requires distinct current claims");
@@ -2712,6 +2822,8 @@ export function prepareNativePassiveTransferClaims(
     GraphRuntimeState<any>,
     { readonly before: GraphRuntimeState<any>["stores"]; readonly after: Map<string | StoreIdentity, StoreRuntime<unknown>> }
   >();
+  const graphBeforeEntries = new Map<GraphRuntimeState<any>, readonly (readonly [string | StoreIdentity, StoreRuntime<unknown>])[]>();
+  const bindingBeforeEntries = new Map<QueryBindingRuntime, readonly (readonly [string, StoreRuntime<unknown>])[]>();
   const bindingRows = new Map<
     QueryBindingRuntime,
     { readonly before: QueryBindingRuntime["stores"]; readonly after: Map<string, StoreRuntime<unknown>> }
@@ -2739,6 +2851,7 @@ export function prepareNativePassiveTransferClaims(
   const graphRow = (state: GraphRuntimeState<any>) => {
     let row = graphRows.get(state);
     if (row === undefined) {
+      graphBeforeEntries.set(state, Array.from(state.stores));
       row = { before: state.stores, after: new Map(state.stores) };
       graphRows.set(state, row);
     }
@@ -2747,6 +2860,7 @@ export function prepareNativePassiveTransferClaims(
   const bindingRow = (binding: QueryBindingRuntime) => {
     let row = bindingRows.get(binding);
     if (row === undefined) {
+      bindingBeforeEntries.set(binding, Array.from(binding.stores));
       row = { before: binding.stores, after: new Map(binding.stores) };
       bindingRows.set(binding, row);
     }
@@ -2827,6 +2941,108 @@ export function prepareNativePassiveTransferClaims(
     }
   }
 
+  const positionedBindings = new Map<StreamBindingRuntime, {
+    readonly beforeReaders: Set<StoreRuntime<unknown>> | undefined; readonly readers: Set<StoreRuntime<unknown>>;
+    readonly beforeAddresses: Map<string, BindingAddressRuntime>; readonly addresses: Map<string, BindingAddressRuntime>;
+    readonly members: readonly StoreRuntime<unknown>[]; readonly entries: readonly (readonly [string, BindingAddressRuntime])[];
+  }>();
+  const controllerRows = new Map<GraphRuntimeState<any>, { readonly before: Set<AbortController>; readonly after: Set<AbortController>; readonly members: readonly AbortController[] }>();
+  const projectionRows = new Map<GraphRuntimeState<any>, { readonly before: Set<GraphProjection>; readonly after: Set<GraphProjection>; readonly members: readonly GraphProjection[] }>();
+  const contextRows = new Map<BindingContextRuntime, { readonly before: Set<() => void> | undefined; readonly after: Set<() => void>; readonly members: readonly (() => void)[] }>();
+  const addressChanges = new Map<BindingAddressRuntime, { readonly before: object; readonly after: object; readonly change: ReturnType<typeof prepareTransferChange> }>();
+  const positionedOwners = new Set<object>();
+  for (const record of positionedRecords) {
+    const transfer = record.transfer;
+    const runtime = transfer.runtime;
+    const state = runtime.graph.__runtime;
+    const table = graphRow(state);
+    if (table.after.has(runtime.identity)) throw new TypeError("Positioned reader identity is already published");
+    table.after.set(runtime.identity, runtime);
+    positionedOwners.add(state);
+    let controllers = controllerRows.get(state);
+    if (controllers === undefined) { controllers = { before: state.activeControllers, after: new Set(state.activeControllers), members: Array.from(state.activeControllers) }; controllerRows.set(state, controllers); }
+    controllers.after.add(transfer.session.controller);
+    let projections = projectionRows.get(state);
+    if (projections === undefined) { projections = { before: state.projections, after: new Set(state.projections), members: Array.from(state.projections) }; projectionRows.set(state, projections); }
+    for (const registration of transfer.group.preparation!.registrations) projections.after.add(registration);
+    const binding = runtime.binding;
+    if (binding !== undefined) {
+      if (binding.kind !== "stream") throw new TypeError("Positioned group crossed a non-stream binding");
+      positionedOwners.add(binding); positionedOwners.add(binding.handle); positionedOwners.add(binding.context);
+      let row = positionedBindings.get(binding);
+      if (row === undefined) {
+        row = { beforeReaders: binding.readerStores, readers: new Set(binding.readerStores),
+          beforeAddresses: binding.addresses, addresses: new Map(binding.addresses), members: Array.from(binding.readerStores ?? []), entries: Array.from(binding.addresses) };
+        positionedBindings.set(binding, row);
+      }
+      row.readers.add(runtime);
+      const key = String(runtime.key);
+      let address = row.addresses.get(key);
+      if (address === undefined) { address = { binding, key, operations: new Set(), guard: {} }; row.addresses.set(key, address); }
+      if (!addressChanges.has(address)) addressChanges.set(address, { before: address.guard, after: {}, change: prepareTransferChange(address) });
+      const stops = transfer.group.preparation!.contextStops;
+      if (stops !== undefined && stops.length > 0) {
+        let context = contextRows.get(binding.context);
+        if (context === undefined) { context = { before: binding.context.positionedProjections, after: new Set(binding.context.positionedProjections), members: Array.from(binding.context.positionedProjections ?? []) }; contextRows.set(binding.context, context); }
+        for (const stop of stops) context.after.add(stop);
+      }
+    }
+  }
+  const positionedRootGuards: (() => boolean)[] = [];
+  for (const [state, row] of graphRows) {
+    const entries = graphBeforeEntries.get(state)!;
+    positionedRootGuards.push(() => {
+      if (state.stores !== row.before || row.before.size !== entries.length) return false;
+      for (let index = 0; index < entries.length; index++) { const entry = entries[index]!; if (row.before.get(entry[0]) !== entry[1]) return false; }
+      return true;
+    });
+  }
+  for (const [binding, row] of bindingRows) {
+    const entries = bindingBeforeEntries.get(binding)!;
+    positionedRootGuards.push(() => {
+      if (binding.stores !== row.before || row.before.size !== entries.length) return false;
+      for (let index = 0; index < entries.length; index++) { const entry = entries[index]!; if (row.before.get(entry[0]) !== entry[1]) return false; }
+      return true;
+    });
+  }
+  for (const [binding, row] of positionedBindings) positionedRootGuards.push(() => {
+    if (binding.readerStores !== row.beforeReaders || (row.beforeReaders?.size ?? 0) !== row.members.length || binding.addresses !== row.beforeAddresses || row.beforeAddresses.size !== row.entries.length) return false;
+    for (let index = 0; index < row.members.length; index++) if (!row.beforeReaders!.has(row.members[index]!)) return false;
+    for (let index = 0; index < row.entries.length; index++) { const entry = row.entries[index]!; if (row.beforeAddresses.get(entry[0]) !== entry[1]) return false; }
+    return true;
+  });
+  for (const [state, row] of controllerRows) positionedRootGuards.push(() => {
+    if (state.activeControllers !== row.before || row.before.size !== row.members.length) return false;
+    for (let index = 0; index < row.members.length; index++) if (!row.before.has(row.members[index]!)) return false;
+    return true;
+  });
+  for (const [state, row] of projectionRows) positionedRootGuards.push(() => {
+    if (state.projections !== row.before || row.before.size !== row.members.length) return false;
+    for (let index = 0; index < row.members.length; index++) if (!row.before.has(row.members[index]!)) return false;
+    return true;
+  });
+  for (const [context, row] of contextRows) positionedRootGuards.push(() => {
+    if (context.positionedProjections !== row.before || (row.before?.size ?? 0) !== row.members.length) return false;
+    for (let index = 0; index < row.members.length; index++) if (!row.before!.has(row.members[index]!)) return false;
+    return true;
+  });
+  const positionedOwnerGuards = [...positionedOwners].map(transferEpochCurrent);
+  for (const record of positionedRecords) {
+    record.transfer.validate();
+    const now = readerLifetimeNow();
+    for (const previous of positionedRecords) if (!previous.transfer.currentAt(now))
+      throw new TypeError("A positioned reader changed during another reader validation");
+    for (const normal of records) if (!normal.current()) throw new TypeError("A native source changed during positioned validation");
+    for (const guard of positionedOwnerGuards) if (!guard()) throw new TypeError("A positioned owner changed during validation");
+    for (const guard of positionedRootGuards) if (!guard()) throw new TypeError("A native membership root changed during reader validation");
+  }
+  const positionedBindingRows = [...positionedBindings];
+  const positionedControllerRows = [...controllerRows];
+  const positionedProjectionRows = [...projectionRows];
+  const positionedContextRows = [...contextRows];
+  const positionedAddressRows = [...addressChanges];
+  const positionedOwnerChanges = [...positionedOwners].map(prepareTransferChange);
+
   const observationRows = new Map<ObservationState, {
     readonly runtime: StoreRuntime<unknown>;
     readonly participants: PreparedObservationTransfer<unknown>[];
@@ -2868,7 +3084,7 @@ export function prepareNativePassiveTransferClaims(
   }
   const observationTableRows = [...observationRows.values()];
   const graphTableRows = [...graphRows].map(([state, row]) => ({ state, ...row }));
-  const changedRuntimes = [...new Set(records.map((record) => record.runtime))];
+  const changedRuntimes = [...new Set([...records.map((record) => record.runtime), ...positionedRecords.map((record) => record.transfer.runtime)])];
   const runtimeChanges = changedRuntimes.map((runtime) => prepareTransferChange(runtime));
   const changedBindings = [...new Set(records.flatMap((record) => record.binding === undefined ? [] : [record.binding]))];
   const bindingChanges = changedBindings.flatMap((binding) => [
@@ -2883,8 +3099,17 @@ export function prepareNativePassiveTransferClaims(
   const sourceTableRows = [...sourceRows];
   let published = false;
   let delivered = false;
-  const current = (): boolean => {
+  const current = (time?: number): boolean => {
     if (published) return false;
+    const now = time ?? readerLifetimeNow();
+    for (let index = 0; index < positionedRecords.length; index++) if (!positionedRecords[index]!.transfer.currentAt(now)) return false;
+    for (let index = 0; index < positionedOwnerGuards.length; index++) if (!positionedOwnerGuards[index]!()) return false;
+    for (let index = 0; index < positionedRootGuards.length; index++) if (!positionedRootGuards[index]!()) return false;
+    for (let index = 0; index < positionedBindingRows.length; index++) { const entry = positionedBindingRows[index]!; if (entry[0].readerStores !== entry[1].beforeReaders || entry[0].addresses !== entry[1].beforeAddresses) return false; }
+    for (let index = 0; index < positionedControllerRows.length; index++) { const entry = positionedControllerRows[index]!; if (entry[0].activeControllers !== entry[1].before) return false; }
+    for (let index = 0; index < positionedProjectionRows.length; index++) { const entry = positionedProjectionRows[index]!; if (entry[0].projections !== entry[1].before) return false; }
+    for (let index = 0; index < positionedContextRows.length; index++) { const entry = positionedContextRows[index]!; if (entry[0].positionedProjections !== entry[1].before) return false; }
+    for (let index = 0; index < positionedAddressRows.length; index++) { const entry = positionedAddressRows[index]!; if (entry[0].guard !== entry[1].before || !entry[1].change.current()) return false; }
     for (let index = 0; index < records.length; index += 1) if (!records[index]!.current()) return false;
     for (let index = 0; index < graphTableRows.length; index += 1) {
       const row = graphTableRows[index]!;
@@ -2959,6 +3184,13 @@ export function prepareNativePassiveTransferClaims(
           passiveObservationGroups.delete(group.lease as object);
       }
     }
+    for (let index = 0; index < positionedOwnerChanges.length; index++) positionedOwnerChanges[index]!.publish();
+    for (let index = 0; index < positionedBindingRows.length; index++) { const entry = positionedBindingRows[index]!; entry[0].readerStores = entry[1].readers; entry[0].addresses = entry[1].addresses; }
+    for (let index = 0; index < positionedControllerRows.length; index++) { const entry = positionedControllerRows[index]!; entry[0].activeControllers = entry[1].after; }
+    for (let index = 0; index < positionedProjectionRows.length; index++) { const entry = positionedProjectionRows[index]!; entry[0].projections = entry[1].after; }
+    for (let index = 0; index < positionedContextRows.length; index++) { const entry = positionedContextRows[index]!; entry[0].positionedProjections = entry[1].after; }
+    for (let index = 0; index < positionedAddressRows.length; index++) { const entry = positionedAddressRows[index]!; entry[0].guard = entry[1].after; entry[1].change.publish(); }
+    for (let index = 0; index < positionedRecords.length; index++) { const record = positionedRecords[index]!; record.transfer.publish(); record.published = true; }
     for (let index = 0; index < records.length; index += 1) records[index]!.setPublished();
     published = true;
   };
@@ -2971,6 +3203,11 @@ export function prepareNativePassiveTransferClaims(
         try { row.participants[participantIndex]!.deliver(); }
         catch (error) { reportContinuationError(row.runtime.graph.__runtime, error); }
       }
+    }
+    for (let index = 0; index < positionedRecords.length; index++) {
+      const record = positionedRecords[index]!;
+      try { record.transfer.deliver(); record.resolve(); }
+      catch (cause) { record.reject(cause); reportContinuationError(record.transfer.runtime.graph.__runtime, cause); }
     }
     for (let index = 0; index < progressTableRows.length; index += 1) {
       const row = progressTableRows[index]!;
@@ -3001,6 +3238,7 @@ export function prepareNativePassiveTransferClaims(
     }
   };
   for (const record of records) record.inAggregate = true;
+  for (const record of positionedRecords) record.inAggregate = true;
   for (let index = 0; index < observationTableRows.length; index += 1) {
     const row = observationTableRows[index]!;
     for (let groupIndex = 0; groupIndex < row.groups.length; groupIndex += 1)
