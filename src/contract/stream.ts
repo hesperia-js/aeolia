@@ -22,7 +22,13 @@ import type {
   PositionedStorePreparation,
   PositionedContinuationAnchor,
 } from "./runtime.ts";
-import { AbortError, assertGraphOpen, assertStoreOpen, graphFault, reportContinuationError } from "./faults.ts";
+import {
+  AbortError,
+  assertGraphOpen,
+  assertStoreOpen,
+  graphFault,
+  reportContinuationError,
+} from "./faults.ts";
 import { nextValueRevision, storeKey } from "./identity.ts";
 import { configureKeyedValue, issue, nextGeneration, recordLanding } from "./store-state.ts";
 import {
