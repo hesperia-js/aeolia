@@ -792,6 +792,7 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
 );
 
 it("aggregates reader-scoped Stores at their binding address without deleting another key", async () => {
+  type Input = { readonly room: string };
   type Event = { position: number; value: number };
   type Reservation = { input: Input; after: number; seed: unknown };
   const reservations = new WeakMap<object, Reservation>();
@@ -834,7 +835,9 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
     return reader;
   };
   const releaseCount = (reader: object): number => releases.get(reader) ?? 0;
-  const releaseReader = (reader: object): void => releases.set(reader, releaseCount(reader) + 1);
+  const releaseReader = (reader: object): void => {
+    releases.set(reader, releaseCount(reader) + 1);
+  };
 
   const stream = createPositionedStream<Input, number, string, number, object>({
     name: "addressed-reader-store",

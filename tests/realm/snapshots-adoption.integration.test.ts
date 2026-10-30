@@ -18,6 +18,7 @@ import {
   project,
   affects,
   snapshot,
+  subscribe,
   observeStore,
   peekStore,
   preparePassiveTransferClaim,

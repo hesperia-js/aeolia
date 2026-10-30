@@ -266,7 +266,9 @@ it("restores shared folds over one dormant source Store without replaying the la
     return reader;
   };
   const releaseCount = (reader: object): number => releases.get(reader) ?? 0;
-  const releaseReader = (reader: object): void => releases.set(reader, releaseCount(reader) + 1);
+  const releaseReader = (reader: object): void => {
+    releases.set(reader, releaseCount(reader) + 1);
+  };
   const stream = createPositionedStream<void, number, string, number, object>({
     name: "restored-shared-store",
     key: () => "restored-shared-store/one",
@@ -468,8 +470,11 @@ it("restores shared folds over one dormant source Store without replaying the la
     expect(finalReceipt.position).toBe(7);
     acknowledgePositionedFold(restoredEqualProjection, finalReceipt);
     expect(acknowledgements).toHaveLength(1);
-    expect(acknowledgements[0]?.reader).toBe(reader);
-    expect(acknowledgements[0]?.receipt).toBe(finalReceipt);
+    const finalAcknowledgement = acknowledgements[0];
+    if (finalAcknowledgement === undefined)
+      throw new Error("The completed equal fold was not acknowledged");
+    expect(finalAcknowledgement.reader).toBe(reader);
+    expect(finalReceipt).toBe(finalAcknowledgement.receipt);
 
     prepared.discard();
     restoration = undefined;
