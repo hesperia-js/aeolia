@@ -22,6 +22,7 @@ import type {
 import { isValueOptions } from "./types.ts";
 import {
   assertBindingContextOpen,
+  assertStoreHandlePublished,
   boundStreamByStore,
   graphRuntimeByGraph,
   registerProjection,
@@ -71,8 +72,18 @@ import {
   physicalCleanup,
   recordCleanupFailure,
 } from "./retirement.ts";
+import {
+  beginTransferAdmission,
+  finishTransferAdmission,
+  noteTransferChange,
+  registerTransferProjection,
+  registerTransferWork,
+  transferEpochCurrent,
+} from "./query-policy.ts";
 
 const projectionInitialByValueCell = new WeakMap<object, unknown>();
+const projectionFacetByReadable = new WeakMap<object, { readonly runtime: ProjectionRuntime<unknown, unknown>; readonly role: ProjectionTransferRole }>();
+const projectionSourceRuntimeByOwner = new WeakMap<object, StoreRuntime<unknown>>();
 
 interface TerminalProjectionCleanup {
   remainingReadables: number;
@@ -316,6 +327,76 @@ interface ProjectionRuntime<T, V> {
   closed: boolean;
 }
 
+export type ProjectionTransferRole = "projection-value" | "projection-status" | "projection-error";
+
+export interface TransferProjectionFacet {
+  readonly owner: object;
+  readonly graph: Graph;
+  readonly role: ProjectionTransferRole;
+  readonly sourceRuntime?: StoreRuntime<unknown>;
+  current(): boolean;
+}
+
+/** @internal Returns exact current native ownership for a projection facet. */
+export function getTransferProjectionFacet(readable: object): TransferProjectionFacet | undefined {
+  const row = projectionFacetByReadable.get(readable);
+  if (row === undefined) return undefined;
+  const runtime = row.runtime;
+  const graphState = graphRuntimeByGraph.get(runtime.graph as object);
+  if (graphState === undefined) return undefined;
+  const graphEpoch = graphState.resetEpoch;
+  const source = runtime.source;
+  const sourceGeneration = source.generation;
+  const sourceRetired = source.retired;
+  const closed = runtime.closed;
+  const positioned = runtime.positioned;
+  const positionedTuple = positioned?.tuple;
+  const positionedTransitioning = positioned?.transitioning;
+  const boundSession = runtime.boundSession;
+  const session = boundSession?.session;
+  const sessionPhase = boundSession?.phase;
+  const ownerCurrent = transferEpochCurrent(runtime);
+  const sourceRuntime = projectionSourceRuntimeByOwner.get(runtime);
+  const sourceSession = sourceRuntime?.stream;
+  const sourceIncarnation = sourceRuntime?.incarnation;
+  const current = (): boolean =>
+    ownerCurrent() &&
+    graphRuntimeByGraph.get(runtime.graph as object) === graphState &&
+    !graphState.disposed &&
+    graphState.resetEpoch === graphEpoch &&
+    runtime.source === source &&
+    source.generation === sourceGeneration &&
+    source.retired === sourceRetired &&
+    runtime.closed === closed &&
+    runtime.positioned === positioned &&
+    (positioned === undefined ||
+      (positioned.tuple === positionedTuple && positioned.transitioning === positionedTransitioning)) &&
+    runtime.boundSession === boundSession &&
+    (boundSession === undefined ||
+      (boundSession.session === session && boundSession.phase === sessionPhase)) &&
+    (sourceRuntime === undefined ||
+      (sourceRuntime.stream === sourceSession && sourceRuntime.incarnation === sourceIncarnation));
+  return {
+    owner: runtime,
+    graph: runtime.graph,
+    role: row.role,
+    ...(sourceRuntime === undefined ? {} : { sourceRuntime }),
+    current,
+  };
+}
+
+function registerProjectionFacet<T, V>(
+  runtime: ProjectionRuntime<T, V>,
+  readable: Readable<unknown>,
+  role: ProjectionTransferRole,
+): void {
+  registerTransferProjection(readable, runtime.graph, runtime);
+  projectionFacetByReadable.set(readable, {
+    runtime: runtime as unknown as ProjectionRuntime<unknown, unknown>,
+    role,
+  });
+}
+
 function validateMax(max: number): void {
   // short-circuit to avoid the more expensive Number.isInteger check when max is not finite
   if (!(Number.isFinite(max) && max >= 1 && Number.isInteger(max))) {
@@ -340,6 +421,8 @@ function returnProjectionIterator<T>(
   iterator: AsyncIterator<T>,
 ): void {
   const work = beginPhysicalWork(source.retirement, "projection-return");
+  registerTransferWork(source, work);
+  noteTransferChange(source);
   let hasOriginal = false;
   try {
     let close: AsyncIterator<T>["return"];
@@ -358,6 +441,7 @@ function returnProjectionIterator<T>(
       return;
     }
     hasOriginal = true;
+    noteTransferChange(work);
     work.original = original;
     try {
       observePhysicalWork(work, normalizePhysicalPromise(original), true, original);
@@ -372,6 +456,8 @@ function returnProjectionIterator<T>(
 function stopSource<T>(source: ProjectionSource<T>, reason?: unknown): (() => void) | undefined {
   if (source.retired) return undefined;
   const cleanupWork = beginPhysicalWork(source.retirement, "cleanup");
+  registerTransferWork(source, cleanupWork);
+  noteTransferChange(source);
   source.retired = true;
   const detach = source.detach;
   const iterator = source.iterator;
@@ -416,6 +502,8 @@ function registerTerminalReset<V>(
   let active = true;
   const reset = (): void => {
     if (!active) return;
+    noteTransferChange(projection);
+    noteTransferChange(state);
     active = false;
     const resetEpoch = state.resetEpoch;
     const current = (): boolean => state.resetEpoch === resetEpoch;
@@ -547,6 +635,10 @@ function finish<T, V>(
   }
   if (source.retired) return;
   const completion = beginPhysicalWork(source.retirement, "cleanup");
+  registerTransferWork(runtime, completion);
+  registerTransferWork(source, completion);
+  noteTransferChange(runtime);
+  noteTransferChange(source);
   try {
     const cleanup = stopSource(source, abortReason);
     if (cleanup === undefined) return;
@@ -614,8 +706,12 @@ function prepareReset<T, V>(runtime: ProjectionRuntime<T, V>): (() => void) | un
   if (runtime.positioned !== undefined) {
     const positioned = runtime.positioned;
     if (positioned.transitioning) return undefined;
+    noteTransferChange(runtime);
+    noteTransferChange(positioned);
     positioned.transitioning = true;
     const previous = runtime.source;
+    noteTransferChange(runtime);
+    noteTransferChange(previous);
     const cleanup = stopSource(previous);
     const source: ProjectionSource<T> = {
       retirement: previous.retirement,
@@ -623,6 +719,8 @@ function prepareReset<T, V>(runtime: ProjectionRuntime<T, V>): (() => void) | un
       generation: previous.generation + 1,
       retired: false,
     };
+    noteTransferChange(runtime);
+    noteTransferChange(source);
     runtime.source = source;
     runtime.closed = false;
     positioned.graphEpoch = positioned.graphState.resetEpoch;
@@ -661,11 +759,15 @@ function prepareReset<T, V>(runtime: ProjectionRuntime<T, V>): (() => void) | un
     } catch (error) {
       reportProjectionError(runtime, error);
     } finally {
+      noteTransferChange(runtime);
+      noteTransferChange(positioned);
       positioned.transitioning = false;
     }
     return cleanup;
   }
   const previous = runtime.source;
+  noteTransferChange(runtime);
+  noteTransferChange(previous);
   const cleanup = stopSource(previous);
   const source: ProjectionSource<T> = {
     retirement: previous.retirement,
@@ -673,6 +775,8 @@ function prepareReset<T, V>(runtime: ProjectionRuntime<T, V>): (() => void) | un
     generation: previous.generation + 1,
     retired: false,
   };
+  noteTransferChange(runtime);
+  noteTransferChange(source);
   runtime.source = source;
   const state = graphRuntimeByGraph.get(runtime.graph as object);
   const resetEpoch = state?.resetEpoch;
@@ -715,6 +819,8 @@ function accept<T, V>(
 ): void {
   if (!isCurrentGeneration(runtime, controller, generation)) return;
   const policy = runtime.policy;
+  noteTransferChange(runtime);
+  noteTransferChange(runtime.source);
   if (policy.kind === "reduce") {
     let next: V;
     try {
@@ -839,6 +945,7 @@ function newPositionedState(
     restored: false,
     transitioning: false,
   };
+  noteTransferChange(runtime);
   runtime.positioned = positioned;
   if (record.binding !== undefined) {
     const close = (): void => finishPositioned(runtime, false);
@@ -863,6 +970,8 @@ function writePositionedTuple<T, V>(
   try {
     reactiveInternal.batch(() => {
       const landed = reactiveInternal.guardedWrite(runtime.valueCell, next.value, current, () => {
+        noteTransferChange(runtime);
+        noteTransferChange(positioned);
         positioned.tuple = next;
         if (receipt !== undefined) {
           positioned.latestReceipt = receipt;
@@ -890,6 +999,8 @@ function writePositionedTuple<T, V>(
 function releasePositionedReader<T, V>(runtime: ProjectionRuntime<T, V>): void {
   const positioned = runtime.positioned;
   if (positioned === undefined || !positioned.readerPresent || positioned.readerReleased) return;
+  noteTransferChange(runtime);
+  noteTransferChange(positioned);
   positioned.readerReleased = true;
   try {
     positioned.provider.releaseReader(positioned.input, positioned.reader);
@@ -913,6 +1024,10 @@ function finishPositioned<T, V>(
     source.retired
   )
     return;
+  noteTransferChange(runtime);
+  noteTransferChange(source);
+  noteTransferChange(positioned);
+  if (positioned.binding !== undefined) noteTransferChange(positioned.binding.handle);
   positioned.transitioning = true;
   if (positioned.storeGroup !== undefined && positioned.storeParticipant !== undefined) {
     if (failed) {
@@ -930,6 +1045,8 @@ function finishPositioned<T, V>(
   const current = (): boolean =>
     runtime.source === source && state?.resetEpoch === resetEpoch && positioned.transitioning;
   const work = beginPhysicalWork(source.retirement, "cleanup");
+  registerTransferWork(runtime, work);
+  registerTransferWork(source, work);
   const terminalStatus: ProjectionStatus = failed ? "failed" : "closed";
   let cleanup: (() => void) | undefined;
   let cleanupFailed = false;
@@ -946,6 +1063,9 @@ function finishPositioned<T, V>(
       }
     }
     const previous = positioned.tuple;
+    noteTransferChange(runtime);
+    noteTransferChange(source);
+    noteTransferChange(positioned);
     const terminal: PositionedProjectionTuple<V, unknown> = {
       ...previous,
       status: terminalStatus,
@@ -960,6 +1080,8 @@ function finishPositioned<T, V>(
     }
   } finally {
     if (positioned.storeGroup === undefined) releasePositionedReader(runtime);
+    noteTransferChange(runtime);
+    noteTransferChange(positioned);
     positioned.transitioning = false;
     finishPhysicalWork(work);
   }
@@ -1016,6 +1138,9 @@ function acceptPositioned<T, V>(
   )
     return;
   const previous = positioned.tuple;
+  noteTransferChange(runtime);
+  noteTransferChange(runtime.source);
+  noteTransferChange(positioned);
   let nextValue: V;
   const policy = runtime.policy;
   if (policy.kind === "reduce") {
@@ -1136,6 +1261,9 @@ function initializeProjection<T, V>(
     },
     closed: false,
   };
+  registerProjectionFacet(runtime, valueCell, "projection-value");
+  registerProjectionFacet(runtime, statusCell, "projection-status");
+  registerProjectionFacet(runtime, errorCell, "projection-error");
   if (policy.kind === "reduce") projectionInitialByValueCell.set(valueCell, policy.initial);
 
   const close = (): void => finish(runtime, false);
@@ -1191,8 +1319,12 @@ function openIndependent<T, V>(
   const state = graphRuntimeByGraph.get(graph as object)!;
   assertGraphOpen(state);
   const physical = beginPhysicalWork(source.retirement, "projection");
+  registerTransferWork(runtime, physical);
+  registerTransferWork(source, physical);
+  let admission: ReturnType<typeof beginTransferAdmission> | undefined;
   let observed = false;
   try {
+    admission = beginTransferAdmission(state, stream, runtime.positioned?.binding?.handle, input);
     const controller = source.controller;
     const generation = source.generation;
     let key: ReturnType<typeof storeKey>;
@@ -1217,6 +1349,8 @@ function openIndependent<T, V>(
       if (propagateKeyError) {
         runtime.unregister?.();
         runtime.unregister = undefined;
+        noteTransferChange(runtime);
+        noteTransferChange(source);
         runtime.closed = true;
         stopSource(source)?.();
         throw error;
@@ -1244,6 +1378,9 @@ function openIndependent<T, V>(
           positioned.transitioning
         )
           return;
+        noteTransferChange(runtime);
+        noteTransferChange(source);
+        noteTransferChange(positioned);
         positioned.pendingPosition = position;
         positioned.hasPendingPosition = true;
       });
@@ -1261,6 +1398,8 @@ function openIndependent<T, V>(
         returnProjectionIterator(source, iterator);
         return;
       }
+      noteTransferChange(runtime);
+      noteTransferChange(source);
       source.iterator = iterator;
     } catch (error) {
       if (!isCurrentGeneration(runtime, controller, generation)) return;
@@ -1270,7 +1409,11 @@ function openIndependent<T, V>(
     observePhysicalWork(physical, consume(runtime, controller, generation));
     observed = true;
   } finally {
-    if (!observed) finishPhysicalWork(physical);
+    try {
+      if (admission !== undefined) finishTransferAdmission(admission);
+    } finally {
+      if (!observed) finishPhysicalWork(physical);
+    }
   }
 }
 
@@ -1304,6 +1447,7 @@ function makeSharedProjection<T, V>(
     projectionPolicy,
     bound?.session.physical.owner ?? store.graph.__runtime.retirement,
   );
+  projectionSourceRuntimeByOwner.set(runtime, store as StoreRuntime<unknown>);
   if (bound !== undefined) runtime.boundSession = bound as unknown as BoundStreamSessionRuntime<T>;
   const sourceMember = bound?.binding.handle ?? store.streamSource?.member;
   if (
@@ -1388,6 +1532,12 @@ function attachSharedProjection<T, V>(
       fail(runtime, new Error("Aeolia projection stream reported a gap"));
     else finish(runtime, event.failed, event.reason);
   };
+  noteTransferChange(runtime);
+  noteTransferChange(generationSource);
+  noteTransferChange(store);
+  noteTransferChange(session);
+  registerTransferWork(runtime, session.physical);
+  registerTransferWork(generationSource, session.physical);
   const nextListeners = new Set(session.listeners);
   nextListeners.add(listener);
   session.listeners = nextListeners;
@@ -1395,6 +1545,10 @@ function attachSharedProjection<T, V>(
   updateCollectionCandidate(store);
   scheduleSweep(store.graph.__runtime);
   generationSource.detach = () => {
+    noteTransferChange(runtime);
+    noteTransferChange(generationSource);
+    noteTransferChange(store);
+    noteTransferChange(session);
     session.listeners.delete(listener);
     if (store.stream === session && !isLive(store)) session.unobservedSince = Date.now();
     updateCollectionCandidate(store);
@@ -1524,6 +1678,11 @@ export function isPositionedCheckpointCurrent<Value, Position>(
 
 function positionedStoreCaptureCurrent(capture: PositionedStoreCheckpointCapture): boolean {
   const { source, runtime, session, group } = capture;
+  try {
+    assertStoreHandlePublished(source);
+  } catch {
+    return false;
+  }
   if (
     runtimeByStore.get(source) !== runtime ||
     runtime.stream !== session ||
@@ -1607,6 +1766,7 @@ export function capturePositionedStore<Event, const Projections extends readonly
   source: StreamStore<Event>,
   projections: Projections,
 ): PositionedStoreCheckpoint<Event, PositionedStoreProjectionValues<Projections>> {
+  assertStoreHandlePublished(source as object);
   const runtime = runtimeByStore.get(source as object) as StoreRuntime<Event> | undefined;
   const bound = boundStreamByStore.get(source as object);
   if (

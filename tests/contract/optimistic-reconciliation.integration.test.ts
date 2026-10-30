@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { affects, createGraph, createMutation, createQuery, subscribe } from "../../src/index.ts";
+import { affects, createGraph, createMutation, createQuery, createTransferScope, preparePassiveTransferClaim, prepareTransferOperation, prepareTransferOperationRetirement, subscribe } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
 async function fixture(on: "invalidate" | "revalidate" = "revalidate") {
@@ -182,5 +182,91 @@ test("a request started before mutation success cannot retire its later successf
     expect(await f.store.ready).toBe(42);
   } finally {
     f.close();
+  }
+});
+
+test("joins the exact raw mutation dispatch through its original physical work", async () => {
+  let resolveRun!: (value: void) => void;
+  let runs = 0;
+  let selections = 0;
+  let completion: Promise<void> | undefined;
+  let repeated: Promise<void> | undefined;
+  let runSettled = false;
+  const runWork = new Promise<void>((resolve) => { resolveRun = resolve; });
+  const query = createQuery({
+    name: "transfer.work-query",
+    key: (input: { readonly key: string }) => input.key,
+    fetch: async () => 1,
+  });
+  const mutation = createMutation({
+    name: "transfer.work-mutation",
+    run: async () => {
+      runs += 1;
+      await runWork;
+    },
+    affects: [affects(query, { select: (input: { readonly key: string }) => { selections += 1; return input; }, on: "invalidate" })],
+  });
+  const graph = createGraph({
+    contract: { namespace: "mutation-transfer-work", operations: { query, mutation } },
+  });
+  const input = { key: "one" };
+  try {
+    const queryStore = graph.api.query(input);
+    await expect(queryStore.ready).resolves.toBe(1);
+    const scope = createTransferScope(graph, graph.api.query, queryStore);
+    const dispatch = { role: "raw" as const, source: graph.api.mutation, input };
+    const pending = prepareTransferOperation([scope], [dispatch]);
+    const pendingCommit = pending.seal();
+    if (pendingCommit === undefined) throw new Error("The native mutation operation did not seal");
+    pendingCommit.publish();
+    pendingCommit.notifications.deliver();
+    await pending.retired;
+
+    completion = graph.api.mutation(input);
+    expect(runs).toBe(1);
+    expect(() => preparePassiveTransferClaim(graph, graph.api.query, input)).toThrow(TypeError);
+    expect(() => prepareTransferOperationRetirement(pending.operation)).toThrow(TypeError);
+
+    resolveRun(undefined);
+    await completion;
+    runSettled = true;
+    const retirement = prepareTransferOperationRetirement(pending.operation);
+    const retirementCommit = retirement.seal();
+    if (retirementCommit === undefined) throw new Error("The completed native mutation did not retire");
+    retirementCommit.publish();
+    retirementCommit.notifications.deliver();
+    await retirement.retired;
+
+    const valueBeforeReuse = queryStore.value.get();
+    const runsBeforeReuse = runs;
+    const selectionsBeforeReuse = selections;
+    let reusePreparationError: unknown;
+    let reusedOperation: ReturnType<typeof prepareTransferOperation> | undefined;
+    try { reusedOperation = prepareTransferOperation([scope], [dispatch]); }
+    catch (error) { reusePreparationError = error; }
+    if (reusedOperation !== undefined) {
+      reusedOperation.discard();
+      await reusedOperation.retired;
+    }
+    let repeatedDispatchError: unknown;
+    try { repeated = graph.api.mutation(input); }
+    catch (error) { repeatedDispatchError = error; }
+    if (repeated !== undefined) await repeated.catch(() => undefined);
+    expect(reusePreparationError).toBeInstanceOf(TypeError);
+    expect(repeatedDispatchError).toBeInstanceOf(TypeError);
+    expect(runs).toBe(runsBeforeReuse);
+    expect(selections).toBe(selectionsBeforeReuse);
+    expect(queryStore.value.get()).toBe(valueBeforeReuse);
+
+    const claim = preparePassiveTransferClaim(graph, graph.api.query, input);
+    claim.discard();
+    await claim.retired;
+  } finally {
+    if (completion !== undefined && !runSettled) {
+      resolveRun(undefined);
+      await completion.catch(() => undefined);
+    }
+    if (repeated !== undefined) await repeated.catch(() => undefined);
+    graph.dispose();
   }
 });

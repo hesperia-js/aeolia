@@ -49,6 +49,15 @@ import {
   normalizePhysicalPromise,
   physicalCleanup,
 } from "./retirement.ts";
+import {
+  beginTransferAdmission,
+  beginTransferDispatch,
+  finishTransferAdmission,
+  noteTransferChange,
+  registerTransferDispatchTarget,
+  registerTransferWork,
+} from "./query-policy.ts";
+import type { TransferAdmission, TransferDispatch } from "./query-policy.ts";
 
 const nativeApply = Reflect.apply;
 
@@ -126,18 +135,24 @@ function applyMutationEffects(
   definition: MutationDefinition<any, any>,
   input: unknown,
   resetEpoch = state.resetEpoch,
+  dispatch?: TransferDispatch,
 ): void {
   for (const affected of definition.affects) {
     if (!isCurrentMutationEpoch(state, resetEpoch)) return;
     let target: MutationTarget;
+    const admission = beginTransferAdmission(state, definition, undefined, input);
     try {
       const resolved = resolveMutationTarget(state, affected, input, resetEpoch);
       if (resolved === undefined) return;
       target = resolved;
+      if (target.runtime !== undefined)
+        registerTransferDispatchTarget(dispatch, target.runtime);
     } catch {
       if (!isCurrentMutationEpoch(state, resetEpoch)) return;
       graphFault(state, new Fault("contract", [affected.query.name]));
       continue;
+    } finally {
+      finishTransferAdmission(admission);
     }
     const runtime = target.runtime;
     if (runtime === undefined || runtime.disposed) continue;
@@ -159,11 +174,13 @@ function applyMutationEffects(
   }
 }
 
+/** @internal Executes a raw mutation with its genuine API member when entered through the native graph. */
 export function runMutation<I, R>(
   state: GraphRuntimeState<any>,
   definition: MutationDefinition<I, R>,
   input: I,
   options: MutationOptions | undefined,
+  source?: object,
 ): Promise<R> {
   assertGraphOpen(state);
   const acquisition = beginPhysicalWork(state.retirement, "acquisition");
@@ -175,17 +192,33 @@ export function runMutation<I, R>(
     throw error;
   }
   let sourceStarted = false;
+  let admission: TransferAdmission | undefined;
   const superseded = (): Promise<R> => {
     output.reject(new AbortError("The mutation was superseded by a graph reset."));
     return output.promise;
   };
   try {
     const resetEpoch = state.resetEpoch;
+    admission = beginTransferAdmission(state, definition, undefined, input);
+    const dispatch = beginTransferDispatch(
+      state.graph,
+      definition,
+      undefined,
+      input,
+      acquisition,
+      source,
+    );
     const targets: MutationTarget[] = [];
     for (const affected of definition.affects) {
       const target = resolveMutationTarget(state, affected, input, resetEpoch);
       if (target === undefined) return superseded();
+      if (target.runtime !== undefined)
+        registerTransferDispatchTarget(dispatch, target.runtime);
       targets.push(target);
+    }
+    if (admission !== undefined) {
+      finishTransferAdmission(admission);
+      admission = undefined;
     }
     const prepared: Array<{
       readonly runtime: StoreRuntime<unknown>;
@@ -255,7 +288,7 @@ export function runMutation<I, R>(
               for (const prediction of predictions) {
                 markPredictionSucceeded(prediction.runtime, prediction.id);
               }
-              applyMutationEffects(state, definition, input, resetEpoch);
+              applyMutationEffects(state, definition, input, resetEpoch, dispatch);
             });
           } catch (error) {
             if (isCurrentMutationEpoch(state, resetEpoch)) reportContinuationError(state, error);
@@ -306,6 +339,8 @@ export function runMutation<I, R>(
     output.reject(error);
     if (!sourceStarted) finishPhysicalWork(acquisition);
     throw error;
+  } finally {
+    if (admission !== undefined) finishTransferAdmission(admission);
   }
 }
 
@@ -317,6 +352,7 @@ export interface BoundMutationAttempt {
   readonly controller: AbortController;
   readonly epoch: number;
   readonly predictions: Array<{ readonly target: QueryTargetRuntime; readonly id: number }>;
+  transferDispatch?: TransferDispatch;
   stage: "prepare" | "run" | "settle" | "finished";
   unacknowledged: boolean;
   outputStarted: boolean;
@@ -324,6 +360,7 @@ export interface BoundMutationAttempt {
 }
 
 function retainUnacknowledgedMutation(attempt: BoundMutationAttempt): void {
+  noteTransferChange(attempt);
   attempt.unacknowledged = true;
   attempt.output.acknowledged = false;
 }
@@ -363,6 +400,7 @@ export function beginBoundMutation(binding: MutationBindingRuntime): BoundMutati
 /** @internal Release both native controller owners without aborting successful work. */
 export function finishBoundMutation(attempt: BoundMutationAttempt): void {
   if (attempt.stage === "finished") return;
+  noteTransferChange(attempt);
   attempt.stage = "finished";
   attempt.binding.context.mutationControllers.delete(attempt.controller);
   attempt.binding.context.state.activeControllers.delete(attempt.controller);
@@ -412,7 +450,15 @@ function effectPhase(
   kind: "prepare" | "settle",
 ): { readonly phase: EffectPhaseRuntime; readonly result: unknown } {
   assertBoundPhase(attempt);
-  const selectedInput = effect.affected.select(input);
+  const selectorAdmission = beginTransferAdmission(
+    attempt.binding.context.state, effect.query, attempt.binding, input
+  );
+  let selectedInput: unknown;
+  try {
+    selectedInput = effect.affected.select(input);
+  } finally {
+    finishTransferAdmission(selectorAdmission);
+  }
   assertBoundPhase(attempt);
   const phase: EffectPhaseRuntime = {
     binding: attempt.binding,
@@ -450,7 +496,15 @@ function effectPhase(
     signal: attempt.controller.signal,
     existing(queryInput: unknown): readonly ExistingTarget<any>[] {
       assertActive();
-      const key = storeKey(effect.query.key(queryInput));
+      const admission = beginTransferAdmission(
+        attempt.binding.context.state, effect.query, attempt.binding, queryInput
+      );
+      let key: ReturnType<typeof storeKey>;
+      try {
+        key = storeKey(effect.query.key(queryInput));
+      } finally {
+        finishTransferAdmission(admission);
+      }
       assertActive();
       const targets: ExistingTarget<any>[] = [];
       for (const binding of phase.binding.context.bindings.get(effect.query)?.values() ?? []) {
@@ -469,6 +523,7 @@ function effectPhase(
           incarnations = new Set();
           phase.members.set(runtime, incarnations);
         }
+        registerTransferDispatchTarget(attempt.transferDispatch, runtime);
         incarnations.add(runtime.incarnation);
         targets.push(ticket);
       }
@@ -731,7 +786,18 @@ function applyBoundEffect(
   if (!isQueryTargetCurrent(target)) return;
   const runtime = target.runtime;
   if (instruction.kind === "selected") {
-    const key = storeKey(instruction.phase.effect.query.key(instruction.input));
+    const admission = beginTransferAdmission(
+      attempt.binding.context.state,
+      instruction.phase.effect.query,
+      attempt.binding,
+      instruction.input,
+    );
+    let key: ReturnType<typeof storeKey>;
+    try {
+      key = storeKey(instruction.phase.effect.query.key(instruction.input));
+    } finally {
+      finishTransferAdmission(admission);
+    }
     assertBoundPhase(attempt);
     if (!isQueryTargetCurrent(target)) return;
     if (key !== runtime.key)
@@ -832,6 +898,18 @@ export function runBoundMutation(
       throw new TypeError("Duplicate prediction override for one store identity");
     overrides.set(identity, checked);
   }
+  const admission = beginTransferAdmission(
+    attempt.binding.context.state,
+    attempt.binding.definition,
+    attempt.binding,
+    input,
+  );
+  let admissionOpen = true;
+  const finishAdmission = (): void => {
+    if (!admissionOpen) return;
+    admissionOpen = false;
+    finishTransferAdmission(admission);
+  };
   attempt.outputStarted = true;
   const cleanFailedMutation = (): void => {
     try {
@@ -844,6 +922,7 @@ export function runBoundMutation(
   };
   const fail = (error: unknown): void => {
     try {
+      finishAdmission();
       cleanFailedMutation();
       attempt.output.reject(error);
     } catch (failure) {
@@ -851,6 +930,15 @@ export function runBoundMutation(
     }
   };
   try {
+    attempt.transferDispatch = beginTransferDispatch(
+      attempt.binding.context.state.graph,
+      attempt.binding.definition,
+      attempt.binding,
+      input,
+      attempt.physical,
+      attempt.binding,
+    );
+    registerTransferWork(attempt, attempt.physical);
     assertBoundPhase(attempt);
     if (signal !== undefined) {
       const abort = (): void => attempt.controller.abort();
@@ -863,7 +951,9 @@ export function runBoundMutation(
     assertBoundPhase(attempt);
     const preparation = prepareBoundEffects(attempt, input, 0, []);
     const dispatch = (instructions: readonly EffectInstructionRuntime[]): Promise<unknown> => {
+      finishAdmission();
       publishBoundPredictions(attempt, input, instructions, overrides);
+      noteTransferChange(attempt);
       attempt.stage = "run";
       let returned: unknown;
       let runReturned = false;
@@ -883,6 +973,7 @@ export function runBoundMutation(
           if (!certified) retainUnacknowledgedMutation(attempt);
           return {
             fulfilled: (result) => {
+              noteTransferChange(attempt);
               attempt.stage = "settle";
               if (!currentBoundLifetime(attempt)) return result;
               for (const prediction of attempt.predictions) {

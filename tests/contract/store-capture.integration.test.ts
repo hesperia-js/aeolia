@@ -10,6 +10,7 @@ import {
   Fault,
   observeStore,
   peekStore,
+  preparePassiveTransferClaim,
   subscribe,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
@@ -357,3 +358,46 @@ for (const metadata of ["available", "issue"] as const) {
     }
   });
 }
+
+it("keeps a declared Store passive until publication and leaves the graph reusable after discard", async () => {
+  const definition = createStore({ name: "declared", initial: 3, snapshot: true });
+  const graph = createGraph({
+    contract: { namespace: "passive-declared-store", operations: { declared: definition } },
+  });
+  try {
+    const claim = preparePassiveTransferClaim(graph, graph.api.declared, undefined);
+    expect(claim.store.key).toBe("declared");
+    expect(claim.store.graph).toBe(graph.id);
+    expect(() => claim.store.value.peek()).toThrow(TypeError);
+    expect(() => claim.store.available.get()).toThrow(TypeError);
+    claim.discard();
+    await claim.retired;
+
+    const store = graph.api.declared();
+    expect(peekStore(store)).toMatchObject({ kind: "stable", present: true, value: 3 });
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("leaves an existing unconfigured Store untouched until a passive claim publishes", async () => {
+  const definition = createStore({ name: "declared", initial: 3, snapshot: true });
+  const graph = createGraph({
+    contract: { namespace: "passive-existing-store", operations: { declared: definition } },
+  });
+  try {
+    const physical = graph.at("declared");
+    physical.set(9);
+    const claim = preparePassiveTransferClaim(graph, graph.api.declared, undefined);
+    expect(claim.store.identity).toBe(physical.identity);
+    expect(() => claim.store.value.get()).toThrow(TypeError);
+    claim.discard();
+    await claim.retired;
+    expect(peekStore(physical)).toMatchObject({ kind: "stable", present: true, value: 9 });
+    const admitted = graph.api.declared();
+    expect(admitted.identity).toBe(physical.identity);
+    expect(peekStore(admitted)).toMatchObject({ kind: "stable", present: true, value: 9 });
+  } finally {
+    graph.dispose();
+  }
+});

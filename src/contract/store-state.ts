@@ -19,6 +19,7 @@ import { writeAllStatuses } from "./status.ts";
 import { assertStoreOpen, graphFault } from "./faults.ts";
 
 import { beginStoreAddress, changeBoundAddress, endStoreAddress } from "./registry.ts";
+import { noteTransferChange } from "./query-policy.ts";
 
 /** @internal Checks the exact next authority without changing native state. */
 export function nextGeneration(current: number, minimum = current): Generation {
@@ -39,6 +40,7 @@ export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation)
   const activeProgressRequest = owner?.current.status === "active" ? owner.request : undefined;
   const request = activeProgressRequest ?? runtime.activeRequest;
   const generation = nextGeneration(runtime.generation, minimum);
+  noteTransferChange(runtime);
   runtime.generation = generation;
   if (
     request !== undefined &&
@@ -60,6 +62,7 @@ export function recordLanding<T>(
 ): void {
   assertStoreOpen(runtime);
   const revision = nextValueRevision(runtime.valueRevision);
+  noteTransferChange(runtime);
   const addressWrite = beginStoreAddress(runtime);
   try {
     if (runtime.incarnation === undefined) runtime.incarnation = {};
@@ -146,6 +149,7 @@ export function publishObservation<T>(
 ): boolean {
   const before = runtime.valueRevision;
   const next = nextValueRevision(before);
+  noteTransferChange(runtime);
   const addressWrite = beginStoreAddress(runtime);
   try {
     let committed = false;
@@ -186,6 +190,7 @@ export function configureDeclaredStore<T>(
   definition: StoreDefinition<T>,
 ): void {
   if (runtime.configured) return;
+  noteTransferChange(runtime);
   if (!runtime.baseAvailable) nextValueRevision(runtime.valueRevision);
   runtime.configured = true;
   runtime.declared = true;
@@ -209,6 +214,7 @@ export function configureKeyedValue<T>(
   validateOnly = false,
   // Dormant transfer installs initial policy without publishing an initial value.
   seed = true,
+  touchCollection = true,
 ): void {
   const initialStated = options != null && Object.prototype.hasOwnProperty.call(options, "initial");
   const callerEqualsStated = options?.equals != null;
@@ -235,6 +241,7 @@ export function configureKeyedValue<T>(
   if (!runtime.configured) {
     if (seed && initialStated && !runtime.baseAvailable) nextValueRevision(runtime.valueRevision);
     if (validateOnly) return;
+    noteTransferChange(runtime);
     runtime.configured = true;
     runtime.declared = false;
     runtime.initial = initial;
@@ -246,7 +253,7 @@ export function configureKeyedValue<T>(
     if (seed && initialStated && !runtime.baseAvailable) {
       recordLanding(runtime, initial as T, undefined, expectedSession);
     }
-    touch(runtime);
+    if (touchCollection) touch(runtime);
     return;
   }
   if (initialStated && runtime.initialSpecified && !Object.is(runtime.initial, initial))
@@ -274,6 +281,12 @@ export function configureKeyedValue<T>(
     throw optionConflict(runtime as StoreRuntime<unknown>, "snapshot");
   if (seedInitial) nextValueRevision(runtime.valueRevision);
   if (validateOnly) return;
+  if (
+    (equalsStated && !runtime.equalsSpecified) ||
+    (snapshotStated && !runtime.snapshotSpecified) ||
+    configureInitial
+  )
+    noteTransferChange(runtime);
   if (equalsStated && !runtime.equalsSpecified) {
     runtime.equals = equals ?? Object.is;
     runtime.equalsSpecified = true;
@@ -290,7 +303,7 @@ export function configureKeyedValue<T>(
       runtime.refreshOnActivation = false;
     }
   }
-  touch(runtime);
+  if (touchCollection) touch(runtime);
 }
 
 export function predictionFault<T>(runtime: StoreRuntime<T>): Fault {
@@ -329,6 +342,7 @@ export function preparePrediction<T>(
       } catch (error) {
         if (!isCurrent() || prediction.dead) return value;
         const revision = nextValueRevision(runtime.valueRevision);
+        noteTransferChange(runtime);
         changeBoundAddress(runtime);
         prediction.dead = true;
         runtime.valueRevision = revision;
@@ -351,7 +365,10 @@ export function preparePrediction<T>(
 
 export function markPredictionSucceeded<T>(runtime: StoreRuntime<T>, id: number): void {
   const prediction = runtime.predictionStack.peek().find((entry) => entry.id === id);
-  if (prediction !== undefined && !prediction.dead) prediction.succeeded = true;
+  if (prediction !== undefined && !prediction.dead && !prediction.succeeded) {
+    noteTransferChange(runtime);
+    prediction.succeeded = true;
+  }
 }
 
 export function retirePredictions<T>(runtime: StoreRuntime<T>, ids: readonly number[]): void {
@@ -363,6 +380,7 @@ export function retirePredictions<T>(runtime: StoreRuntime<T>, ids: readonly num
   );
   if (next.length === current.length) return;
   const revision = nextValueRevision(runtime.valueRevision);
+  noteTransferChange(runtime);
   changeBoundAddress(runtime);
   runtime.valueRevision = revision;
   runtime.predictionStack.set(next);
@@ -377,6 +395,7 @@ export function pushPrediction<T>(runtime: StoreRuntime<T>, prediction: Predicti
     return false;
   }
   const revision = nextValueRevision(runtime.valueRevision);
+  noteTransferChange(runtime);
   changeBoundAddress(runtime);
   reactiveInternal.batch(() => {
     runtime.valueRevision = revision;
@@ -392,6 +411,7 @@ export function removePrediction<T>(runtime: StoreRuntime<T>, id: number): void 
   const next = current.filter((entry) => entry.id !== id && !entry.dead);
   if (next.length !== current.length) {
     const revision = nextValueRevision(runtime.valueRevision);
+    noteTransferChange(runtime);
     reactiveInternal.batch(() => {
       runtime.valueRevision = revision;
       if (!runtime.baseAvailable && next.length === 0) runtime.presence.set(false);

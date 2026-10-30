@@ -13,6 +13,7 @@ import {
   observePhysicalWork,
   physicalCleanup,
 } from "./retirement.ts";
+import { noteTransferChange, registerTransferWork } from "./query-policy.ts";
 import type { Contract } from "./types.ts";
 import type {
   GraphResetOperation,
@@ -46,6 +47,8 @@ function detachRequest<C extends Contract>(
   reason: unknown,
 ): AbortController | undefined {
   if (request.settled) return undefined;
+  noteTransferChange(runtime);
+  noteTransferChange(request);
   request.superseded = true;
   request.settled = true;
   interruptQueryProgress(runtime, request, reason, { authorityChanged: true });
@@ -85,6 +88,7 @@ function clearRuntime(
     runtime.incarnation === incarnation &&
     runtime.generation === generation;
   if (!owns()) return;
+  noteTransferChange(runtime);
   if (runtime.timer !== undefined) clearTimeout(runtime.timer);
   runtime.timer = undefined;
   const readerInitial = runtime.readerScope !== undefined && runtime.initialSpecified;
@@ -127,7 +131,10 @@ function clearRuntime(
   if (!owns()) return;
   touch(runtime);
   updateCollectionCandidate(runtime);
-  if (owns()) runtime.transitioning = false;
+  if (owns()) {
+    noteTransferChange(runtime);
+    runtime.transitioning = false;
+  }
 }
 
 function currentOperation<C extends Contract>(
@@ -227,6 +234,7 @@ function awaitOutcomes<C extends Contract>(
     else signal.addEventListener("abort", () => rejectCancellation(signal.reason), { once: true });
   });
   const physical = beginPhysicalWork(state.retirement, "acquisition");
+  registerTransferWork(state, physical);
   const completion = Promise.race([promise, cancellation]).then(
     () => {
       if (!currentOperation(state, operation)) return;
@@ -249,6 +257,7 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
   assertGraphOpen(state);
   reactiveInternal.assertWritesAllowed(state.resetVersion);
   const physical = beginPhysicalWork(state.retirement, "acquisition");
+  registerTransferWork(state, physical);
   try {
     const generations = new Map(
       [...state.stores.values()]
@@ -279,8 +288,37 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
     }
     const projections = [...state.projections];
 
+    noteTransferChange(state);
+    noteTransferChange(state.graph);
+    for (const context of state.bindingContexts) {
+      noteTransferChange(context);
+      noteTransferChange(context.handle);
+      for (const profiles of context.bindings.values())
+        for (const binding of profiles.values()) {
+          noteTransferChange(binding);
+          noteTransferChange(binding.handle);
+          for (const address of binding.addresses.values()) noteTransferChange(address);
+          for (const runtime of binding.stores.values()) noteTransferChange(runtime);
+        }
+      for (const members of context.streamBindings.values())
+        for (const binding of members.values()) {
+          noteTransferChange(binding);
+          noteTransferChange(binding.handle);
+          for (const address of binding.addresses.values()) noteTransferChange(address);
+          for (const runtime of binding.stores.values()) noteTransferChange(runtime);
+        }
+    }
+    for (const runtime of state.stores.values()) {
+      noteTransferChange(runtime);
+      if (runtime.stream !== undefined) noteTransferChange(runtime.stream);
+      if (runtime.boundRetirement !== undefined) noteTransferChange(runtime.boundRetirement);
+    }
+    for (const projection of projections) noteTransferChange(projection);
+
     const previous = state.resetOperation;
     const epoch = state.resetEpoch + 1;
+    noteTransferChange(state);
+    noteTransferChange(state.graph);
     state.resetEpoch = epoch;
     for (const context of state.bindingContexts) {
       for (const profiles of context.bindings.values())
@@ -304,7 +342,10 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
         runtime.incarnation = {};
     for (const [runtime, revision] of revisions) runtime.valueRevision = revision;
     for (const [runtime, generation] of generations) runtime.generation = generation;
-    for (const runtime of state.stores.values()) runtime.transitioning = true;
+    for (const runtime of state.stores.values()) {
+      noteTransferChange(runtime);
+      runtime.transitioning = true;
+    }
     let resolvePromise!: () => void;
     let rejectPromise!: (error: unknown) => void;
     let settled = false;
@@ -325,7 +366,10 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
         if (!controller.signal.aborted) controller.abort(reason);
       },
     };
+    noteTransferChange(state);
+    noteTransferChange(operation);
     state.resetOperation = operation;
+    if (previous !== undefined) noteTransferChange(previous);
     previous?.reject(new AbortError("A newer graph reset superseded this reset."));
 
     const oldControllers: AbortController[] = [];
@@ -390,9 +434,12 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
       reportContinuationError(state, error);
     }
 
+    if (previous !== undefined) noteTransferChange(previous);
     previous?.abort(new AbortError("A newer graph reset superseded this reset."));
-    for (const controller of oldControllers)
+    for (const controller of oldControllers) {
+      noteTransferChange(controller);
       controller.abort(new AbortError("A graph reset canceled work from the previous state."));
+    }
     for (const cleanup of [...streamCleanup, ...projectionCleanup]) {
       try {
         cleanup();

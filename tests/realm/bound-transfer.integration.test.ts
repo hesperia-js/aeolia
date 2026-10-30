@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, expect, it, jest } from "bun:test";
 import {
   adopt,
+  affects,
   bindOperation,
   bindStream,
   createBindingContext,
   createGraph,
+  createMutation,
   createQuery,
   createStore,
   createStream,
@@ -12,6 +14,9 @@ import {
   Fault,
   observeStore,
   peekStore,
+  preparePassiveTransferClaim,
+  prepareTransferOperation,
+  prepareTransferOperationRetirement,
   project,
   snapshot,
   subscribe,
@@ -903,3 +908,132 @@ it.each(["normal", "last-request", "exhausted"] as const)(
     }
   },
 );
+
+it("keeps a bound query claim dormant until ordinary post-discard acquisition", async () => {
+  const world = makeWorld();
+  const input = { key: "passive-query" };
+  const beforeKeys = world.queryKeys();
+  const controller = new AbortController();
+  try {
+    const claim = preparePassiveTransferClaim(world.graph, world.queryBinding, input, {
+      abortSignal: controller.signal,
+    });
+    expect(world.queryKeys()).toBe(beforeKeys + 1);
+    expect(world.fetches()).toBe(0);
+    expect(claim.store.key).toBe("passive-query");
+    expect(claim.store.graph).toBe(world.graph.id);
+    expect(() => claim.store.value.get()).toThrow(TypeError);
+    expect(() => claim.store.status.peek()).toThrow(TypeError);
+
+    controller.abort();
+    claim.discard();
+    await claim.retired;
+    expect(world.fetches()).toBe(0);
+
+    const ordinary = world.queryBinding.member(input);
+    expect(world.queryKeys()).toBe(beforeKeys + 2);
+    expect(world.fetches()).toBe(1);
+    await expect(ordinary.ready).resolves.toBe("bound:passive-query");
+  } finally {
+    world.graph.dispose();
+  }
+});
+
+it("does not open a raw stream while preparing or discarding its passive claim", async () => {
+  const world = makeWorld();
+  const input = { key: "passive-stream" };
+  const member = world.graph.api.stream;
+  const beforeKeys = world.streamKeys();
+  try {
+    const claim = preparePassiveTransferClaim(world.graph, member, input);
+    expect(world.streamKeys()).toBe(beforeKeys + 1);
+    expect(world.opens()).toBe(0);
+    expect(claim.store.key).toBe("passive-stream");
+    expect(claim.store.graph).toBe(world.graph.id);
+    expect(() => claim.store.value.peek()).toThrow(TypeError);
+    expect(() => claim.store.status.get()).toThrow(TypeError);
+    claim.discard();
+    await claim.retired;
+    expect(world.opens()).toBe(0);
+
+    world.graph.api.stream(input);
+    expect(world.opens()).toBe(1);
+  } finally {
+    world.graph.dispose();
+  }
+});
+
+it("joins a bound mutation to the exact native operation role until physical completion", async () => {
+  let resolveRun!: (value: void) => void;
+  let runs = 0;
+  let completion: Promise<void> | undefined;
+  let runSettled = false;
+  const work = new Promise<void>((resolve) => { resolveRun = resolve; });
+  const query = createQuery({
+    name: "bound-transfer.work-query",
+    key: (input: Input) => input.key,
+    fetch: async () => 1,
+  });
+  const mutation = createMutation({
+    name: "bound-transfer.work-mutation",
+    run: async () => {
+      runs += 1;
+      await work;
+    },
+    affects: [affects(query, { select: (input: Input) => input, on: "invalidate" })],
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "bound-transfer-work", operations: { query, mutation } }),
+  });
+  const input = { key: "one" };
+  const context = createBindingContext(graph);
+  const mutationBinding = bindOperation(graph, mutation, {
+    context,
+    profile: {},
+    run: async () => {
+      runs += 1;
+      await work;
+    },
+  });
+  try {
+    const queryStore = graph.api.query(input);
+    await expect(queryStore.ready).resolves.toBe(1);
+    const scope = createTransferScope(graph, graph.api.query, queryStore);
+    const pending = prepareTransferOperation([scope], [{
+      role: "bound",
+      source: mutationBinding,
+      input,
+    }]);
+    const operationCommit = pending.seal();
+    if (operationCommit === undefined) throw new Error("The bound mutation operation did not seal");
+    operationCommit.publish();
+    operationCommit.notifications.deliver();
+    await pending.retired;
+
+    completion = mutationBinding.member(input);
+    expect(runs).toBe(1);
+    expect(() => preparePassiveTransferClaim(graph, graph.api.query, input)).toThrow(TypeError);
+    expect(() => prepareTransferOperationRetirement(pending.operation)).toThrow(TypeError);
+
+    resolveRun(undefined);
+    await completion;
+    runSettled = true;
+    const retirement = prepareTransferOperationRetirement(pending.operation);
+    const retirementCommit = retirement.seal();
+    if (retirementCommit === undefined) throw new Error("The completed bound mutation did not retire");
+    retirementCommit.publish();
+    retirementCommit.notifications.deliver();
+    await retirement.retired;
+
+    const claim = preparePassiveTransferClaim(graph, graph.api.query, input);
+    claim.discard();
+    await claim.retired;
+  } finally {
+    if (completion !== undefined && !runSettled) {
+      resolveRun(undefined);
+      await completion.catch(() => undefined);
+    }
+    context.dispose();
+    graph.dispose();
+  }
+});

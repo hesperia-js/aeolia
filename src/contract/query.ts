@@ -28,6 +28,7 @@ import {
 import {
   beginBindingAddress,
   endBindingAddress,
+  assertStoreHandlePublished,
   queryRuntimeByStore,
   runtimeByStore,
 } from "./registry.ts";
@@ -39,9 +40,51 @@ import { queryProgressObservation, queryProgressReadable } from "./query-progres
 import { asWindow, createCaller, queryIsStale, writeCallerStatus } from "./status.ts";
 import { storeKey } from "./identity.ts";
 import { touch } from "./collection.ts";
+import {
+  beginTransferAdmission,
+  finishTransferAdmission,
+  noteTransferChange,
+  registerTransferReadable,
+  registerTransferStoreHandle,
+  registerTransferCaller,
+} from "./query-policy.ts";
+import type { TransferAdmission } from "./query-policy.ts";
+
+/** @internal Builds the ordinary activation callback without starting or enrolling work. */
+export function createQueryRuntimeActivation<T>(runtime: StoreRuntime<T>): () => void {
+  return () => {
+    if (!runtime.refreshOnActivation || runtime.source === undefined) return;
+    const activeSource = runtime.source;
+    const activeCaller = runtime.callers.find(
+      (candidate) =>
+        candidate.query === activeSource.query &&
+        Object.is(candidate.input, activeSource.input),
+    );
+    if (activeCaller === undefined) return;
+    try {
+      void startQuery(runtime, activeCaller, false, activeCaller.abortSignal, runtime.failing);
+    } catch (error) {
+      reportContinuationError(runtime.graph.__runtime, error);
+    }
+  };
+}
+
+/** @internal Retains the exact native query source for later normal refresh. */
+export function setQueryRuntimeSource<T>(
+  runtime: StoreRuntime<T>,
+  query: QueryDefinition<any, T, any, any>,
+  input: unknown,
+): void {
+  noteTransferChange(runtime);
+  runtime.source = { query, input };
+  runtime.onReadableActivation = createQueryRuntimeActivation(runtime);
+}
 
 export function addCaller<T>(runtime: StoreRuntime<T>, caller: QueryCaller<T>): void {
-  if (!runtime.callers.includes(caller)) runtime.callers.push(caller);
+  if (!runtime.callers.includes(caller)) {
+    noteTransferChange(runtime);
+    runtime.callers.push(caller);
+  }
   runtime.dropped = false;
   touch(runtime);
 }
@@ -61,6 +104,7 @@ export function readinessState<T>(
   );
 }
 
+export /** @internal Starts the normal caller readiness wait for a genuine query view. */
 export function ready<T>(runtime: StoreRuntime<T>, caller: QueryCaller<T>): Promise<T> {
   assertStoreOpen(runtime);
   if (!runtime.callers.includes(caller)) {
@@ -129,7 +173,10 @@ export function makeQueryStore<T, P = never>(
     binding?.context.retirement ?? state.retirement,
     "acquisition",
   );
+  let admission: TransferAdmission | undefined;
+  let admittedRuntime: StoreRuntime<T> | undefined;
   try {
+    admission = beginTransferAdmission(state, binding?.definition ?? query, binding, input);
     const epoch = state.resetEpoch;
     const window = asWindow(options?.revalidateAfterMs, query.revalidateAfterMs);
     assertGraphOpen(state);
@@ -145,9 +192,10 @@ export function makeQueryStore<T, P = never>(
       if (state.resetEpoch !== epoch)
         throw new AbortError("Query acquisition crossed a graph reset.");
     }
-    const admission = beginBindingAddress(binding, String(key));
+    const addressAdmission = beginBindingAddress(binding, String(key));
     try {
       const runtime = getOrCreateStore<T>(state, key, undefined, binding, false);
+      admittedRuntime = runtime;
       const configuredOptions =
         !runtime.configured &&
         bindingDefaults !== undefined &&
@@ -161,24 +209,16 @@ export function makeQueryStore<T, P = never>(
           throw new AbortError("Query acquisition crossed a graph reset.");
       }
       const caller = createCaller(runtime, query, input, window, options?.abortSignal);
+      if (admission !== undefined) {
+        finishTransferAdmission(admission, runtime);
+        admission = undefined;
+      }
+      registerTransferReadable(caller.statusCell, runtime, "query-status-cell", caller);
+      registerTransferReadable(caller.status, runtime, "query-status", caller);
+      registerTransferReadable(caller.pending, runtime, "query-pending", caller);
       admitStore(runtime);
       addCaller(runtime, caller);
-      runtime.source = { query, input };
-      runtime.onReadableActivation = () => {
-        if (!runtime.refreshOnActivation || runtime.source === undefined) return;
-        const activeSource = runtime.source;
-        const activeCaller = runtime.callers.find(
-          (candidate) =>
-            candidate.query === activeSource.query &&
-            Object.is(candidate.input, activeSource.input),
-        );
-        if (activeCaller === undefined) return;
-        try {
-          void startQuery(runtime, activeCaller, false, activeCaller.abortSignal, runtime.failing);
-        } catch (error) {
-          reportContinuationError(state, error);
-        }
-      };
+      setQueryRuntimeSource(runtime, query, input);
       writeCallerStatus(caller);
       const status = caller.status;
       const pending = caller.pending;
@@ -210,6 +250,8 @@ export function makeQueryStore<T, P = never>(
         get: () => queryProgressReadable<T, P>(runtime),
       });
       Object.freeze(queryStore);
+      registerTransferStoreHandle(queryStore, runtime);
+      registerTransferCaller(queryStore, runtime, caller);
       queryRuntimeByStore.set(queryStore, runtime as StoreRuntime<unknown>);
       runtimeByStore.set(queryStore, runtime as StoreRuntime<unknown>);
       observeStoreReadable(runtime, status, { armsFreshness: true });
@@ -225,10 +267,14 @@ export function makeQueryStore<T, P = never>(
       touch(runtime);
       return queryStore;
     } finally {
-      endBindingAddress(binding, String(key), admission);
+      endBindingAddress(binding, String(key), addressAdmission);
     }
   } finally {
-    finishPhysicalWork(physical);
+    try {
+      if (admission !== undefined) finishTransferAdmission(admission, admittedRuntime);
+    } finally {
+      finishPhysicalWork(physical);
+    }
   }
 }
 
@@ -247,6 +293,7 @@ export function makeQueryStore<T, P = never>(
  * @throws Fault if the store or graph is disposed.
  */
 export function observeQueryProgress<T, P>(store: QueryStore<T, P>): QueryProgressObservation<P> {
+  assertStoreHandlePublished(store);
   const runtime = queryRuntimeByStore.get(store);
   if (runtime === undefined) throw new TypeError("The value is not an Aeolia query store");
   return queryProgressObservation<unknown, P>(runtime);

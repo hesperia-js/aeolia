@@ -22,6 +22,8 @@ import {
   targetPredictionByHandle,
 } from "./registry.ts";
 import type { MutationBindingRuntime } from "./runtime.ts";
+import { beginTransferAdmission, finishTransferAdmission, registerTransferSource } from "./query-policy.ts";
+import type { TransferAdmission } from "./query-policy.ts";
 
 type AnyMutation = MutationDefinition<any, any>;
 type AnyQuery = QueryDefinition<any, any, any, any>;
@@ -294,8 +296,12 @@ export function bindMutationOperation<M extends AnyMutation, R>(
     run: (input, call) => run(input as MutationInput<M>, call),
   };
   const member = (...args: [input?: unknown, options?: BindingMutationOptions<M>]): Promise<R> => {
-    const attempt = beginBoundMutation(binding);
+    let admission: TransferAdmission | undefined = beginTransferAdmission(
+      context.state, definition, binding, args[0]
+    );
+    let attempt: ReturnType<typeof beginBoundMutation> | undefined;
     try {
+      attempt = beginBoundMutation(binding);
       const call = normalizeMutationArguments(args[0], args[1], args.length > 1);
       if (
         call.options !== undefined &&
@@ -312,10 +318,16 @@ export function bindMutationOperation<M extends AnyMutation, R>(
       )
         throw new TypeError("Invalid bound mutation options");
       const predictions = overrides === undefined ? [] : [...overrides];
+      if (admission !== undefined) {
+        finishTransferAdmission(admission);
+        admission = undefined;
+      }
       return runBoundMutation(attempt, call.input, signal, predictions) as Promise<R>;
     } catch (error) {
-      finishBoundMutation(attempt);
+      if (attempt !== undefined) finishBoundMutation(attempt);
       throw error;
+    } finally {
+      if (admission !== undefined) finishTransferAdmission(admission);
     }
   };
   const handle = Object.freeze({
@@ -325,6 +337,9 @@ export function bindMutationOperation<M extends AnyMutation, R>(
     profile,
     member,
   }) as MutationBinding<M, R>;
+  const transferSource = { graph: state.graph, kind: "mutation" as const, definition, binding };
+  registerTransferSource(member, transferSource);
+  registerTransferSource(handle, transferSource);
   if (profiles === undefined) {
     profiles = new Map();
     context.mutations.set(definition, profiles);

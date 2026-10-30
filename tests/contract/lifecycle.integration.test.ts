@@ -8,13 +8,19 @@ import {
   affects,
   bindOperation,
   createBindingContext,
+  createTransferScope,
+  prepareTransferOperation,
+  prepareTransferOperationRetirement,
   defineContract,
   project,
   subscribe,
   watch,
   Fault,
   withoutWrites,
+  captureReactiveConstruction,
+  prepareRequiredTransferCapture,
 } from "../../src/index.ts";
+import type { ClosedEncodedValue, RequiredTransferCodec } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
 let ownsFakeTimers = false;
@@ -1534,5 +1540,93 @@ it("drains later contexts when context.active reenters graph retirement and join
       if (firstReady !== undefined) await firstReady;
       if (secondReady !== undefined) await secondReady;
     }
+  }
+
+});
+
+it("keeps overlapping mutation coverage until both original carriers retire", async () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "transfer-overlap.query",
+    key: () => "transfer-overlap/one",
+    fetch: backend.respond<void, number>("transfer-overlap.query"),
+  });
+  const mutate = createMutation({
+    name: "transfer-overlap.mutate",
+    run: backend.perform<object, void>("transfer-overlap.mutate"),
+    affects: [],
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "transfer-overlap", operations: { query, mutate } }),
+  });
+  const codec: RequiredTransferCodec = {
+    encodeValue: (value) => value as ClosedEncodedValue,
+    encodeFailure: (cause) => String(cause),
+    decodeValue: (value) => value,
+    decodeFailure: (failure) => new Error(String(failure)),
+  };
+  try {
+    const store = graph.api.query();
+    const ready = store.ready;
+    backend.resolve(backend.calls[0]!, 1);
+    await ready;
+    const value = computed(() => store.value.get());
+    expect(value.get()).toBe(1);
+    const construction = captureReactiveConstruction(value);
+    const captureOptions = {
+      graphs: [graph],
+      roots: [{ source: value, construction }],
+      codec,
+    } as const;
+    const scope = createTransferScope(graph, graph.api.query, store);
+    const firstInput = Object.freeze({ request: "first" });
+    const secondInput = Object.freeze({ request: "second" });
+    const firstOperation = prepareTransferOperation([scope], [
+      { role: "raw", source: graph.api.mutate, input: firstInput },
+    ]);
+    const firstCommit = firstOperation.seal();
+    if (firstCommit === undefined) throw new Error("The first operation did not seal");
+    firstCommit.publish();
+    firstCommit.notifications.deliver();
+    const secondOperation = prepareTransferOperation([scope], [
+      { role: "raw", source: graph.api.mutate, input: secondInput },
+    ]);
+    const secondCommit = secondOperation.seal();
+    if (secondCommit === undefined) throw new Error("The overlapping operation did not seal");
+    secondCommit.publish();
+    secondCommit.notifications.deliver();
+
+    const firstResult = graph.api.mutate(firstInput);
+    const secondResult = graph.api.mutate(secondInput);
+    const firstCall = backend.calls[1]!;
+    const secondCall = backend.calls[2]!;
+    expect(firstCall.input).toBe(firstInput);
+    expect(secondCall.input).toBe(secondInput);
+    expect(() => prepareRequiredTransferCapture(captureOptions)).toThrow(TypeError);
+
+    backend.resolve(firstCall, undefined);
+    backend.resolve(secondCall, undefined);
+    await Promise.all([firstResult, secondResult]);
+
+    const firstRetirement = prepareTransferOperationRetirement(firstOperation.operation);
+    const firstRetirementCommit = firstRetirement.seal();
+    if (firstRetirementCommit === undefined) throw new Error("The first operation retirement did not seal");
+    firstRetirementCommit.publish();
+    firstRetirementCommit.notifications.deliver();
+    await firstRetirement.retired;
+    expect(() => prepareRequiredTransferCapture(captureOptions)).toThrow(TypeError);
+
+    const secondRetirement = prepareTransferOperationRetirement(secondOperation.operation);
+    const secondRetirementCommit = secondRetirement.seal();
+    if (secondRetirementCommit === undefined) throw new Error("The second operation retirement did not seal");
+    secondRetirementCommit.publish();
+    secondRetirementCommit.notifications.deliver();
+    await secondRetirement.retired;
+
+    const availableCapture = prepareRequiredTransferCapture(captureOptions);
+    availableCapture.discard();
+    await availableCapture.retired;
+  } finally {
+    graph.dispose();
   }
 });

@@ -1,6 +1,10 @@
 import {
   Fault,
   adopt,
+  captureReactiveConstruction,
+  prepareRequiredTransferCapture,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
   bindOperation as rootBindOperation,
   bindStream as rootBindStream,
   inspectBoundAddress as rootInspectBoundAddress,
@@ -25,6 +29,10 @@ import {
 } from "aeolia";
 import {
   affects,
+  createTransferScope,
+  prepareTransferOperation,
+  prepareTransferScopeSuccessors,
+  prepareTransferOperationRetirement,
   bindOperation,
   createBindingContext,
   createMutation,
@@ -63,6 +71,7 @@ async function expectPending(promise, message) {
 }
 
 export async function verifyConsumer() {
+  await verifyRequiredTransferConsumer();
   await verifyTransferConsumer();
   await verifyBoundConsumer();
   await verifyBoundStreamConsumer();
@@ -766,6 +775,178 @@ async function verifyWarmFetchAcquisition(backend, label, previousCalls, acquire
     (await refreshing.ready) === completedValue && (await joined.ready) === completedValue,
     `The ${label} query did not publish its completed value to every caller`,
   );
+}
+
+
+async function verifyRequiredTransferConsumer() {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "required.query",
+    key: (input) => input,
+    fetch: backend.respond("required.query"),
+  });
+  const mutate = createMutation({
+    name: "required.mutate",
+    run: backend.perform("required.mutate"),
+    affects: [],
+  });
+  const graphContract = defineContract({ namespace: "packed-required-transfer", operations: { query, mutate } });
+  const sourceGraph = createGraph({ contract: graphContract });
+  const targetGraph = createGraph({ contract: graphContract });
+  const codec = {
+    encodeValue: (value, witness) => {
+      if (witness.store !== undefined)
+        check(witness.store === sourceStore, "Required source witness lost the exact caller Store wrapper");
+      return value;
+    },
+    encodeFailure: (cause) => String(cause),
+    decodeValue: (value, witness) => {
+      if (witness.store !== undefined)
+        check(witness.store === claim.store, "Required target witness lost the exact passive claim wrapper");
+      return value;
+    },
+    decodeFailure: (failure) => new Error(String(failure)),
+  };
+  let capture;
+  let claim;
+  let sourceStore;
+  let adoption;
+  let targetGraphSuccessor;
+  let operationPlan;
+  let mutationResult;
+  let mutationCall;
+  let mutationResolved = false;
+  let capturePublished = false;
+  let adoptionPublished = false;
+  try {
+    sourceStore = sourceGraph.api.query("one", { revalidateAfterMs: 60000.5 });
+    const sourceReady = sourceStore.ready;
+    backend.resolve(backend.pending("required.query")[0], "source value");
+    await sourceReady;
+    const sourceValue = computed(() => sourceStore.status.get() === "ready" ? sourceStore.value.get() + "!" : "");
+    check(sourceValue.get() === "source value!", "Required source cache was not initialized");
+    capture = prepareRequiredTransferCapture({
+      graphs: [sourceGraph],
+      roots: [{ source: sourceValue, construction: captureReactiveConstruction(sourceValue) }],
+      codec,
+    });
+    const image = capture.image;
+    const rootSlot = image.roots[0];
+    const nativeSource = image.stores[0];
+    const sourceCaller = image.callers[0];
+    check(
+      rootSlot !== undefined && nativeSource !== undefined && sourceCaller !== undefined,
+      "Required image omitted its source or caller slots",
+    );
+    check(
+      sourceCaller.store === nativeSource.slot,
+      "Required caller was detached from its physical source slot",
+    );
+    check(
+      sourceCaller.window.kind === "finite" && sourceCaller.window.milliseconds === 60000.5,
+      "Required caller lost its normalized freshness window",
+    );
+    check(sourceCaller.status === "ready", "Required caller did not retain settled source status");
+    const sourceStatusNode = image.nodes.find(
+      (node) => node.kind === "native" &&
+        node.facet === "query-status" && node.caller === sourceCaller.slot,
+    );
+    check(
+      sourceStatusNode !== undefined && sourceStatusNode.store === nativeSource.slot,
+      "Required status facet lost its exact caller slot",
+    );
+    const physicalWitness = capture.sources.find((witness) => witness.slot === nativeSource.slot);
+    const callerWitness = capture.sources.find((witness) => witness.slot === sourceCaller.slot);
+    check(physicalWitness?.store === sourceStore, "Physical source witness lost the actual acquisition wrapper");
+    check(
+      callerWitness?.physical === nativeSource.slot &&
+        callerWitness.readable === sourceStore.status && callerWitness.store === sourceStore,
+      "Caller witness lost its exact status wrapper or physical source",
+    );
+    const captureCommit = capture.seal();
+    check(captureCommit !== undefined, "Required capture did not seal");
+    captureCommit.publish();
+    capturePublished = true;
+    captureCommit.notifications.deliver();
+    await capture.retired;
+
+    claim = preparePassiveTransferClaim(
+      targetGraph,
+      targetGraph.api.query,
+      "one",
+      { revalidateAfterMs: 60000.5 },
+    );
+    const targetValue = computed(() => claim.store.status.get() === "ready" ? claim.store.value.get() + "!" : "");
+    const targetConstruction = captureReactiveConstruction(targetValue);
+    adoption = prepareRequiredTransferAdoption(image, {
+      graphs: [targetGraph],
+      sources: [
+        { slot: nativeSource.slot, claim },
+        ...image.callers.map((caller) => ({ slot: caller.slot, claim })),
+      ],
+      reactive: [{ slot: rootSlot, target: targetValue, construction: targetConstruction }],
+      codec,
+      mappedStateWrites: [],
+    });
+    const adoptionCommit = adoption.seal();
+    check(adoptionCommit !== undefined, "Required adoption did not seal");
+    adoptionCommit.publish();
+    adoptionPublished = true;
+    check(targetValue.get() === "source value!", "Required cache was not installed in the target graph");
+    adoptionCommit.notifications.deliver();
+    await adoption.retired;
+
+    const targetStore = targetGraph.api.query("one");
+    const scope = createTransferScope(targetGraph, targetGraph.api.query, targetStore);
+    const carrier = Object.freeze({ request: "consumer" });
+    operationPlan = prepareTransferOperation([scope], [
+      { role: "raw", source: targetGraph.api.mutate, input: carrier },
+    ]);
+    const operationCommit = operationPlan.seal();
+    check(operationCommit !== undefined, "Transfer operation did not seal");
+    operationCommit.publish();
+    operationCommit.notifications.deliver();
+    mutationResult = targetGraph.api.mutate(carrier);
+    mutationCall = backend.pending("required.mutate")[0];
+    check(mutationCall.input === carrier, "Transfer dispatch did not preserve its exact carrier");
+    backend.resolve(mutationCall, "mutated");
+    mutationResolved = true;
+    check((await mutationResult) === "mutated", "The original mutation result changed");
+
+    targetGraphSuccessor = createGraph({ contract: graphContract });
+    const successorPlan = prepareTransferScopeSuccessors([{
+      operation: operationPlan.operation,
+      predecessor: scope,
+      graph: targetGraphSuccessor,
+      source: targetGraphSuccessor.api.query,
+      input: "one",
+    }]);
+    const successorCommit = successorPlan.seal();
+    check(successorCommit !== undefined && successorPlan.scopes.length === 1, "Transfer successor did not seal");
+    successorCommit.publish();
+    successorCommit.notifications.deliver();
+    await successorPlan.retired;
+
+    const retirement = prepareTransferOperationRetirement(operationPlan.operation);
+    const retirementCommit = retirement.seal();
+    check(retirementCommit !== undefined, "Transfer retirement did not seal");
+    retirementCommit.publish();
+    retirementCommit.notifications.deliver();
+    await retirement.retired;
+  } finally {
+    if (mutationCall !== undefined && mutationResult !== undefined && !mutationResolved) {
+      backend.resolve(mutationCall, "mutated");
+      await mutationResult.then(() => undefined, () => undefined);
+    }
+    if (!adoptionPublished) adoption?.discard();
+    if (!capturePublished) capture?.discard();
+    if (adoption !== undefined) await adoption.retired.catch(() => {});
+    if (claim !== undefined && !adoptionPublished) await claim.retired.catch(() => {});
+    if (capture !== undefined) await capture.retired.catch(() => {});
+    sourceGraph.dispose();
+    targetGraph.dispose();
+    targetGraphSuccessor?.dispose();
+  }
 }
 
 async function verifyTransferConsumer() {

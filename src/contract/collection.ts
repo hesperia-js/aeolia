@@ -23,6 +23,7 @@ import {
   physicalCleanup,
   recordCleanupFailure,
 } from "./retirement.ts";
+import { noteTransferChange, registerTransferWork } from "./query-policy.ts";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -79,6 +80,7 @@ export function removeCollectionCandidateAt(state: GraphRuntimeState<any>, index
   const heap = state.collectionHeap;
   const removed = heap[index];
   if (removed === undefined) return;
+  noteTransferChange(removed.runtime);
   const last = heap.pop()!;
   removed.runtime.collectionIndex = -1;
   if (last === removed) return;
@@ -141,6 +143,7 @@ export function updateCollectionCandidate<T>(runtime: StoreRuntime<T>): void {
   }
   const deadline = (runtime.stream?.unobservedSince ?? runtime.lastInteraction) + state.idleMs;
   if (index < 0) {
+    noteTransferChange(runtime);
     const candidate: CollectionCandidate = {
       runtime: runtime as StoreRuntime<unknown>,
       deadline,
@@ -152,6 +155,7 @@ export function updateCollectionCandidate<T>(runtime: StoreRuntime<T>): void {
   }
   const candidate = state.collectionHeap[index];
   if (candidate === undefined || candidate.runtime !== runtime) {
+    noteTransferChange(runtime);
     runtime.collectionIndex = -1;
     updateCollectionCandidate(runtime);
     return;
@@ -187,6 +191,14 @@ export function interact<C extends Contract>(state: GraphRuntimeState<C>): void 
 
 export function setStreamStatus<T>(runtime: StoreRuntime<T>, status: StreamStatus): void {
   const bound = runtime.stream?.bound;
+  const boundLifecycleChanges =
+    bound?.phase === "active" &&
+    !bound.session.ended &&
+    runtime.stream?.token === bound.session.token;
+  if (reactiveInternal.signalValue(runtime.streamStatusCell) !== status || boundLifecycleChanges) {
+    noteTransferChange(runtime);
+    if (boundLifecycleChanges) noteTransferChange(bound);
+  }
   runtime.streamStatusCell.set(status);
   if (
     bound?.phase === "active" &&
@@ -202,6 +214,8 @@ export function returnStreamIterator<T>(
   swallowCallFailure: boolean,
 ): void {
   const work = beginPhysicalWork(session.physical.owner, "stream-return");
+  registerTransferWork(session, work);
+  noteTransferChange(session);
   let hasOriginal = false;
   try {
     let close: AsyncIterator<T>["return"];
@@ -221,6 +235,7 @@ export function returnStreamIterator<T>(
       return;
     }
     hasOriginal = true;
+    noteTransferChange(work);
     work.original = original;
     try {
       observePhysicalWork(work, normalizePhysicalPromise(original), true, original);
@@ -237,6 +252,10 @@ function closePositionedStoreSession<T>(runtime: StoreRuntime<T>, session: Strea
   const positioned = session.positioned;
   if (positioned === undefined || positioned.phase === "closed") return;
   const dormant = positioned.phase === "dormant";
+  noteTransferChange(runtime);
+  if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
+  noteTransferChange(session);
+  noteTransferChange(positioned);
   positioned.phase = "closed";
   positioned.dispatch = undefined;
   if (runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
@@ -262,6 +281,9 @@ export function discardPositionedStoreSession<T>(
   if (runtime.readerScope?.session !== session || session.positioned === undefined)
     throw new TypeError("The value is not a positioned reader Store session");
   if (!session.ended) endStream(runtime, session, "closed");
+  noteTransferChange(runtime);
+  if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
+  noteTransferChange(session);
   runtime.disposed = true;
   runtime.incarnation = undefined;
   runtime.graph.__runtime.stores.delete(runtime.identity);
@@ -281,11 +303,15 @@ export function endStream<T>(
   if (session.bound !== undefined) return endBoundStream(runtime, session, status, reason, options);
   if (session.ended) return;
   const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
+  registerTransferWork(runtime, cleanupWork);
+  registerTransferWork(session, cleanupWork);
   const state = runtime.graph.__runtime;
   const current = (): boolean =>
     !state.disposed &&
     runtime.streamToken === session.token &&
     session.resetEpoch === state.resetEpoch;
+  noteTransferChange(runtime);
+  noteTransferChange(session);
   session.ended = true;
   closePositionedStoreSession(runtime, session);
   const iterator = session.iterator;
@@ -370,8 +396,16 @@ function endBoundStream<T>(
   const bound = session.bound!;
   if (bound.phase !== "active") return;
   const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
+  registerTransferWork(runtime, cleanupWork);
+  registerTransferWork(session, cleanupWork);
+  registerTransferWork(bound, cleanupWork);
   const state = runtime.graph.__runtime;
   const retirement = { token: {}, epoch: state.resetEpoch };
+  noteTransferChange(runtime);
+  noteTransferChange(session);
+  noteTransferChange(bound);
+  noteTransferChange(bound.binding);
+  noteTransferChange(bound.binding.handle);
   bound.retirement = retirement;
   bound.phase = "retiring";
   bound.liveReadables = 0;
@@ -472,6 +506,10 @@ function endBoundStream<T>(
         reason,
         terminalCapture,
       });
+      noteTransferChange(runtime);
+      noteTransferChange(session);
+      noteTransferChange(bound);
+      noteTransferChange(bound.binding);
       bound.receipt = receipt;
       bound.phase = "detached";
       try {
@@ -485,6 +523,8 @@ function endBoundStream<T>(
         try {
           physicalCleanup(session.physical.owner, () => {
             if (runtime.boundRetirement === bound) {
+              noteTransferChange(runtime);
+              noteTransferChange(bound);
               const owned = owns();
               runtime.boundRetirement = undefined;
               if (owned) runtime.transitioning = false;
@@ -519,6 +559,9 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
   )
     return;
   const addressDrop = beginStoreAddress(runtime);
+  noteTransferChange(runtime);
+  if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
+  if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
   try {
     const streamToken = runtime.streamToken;
     const revision = nextValueRevision(runtime.valueRevision);

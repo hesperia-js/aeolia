@@ -16,7 +16,14 @@ import { configureDeclaredStore, issue, nextGeneration, recordLanding } from "./
 import { interact, isLive, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { armStoreTimer } from "./query-request.ts";
 import {
+  inheritTransferCoverage,
+  noteTransferChange,
+  registerTransferReadable,
+  registerTransferStore,
+} from "./query-policy.ts";
+import {
   assertBindingContextOpen,
+  assertStoreHandlePublished,
   beginStoreAddress,
   boundStreamByStore,
   captureStoreRuntime,
@@ -62,16 +69,14 @@ export function observeStoreReadable<T>(
   runtime: StoreRuntime<T>,
   readable: Readable<unknown>,
   observation: StoreReadableObservation = {},
-): void {
+): readonly [Unsubscribe, Unsubscribe] {
   const state = runtime.graph.__runtime;
-  runtime.readStops.push(
-    reactiveInternal.onActualRead(readable, () => {
-      assertStoreOpen(runtime);
-      touch(runtime);
-    }),
-  );
-  runtime.livenessStops.push(
-    reactiveInternal.onLivenessChange(readable, (live) => {
+  const readStop = reactiveInternal.onActualRead(readable, () => {
+    assertStoreOpen(runtime);
+    touch(runtime);
+  });
+  runtime.readStops.push(readStop);
+  const livenessStop = reactiveInternal.onLivenessChange(readable, (live) => {
       runtime.liveReadableCount += live ? 1 : -1;
       if (runtime.liveReadableCount < 0) runtime.liveReadableCount = 0;
       if (observation.isValue === true) runtime.valueLive = live;
@@ -86,8 +91,9 @@ export function observeStoreReadable<T>(
       }
       updateCollectionCandidate(runtime);
       scheduleSweep(state);
-    }),
-  );
+  });
+  runtime.livenessStops.push(livenessStop);
+  return [readStop, livenessStop];
 }
 
 export function subscribeStore<T>(
@@ -130,11 +136,21 @@ export function directWrite<T>(
   }
 }
 
+/**
+ * @internal Creates one canonical Store runtime.
+ * @param state - Owning graph runtime.
+ * @param key - Native graph-local Store key.
+ * @param definition - Optional declared Store policy.
+ * @param binding - Optional native binding owner.
+ * @param passive - Defers collection touching until the Store is published.
+ * @returns The canonical native Store runtime.
+ */
 export function makeStore<T>(
   state: GraphRuntimeState<any>,
   key: ReturnType<typeof storeKey>,
   definition?: StoreDefinition<T>,
   binding?: StoreBindingRuntime,
+  passive = false,
 ): StoreRuntime<T> {
   let runtime!: StoreRuntime<T>;
   const identity = Object.freeze({}) as StoreIdentity;
@@ -222,6 +238,7 @@ export function makeStore<T>(
     update(next: (current: T | undefined) => T): void {
       assertStoreOpen(runtime);
       reactiveInternal.assertWritesAllowed(runtime.committed);
+      noteTransferChange(runtime);
       nextValueRevision(runtime.valueRevision);
       nextGeneration(runtime.generation);
       interact(state);
@@ -303,11 +320,13 @@ export function makeStore<T>(
   ])
     reactiveInternal.bindReadable(readable, { graphId: state.graph.id, reportFault: report });
 
+  registerTransferStore(runtime);
+  registerTransferReadable(available, runtime, "available");
   observeStoreReadable(runtime, folded, { isValue: true, armsFreshness: true });
   observeStoreReadable(runtime, available, { metadata: true });
   observeStoreReadable(runtime, error, { armsFreshness: true });
   runtimeByStore.set(store, runtime as StoreRuntime<unknown>);
-  if (definition != null) touch(runtime);
+  if (definition != null && !passive) touch(runtime);
   return runtime;
 }
 
@@ -320,6 +339,7 @@ export function makeStore<T>(
  * Native read, predictor and propagation failures retain their original channel.
  */
 export function peekStore<T>(store: Store<T>): StoreCapture<T> {
+  assertStoreHandlePublished(store);
   const runtime = runtimeByStore.get(store) as StoreRuntime<T> | undefined;
   if (runtime === undefined) throw new TypeError("The value is not an Aeolia store");
   const bound = boundStreamByStore.get(store);
@@ -348,15 +368,18 @@ export function getOrCreateStore<T>(
   const existing =
     binding === undefined ? state.stores.get(String(key)) : binding.stores.get(String(key));
   if (existing != null) {
+    inheritTransferCoverage(existing as StoreRuntime<T>);
     if (definition != null) configureDeclaredStore(existing as StoreRuntime<T>, definition);
     if (acquire) admitStore(existing);
     return existing as StoreRuntime<T>;
   }
   const runtime = makeStore(state, key, definition, binding);
   if (!acquire && definition === undefined) {
+    noteTransferChange(runtime);
     runtime.incarnation = undefined;
     runtime.dropped = true;
   }
+  inheritTransferCoverage(runtime);
   changeBoundAddress(runtime);
   if (binding !== undefined) binding.stores.set(String(key), runtime as StoreRuntime<unknown>);
   state.stores.set(
@@ -367,9 +390,31 @@ export function getOrCreateStore<T>(
   return runtime;
 }
 
+/** Establish a fresh off-graph incarnation without collection or address effects. */
+export function admitDetachedStore<T>(runtime: StoreRuntime<T>): object {
+  assertStoreOpen(runtime);
+  const state = runtime.graph.__runtime;
+  const graphKey = runtime.binding === undefined ? String(runtime.key) : runtime.identity;
+  if (
+    state.stores.get(graphKey) === runtime ||
+    runtime.binding?.stores.get(String(runtime.key)) === runtime ||
+    runtime.baseAvailable ||
+    runtime.requests.size > 0 ||
+    runtime.callers.length > 0
+  )
+    throw new TypeError("Only an unexposed empty Store can be passively admitted");
+  if (runtime.incarnation === undefined || runtime.dropped) {
+    noteTransferChange(runtime);
+    runtime.incarnation = {};
+    runtime.dropped = false;
+  }
+  return runtime.incarnation;
+}
+
 /** Establish current authority only after the native owner accepts acquisition. */
 export function admitStore<T>(runtime: StoreRuntime<T>): void {
   assertStoreOpen(runtime);
+  if (runtime.incarnation === undefined || runtime.dropped) noteTransferChange(runtime);
   changeBoundAddress(runtime);
   if (runtime.incarnation === undefined) runtime.incarnation = {};
   runtime.dropped = false;

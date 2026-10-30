@@ -2,15 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import {
   adopt,
   bindOperation,
+  captureReactiveConstruction,
+  computed,
   createBindingContext,
   createGraph,
   createQuery,
   defineContract,
   Fault,
   queryOptions,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
+  prepareRequiredTransferCapture,
   snapshot,
   subscribe,
 } from "../../src/index.ts";
+import type { ClosedEncodedValue, RequiredTransferCodec } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
 beforeEach(() => {
@@ -39,6 +45,13 @@ function fixture(idleMs = 100) {
   const graph = createGraph({ contract, idleMs });
   return { backend, query, other, contract, graph, keyCalls: () => keyCalls };
 }
+
+const profileTransferCodec: RequiredTransferCodec = {
+  encodeValue: (value) => value as ClosedEncodedValue,
+  encodeFailure: (cause) => String(cause),
+  decodeValue: (value) => value,
+  decodeFailure: (failure) => new Error(String(failure)),
+};
 
 function trackedCallerSignal(onLink: () => void) {
   const controller = new AbortController();
@@ -657,4 +670,397 @@ describe("context-bound query entries", () => {
     expect(inputs).toEqual([undefined]);
     graph.dispose();
   });
+  it("keeps distinct query callers on one physical address with independent freshness windows", async () => {
+    const { backend, graph, keyCalls } = fixture();
+    const input = { id: "caller-aliases" };
+    try {
+      const beforeKeys = keyCalls();
+      for (const invalid of [Number.POSITIVE_INFINITY, Number.NaN, -1]) {
+        expect(() => preparePassiveTransferClaim(graph, graph.api.query, input, { revalidateAfterMs: invalid })).toThrow(Fault);
+        expect(keyCalls()).toBe(beforeKeys);
+      }
+      expect(backend.calls).toHaveLength(0);
+
+      const passive = [
+        preparePassiveTransferClaim(graph, graph.api.query, input, { revalidateAfterMs: 0 }),
+        preparePassiveTransferClaim(graph, graph.api.query, input, { revalidateAfterMs: 0.5 }),
+        preparePassiveTransferClaim(graph, graph.api.query, input, { revalidateAfterMs: 1000 }),
+        preparePassiveTransferClaim(graph, graph.api.query, input),
+      ];
+      expect(keyCalls()).toBe(beforeKeys + 4);
+      expect(new Set(passive.map((claim) => claim.store.identity)).size).toBe(1);
+      expect(new Set(passive.map((claim) => claim.store.status)).size).toBe(4);
+      expect(new Set(passive.map((claim) => claim.store.pending)).size).toBe(4);
+      for (const claim of passive) {
+        expect(() => claim.store.status.get()).toThrow(TypeError);
+        expect(() => claim.store.progress.get()).toThrow(TypeError);
+      }
+      expect(backend.calls).toHaveLength(0);
+      for (const claim of passive) claim.discard();
+      await Promise.all(passive.map((claim) => claim.retired));
+
+      const baseline = graph.api.query(input);
+      const baselineReady = baseline.ready;
+      expect(backend.calls).toHaveLength(1);
+      backend.resolve(backend.calls[0]!, { count: 1 });
+      await expect(baselineReady).resolves.toEqual({ count: 1 });
+
+      const zeroWindow = graph.api.query(input, { revalidateAfterMs: 0 });
+      const zeroReady = zeroWindow.ready;
+      const oneSecond = graph.api.query(input, { revalidateAfterMs: 1000 });
+      const infinite = graph.api.query(input);
+      const oneSecondReady = oneSecond.ready;
+      const infiniteReady = infinite.ready;
+      expect(backend.calls).toHaveLength(2);
+      expect(zeroWindow.identity).toBe(baseline.identity);
+      expect(oneSecond.identity).toBe(baseline.identity);
+      expect(infinite.identity).toBe(baseline.identity);
+      expect(zeroWindow.value).toBe(oneSecond.value);
+      expect(oneSecond.value).toBe(infinite.value);
+      expect(zeroWindow.progress).toBe(oneSecond.progress);
+      expect(oneSecond.progress).toBe(infinite.progress);
+      expect(zeroWindow.status).not.toBe(oneSecond.status);
+      expect(oneSecond.status).not.toBe(infinite.status);
+      expect(zeroWindow.pending).not.toBe(oneSecond.pending);
+      expect(oneSecond.pending).not.toBe(infinite.pending);
+      expect(zeroWindow.pending.get()).toBe(true);
+      expect(oneSecond.pending.get()).toBe(true);
+      expect(infinite.pending.get()).toBe(true);
+
+      backend.resolve(backend.calls[1]!, { count: 2 });
+      await Promise.all([zeroReady, oneSecondReady, infiniteReady]);
+      jest.advanceTimersByTime(1);
+      expect(zeroWindow.status.get()).toBe("stale");
+      expect(oneSecond.status.get()).toBe("ready");
+      expect(infinite.status.get()).toBe("ready");
+      expect(keyCalls()).toBe(beforeKeys + 8);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("round-trips exact query caller slots onto one shared physical receiver", async () => {
+    const source = fixture();
+    const target = fixture();
+    const input = { id: "caller-wire" };
+    try {
+      const baseline = source.graph.api.query(input);
+      const baselineReady = baseline.ready;
+      source.backend.resolve(source.backend.calls[0]!, { count: 1 });
+      await expect(baselineReady).resolves.toEqual({ count: 1 });
+
+      const zeroWindow = source.graph.api.query(input, { revalidateAfterMs: 0 });
+      const zeroReady = zeroWindow.ready;
+      const oneSecond = source.graph.api.query(input, { revalidateAfterMs: 1000 });
+      const oneSecondReady = oneSecond.ready;
+      source.backend.resolve(source.backend.calls[1]!, { count: 2 });
+      await Promise.all([zeroReady, oneSecondReady]);
+      jest.advanceTimersByTime(1);
+      expect(zeroWindow.status.get()).toBe("stale");
+      expect(oneSecond.status.get()).toBe("ready");
+
+      const sourceZero = computed(() => zeroWindow.status.get());
+      const sourceZeroAlias = computed(() =>
+        zeroWindow.pending.get() ? "pending" : zeroWindow.status.get(),
+      );
+      const sourceOneSecond = computed(() => oneSecond.status.get());
+      expect(sourceZero.get()).toBe("stale");
+      expect(sourceZeroAlias.get()).toBe("stale");
+      expect(sourceOneSecond.get()).toBe("ready");
+
+      const capture = prepareRequiredTransferCapture({
+        graphs: [source.graph],
+        roots: [
+          { source: sourceZero, construction: captureReactiveConstruction(sourceZero) },
+          { source: sourceZeroAlias, construction: captureReactiveConstruction(sourceZeroAlias) },
+          { source: sourceOneSecond, construction: captureReactiveConstruction(sourceOneSecond) },
+        ],
+        codec: profileTransferCodec,
+      });
+      const captureCommit = capture.seal();
+      if (captureCommit === undefined) throw new Error("The two-caller capture did not seal");
+      captureCommit.publish();
+      captureCommit.notifications.deliver();
+      await capture.retired;
+
+      expect(capture.image.stores).toHaveLength(1);
+      expect(capture.image.callers).toHaveLength(2);
+      const zeroCaller = capture.image.callers.find(
+        (caller) => caller.window.kind === "finite" && caller.window.milliseconds === 0,
+      );
+      const oneSecondCaller = capture.image.callers.find(
+        (caller) => caller.window.kind === "finite" && caller.window.milliseconds === 1000,
+      );
+      if (zeroCaller === undefined || oneSecondCaller === undefined)
+        throw new Error("The caller freshness descriptors were not captured");
+      expect(zeroCaller.status).toBe("stale");
+      expect(oneSecondCaller.status).toBe("ready");
+      expect(capture.image.nodes.filter((node) => node.caller === zeroCaller.slot).length).toBeGreaterThan(1);
+      const physicalSlot = capture.image.stores[0]!.slot;
+      const physicalWitness = capture.sources.find((witness) => witness.slot === physicalSlot);
+      const zeroWitness = capture.sources.find((witness) => witness.slot === zeroCaller.slot);
+      const oneSecondWitness = capture.sources.find((witness) => witness.slot === oneSecondCaller.slot);
+      expect([zeroWindow, oneSecond]).toContain(physicalWitness?.store);
+      expect(zeroWitness?.store).toBe(zeroWindow);
+      expect(oneSecondWitness?.store).toBe(oneSecond);
+
+      const zeroClaim = preparePassiveTransferClaim(target.graph, target.graph.api.query, input, {
+        revalidateAfterMs: 0,
+      });
+      let oneSecondClaim: typeof zeroClaim | undefined;
+      let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+      let adoptionPublished = false;
+      try {
+        oneSecondClaim = preparePassiveTransferClaim(target.graph, target.graph.api.query, input, {
+          revalidateAfterMs: 1000,
+        });
+        if (oneSecondClaim === undefined) throw new Error("The second caller claim was not prepared");
+        const secondClaim = oneSecondClaim;
+        expect(target.keyCalls()).toBe(2);
+        expect(target.backend.calls).toHaveLength(0);
+        const receiverKeys = target.keyCalls();
+        expect(zeroClaim.store.identity).toBe(secondClaim.store.identity);
+        expect(() => zeroClaim.store.status.get()).toThrow(TypeError);
+
+        const targetZero = computed(() => zeroClaim.store.status.get());
+        const targetZeroAlias = computed(() =>
+          zeroClaim.store.pending.get() ? "pending" : zeroClaim.store.status.get(),
+        );
+        const targetOneSecond = computed(() => secondClaim.store.status.get());
+        const sourceRows = [
+          { slot: physicalSlot, claim: zeroClaim },
+          { slot: zeroCaller.slot, claim: zeroClaim },
+          { slot: oneSecondCaller.slot, claim: secondClaim },
+        ];
+        const reactiveRows = [
+          { slot: capture.image.roots[0]!, target: targetZero, construction: captureReactiveConstruction(targetZero) },
+          { slot: capture.image.roots[1]!, target: targetZeroAlias, construction: captureReactiveConstruction(targetZeroAlias) },
+          { slot: capture.image.roots[2]!, target: targetOneSecond, construction: captureReactiveConstruction(targetOneSecond) },
+        ];
+        const adoptionOptions = {
+          graphs: [target.graph],
+          sources: sourceRows,
+          reactive: reactiveRows,
+          codec: profileTransferCodec,
+          mappedStateWrites: [],
+        };
+        const wrongWindowImage = {
+          ...capture.image,
+          callers: capture.image.callers.map((caller) =>
+            caller.slot === zeroCaller.slot
+              ? { ...caller, window: { kind: "finite" as const, milliseconds: 1000 } }
+              : caller,
+          ),
+        } as typeof capture.image;
+        expect(() => prepareRequiredTransferAdoption(wrongWindowImage, adoptionOptions)).toThrow(TypeError);
+        const collapsedRows = [
+          sourceRows[0]!,
+          sourceRows[1]!,
+          { slot: oneSecondCaller.slot, claim: zeroClaim },
+        ];
+        expect(() =>
+          prepareRequiredTransferAdoption(capture.image, { ...adoptionOptions, sources: collapsedRows }),
+        ).toThrow(TypeError);
+        const crossedRows = [
+          sourceRows[0]!,
+          { slot: zeroCaller.slot, claim: secondClaim },
+          { slot: oneSecondCaller.slot, claim: zeroClaim },
+        ];
+        expect(() =>
+          prepareRequiredTransferAdoption(capture.image, { ...adoptionOptions, sources: crossedRows }),
+        ).toThrow(TypeError);
+        expect(target.keyCalls()).toBe(receiverKeys);
+        expect(target.backend.calls).toHaveLength(0);
+        expect(() => zeroClaim.store.status.get()).toThrow(TypeError);
+
+        const preparedAdoption = prepareRequiredTransferAdoption(capture.image, adoptionOptions);
+        adoption = preparedAdoption;
+        const commit = preparedAdoption.seal();
+        if (commit === undefined) throw new Error("The caller-slot adoption did not seal");
+        commit.publish();
+        adoptionPublished = true;
+        commit.notifications.deliver();
+        await Promise.all([preparedAdoption.retired, zeroClaim.retired, secondClaim.retired]);
+
+        expect(targetZero.get()).toBe("stale");
+        expect(targetZeroAlias.get()).toBe("stale");
+        expect(targetOneSecond.get()).toBe("ready");
+        await expect(secondClaim.store.ready).resolves.toEqual({ count: 2 });
+        expect(target.backend.calls).toHaveLength(0);
+        expect(zeroClaim.store.value.get()).toBe(secondClaim.store.value.get());
+        expect(zeroClaim.store.progress.get()).toBe(secondClaim.store.progress.get());
+        expect(zeroClaim.store.status).not.toBe(secondClaim.store.status);
+        expect(zeroClaim.store.pending).not.toBe(secondClaim.store.pending);
+        expect(target.backend.calls).toHaveLength(0);
+      } finally {
+        if (!adoptionPublished) {
+          adoption?.discard();
+          zeroClaim.discard();
+          oneSecondClaim?.discard();
+        }
+        await Promise.all(oneSecondClaim === undefined
+          ? [zeroClaim.retired]
+          : [zeroClaim.retired, oneSecondClaim.retired]);
+      }
+    } finally {
+      source.graph.dispose();
+      target.graph.dispose();
+    }
+  });
+
+  it("starts an empty passive query only when ready is requested after publication", async () => {
+    const source = fixture();
+    const target = fixture();
+    const input = { id: "passive-empty" };
+    try {
+      const sourceStore = source.graph.api.query(input, { snapshot: false });
+      const sourceReady = sourceStore.ready;
+      source.backend.resolve(source.backend.calls[0]!, { count: 1 });
+      await expect(sourceReady).resolves.toEqual({ count: 1 });
+      const sourceRoot = computed(() => sourceStore.status.get());
+      expect(sourceRoot.get()).toBe("ready");
+
+      const capture = prepareRequiredTransferCapture({
+        graphs: [source.graph],
+        roots: [{ source: sourceRoot, construction: captureReactiveConstruction(sourceRoot) }],
+        codec: profileTransferCodec,
+      });
+      const captureCommit = capture.seal();
+      if (captureCommit === undefined) throw new Error("The empty-base capture did not seal");
+      captureCommit.publish();
+      captureCommit.notifications.deliver();
+      await capture.retired;
+      expect(capture.image.stores).toHaveLength(1);
+      expect(capture.image.stores[0]!.hasValue).toBe(false);
+      expect(capture.image.callers).toHaveLength(1);
+
+      const claim = preparePassiveTransferClaim(target.graph, target.graph.api.query, input, { snapshot: false });
+      expect(target.keyCalls()).toBe(1);
+      expect(target.backend.calls).toHaveLength(0);
+      expect(() => claim.store.ready).toThrow(TypeError);
+      const targetRoot = computed(() => claim.store.status.get());
+      let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+      let adoptionPublished = false;
+      try {
+        adoption = prepareRequiredTransferAdoption(capture.image, {
+          graphs: [target.graph],
+          sources: [
+            { slot: capture.image.stores[0]!.slot, claim },
+            { slot: capture.image.callers[0]!.slot, claim },
+          ],
+          reactive: [{
+            slot: capture.image.roots[0]!,
+            target: targetRoot,
+            construction: captureReactiveConstruction(targetRoot),
+          }],
+          codec: profileTransferCodec,
+          mappedStateWrites: [],
+        });
+        const commit = adoption.seal();
+        if (commit === undefined) throw new Error("The empty-base adoption did not seal");
+        commit.publish();
+        adoptionPublished = true;
+        commit.notifications.deliver();
+        await Promise.all([adoption.retired, claim.retired]);
+        expect(target.backend.calls).toHaveLength(0);
+        expect(claim.store.status.get()).toBe("empty");
+
+        const ready = claim.store.ready;
+        expect(target.backend.calls).toHaveLength(1);
+        expect(target.backend.calls[0]).toMatchObject({ input });
+        expect(target.keyCalls()).toBe(1);
+        target.backend.resolve(target.backend.calls[0]!, { count: 9 });
+        await expect(ready).resolves.toEqual({ count: 9 });
+        expect(claim.store.value.get()).toEqual({ count: 9 });
+      } finally {
+        if (!adoptionPublished) {
+          adoption?.discard();
+          claim.discard();
+        }
+        await claim.retired;
+      }
+    } finally {
+      source.graph.dispose();
+      target.graph.dispose();
+    }
+  });
+
+  it("keeps discarded query facades guarded without revoking an existing Store", async () => {
+    const { backend, graph } = fixture();
+    const input = { id: "existing-passive" };
+    try {
+      const physical = graph.api.query(input);
+      const ready = physical.ready;
+      backend.resolve(backend.calls[0]!, { count: 7 });
+      await expect(ready).resolves.toEqual({ count: 7 });
+
+      const claim = preparePassiveTransferClaim(graph, graph.api.query, input);
+      expect(claim.store.identity).toBe(physical.identity);
+      expect(() => claim.store.value.get()).toThrow(TypeError);
+      claim.discard();
+      await claim.retired;
+      expect(() => claim.store.value.get()).toThrow(TypeError);
+      expect(() => claim.store.status.get()).toThrow(TypeError);
+      expect(() => claim.store.pending.get()).toThrow(TypeError);
+      expect(() => claim.store.progress.get()).toThrow(TypeError);
+      expect(physical.value.get()).toEqual({ count: 7 });
+      expect(physical.status.get()).toBe("ready");
+
+      const again = graph.api.query(input);
+      expect(again.identity).toBe(physical.identity);
+      expect(again.value.get()).toEqual({ count: 7 });
+      expect(backend.calls).toHaveLength(1);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+});
+
+it("keeps a passive bound query claim on its exact profile at a shared key", async () => {
+  const f = fixture();
+  const context = createBindingContext(f.graph);
+  let firstFetches = 0;
+  let secondFetches = 0;
+  const firstProfile = {};
+  const secondProfile = {};
+  const first = bindOperation(f.graph, f.query, {
+    context,
+    profile: firstProfile,
+    fetch: async () => {
+      firstFetches += 1;
+      return { count: 11 };
+    },
+  });
+  const second = bindOperation(f.graph, f.query, {
+    context,
+    profile: secondProfile,
+    fetch: async () => {
+      secondFetches += 1;
+      return { count: 22 };
+    },
+  });
+  const input = { id: "shared" };
+  const controller = new AbortController();
+  try {
+    const beforeKeys = f.keyCalls();
+    const claim = preparePassiveTransferClaim(f.graph, first, input, { abortSignal: controller.signal });
+    expect(f.keyCalls()).toBe(beforeKeys + 1);
+    expect(firstFetches).toBe(0);
+    expect(secondFetches).toBe(0);
+    expect(() => claim.store.status.get()).toThrow(TypeError);
+    controller.abort();
+    claim.discard();
+    await claim.retired;
+
+    const secondStore = second.member(input);
+    await expect(secondStore.ready).resolves.toEqual({ count: 22 });
+    const firstStore = first.member(input);
+    await expect(firstStore.ready).resolves.toEqual({ count: 11 });
+    expect(firstFetches).toBe(1);
+    expect(secondFetches).toBe(1);
+    expect(f.keyCalls()).toBe(beforeKeys + 3);
+  } finally {
+    f.graph.dispose();
+  }
 });

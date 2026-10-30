@@ -2,6 +2,14 @@
  * does not open a stream or make a request. */
 import {
   adopt,
+  captureReactiveConstruction,
+  createTransferScope,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
+  prepareRequiredTransferCapture,
+  prepareTransferOperation,
+  prepareTransferOperationRetirement,
+  prepareTransferScopeSuccessors,
   AEOLIA_TAGGED_ENCODING,
   Signal,
   afterPropagation,
@@ -48,6 +56,7 @@ import {
   type CreateQueryInput,
   type CreateStoreInput,
   type CreateStreamInput,
+  type Computed,
   type DefineContractInput,
   type FetchOptions,
   type QueryAcquisition,
@@ -73,11 +82,30 @@ import {
   type PositionedStoreRestoration,
   type Observer,
   type QueryStore,
+  type Readable,
   type StoreIdentity,
   type TypedTarget,
   snapshot,
   type AdoptionReport,
   type AdoptionReportV2,
+  type ExistingNativeValueOptions,
+  type MutationTransferSource,
+  type NativeStoreFor,
+  type NativeTransferSource,
+  type PassiveTransferClaim,
+  type QueryTransferSource,
+  type ReactiveConstruction,
+  type RequiredTransferAdoptionOptions,
+  type RequiredTransferCaptureOptions,
+  type RequiredTransferCodec,
+  type TransferCommit,
+  type TransferNotifications,
+  type TransferOperation,
+  type TransferOperationDispatch,
+  type TransferPublication,
+  type TransferScope,
+  type TransferScopeSuccessor,
+  type TransferSlot,
   type AdoptedEntryV2,
   type AdoptOptionsV2,
   type QueryBindingHandle,
@@ -1335,3 +1363,53 @@ function publicRetirementTypes(
 }
 
 void publicRetirementTypes;
+
+function publicPassiveTransferTypeSurface<Source extends NativeTransferSource>(
+  graph: Graph,
+  source: Source,
+  input: unknown,
+  options: ExistingNativeValueOptions,
+): NativeStoreFor<Source> {
+  const claim: PassiveTransferClaim<Source> = preparePassiveTransferClaim(graph, source, input, options);
+  const store: NativeStoreFor<Source> = claim.store;
+  const retirement: Promise<void> = claim.retired;
+  claim.discard();
+  void retirement;
+  return store;
+}
+
+function publicRequiredTransferTypeSurface(
+  graph: Graph,
+  source: QueryTransferSource,
+  target: QueryStore<unknown, unknown>,
+  mutation: MutationTransferSource,
+  carrier: object,
+  root: Readable<unknown>,
+  construction: ReactiveConstruction<unknown>,
+  codec: RequiredTransferCodec,
+): void {
+  const scope: TransferScope = createTransferScope(graph, source, target);
+  const dispatch: TransferOperationDispatch = { role: "raw", source: mutation, input: carrier };
+  const operation = prepareTransferOperation([scope], [dispatch]);
+  const operationHandle: TransferOperation = operation.operation;
+  const successor: TransferScopeSuccessor = { operation: operationHandle, predecessor: scope, graph, source, input };
+  const operationRetirement: TransferPublication = prepareTransferOperationRetirement(operationHandle);
+  const successors: TransferPublication & { readonly scopes: readonly TransferScope[] } =
+    prepareTransferScopeSuccessors([]);
+  const commit: TransferCommit | undefined = operation.seal();
+  const notifications: TransferNotifications | undefined = commit?.notifications;
+  const slot: TransferSlot | undefined = undefined;
+  const sourceConstruction: ReactiveConstruction<unknown> = captureReactiveConstruction(root as Computed<unknown>);
+  const captureOptions: RequiredTransferCaptureOptions = {
+    graphs: [graph], roots: [{ source: root, construction }], codec,
+  };
+  const capture = prepareRequiredTransferCapture(captureOptions);
+  const adoptionOptions: RequiredTransferAdoptionOptions = {
+    graphs: [graph], sources: [], reactive: [], codec, mappedStateWrites: [],
+  };
+  const adoption = prepareRequiredTransferAdoption(capture.image, adoptionOptions);
+  void [operationRetirement, successors, notifications, slot, adoption, successor, sourceConstruction];
+}
+
+void publicPassiveTransferTypeSurface;
+void publicRequiredTransferTypeSurface;

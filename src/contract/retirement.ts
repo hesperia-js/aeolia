@@ -9,6 +9,8 @@ type PhysicalWorkKind =
   | "projection-return"
   | "cleanup";
 
+import { noteTransferChange, registerTransferWork, releaseTransferWork } from "./query-policy.ts";
+
 const NativePromise = Promise;
 const nativePromisePrototype = NativePromise.prototype;
 const nativeResolve = NativePromise.resolve;
@@ -207,6 +209,7 @@ function completeRetirement(owner: RetirementOwner): void {
     recordCleanupFailure(failed, cause);
     return;
   }
+  noteTransferChange(owner);
   owner.resolve = undefined;
   owner.reject = undefined;
   if (failures.length === 0) resolve();
@@ -214,10 +217,13 @@ function completeRetirement(owner: RetirementOwner): void {
 }
 
 export function beginPhysicalWork(owner: RetirementOwner, kind: PhysicalWorkKind): PhysicalWork {
+  const root = rootOwner(owner);
+  noteTransferChange(root);
+  const order = root.nextOrder++;
   const work: PhysicalWork = {
     owner,
     kind,
-    order: rootOwner(owner).nextOrder++,
+    order,
     active: true,
     cleanupFailed: false,
   };
@@ -225,13 +231,17 @@ export function beginPhysicalWork(owner: RetirementOwner, kind: PhysicalWorkKind
     let current: RetirementOwner | undefined = owner;
     current !== undefined;
     current = current.parent
-  )
+  ) {
+    noteTransferChange(current);
     current.work.add(work);
+  }
+  noteTransferChange(work);
   return work;
 }
 
 export function finishPhysicalWork(work: PhysicalWork): void {
   if (!work.active) return;
+  noteTransferChange(work);
   work.active = false;
   if (!work.cleanupFailed) {
     work.original = undefined;
@@ -242,21 +252,26 @@ export function finishPhysicalWork(work: PhysicalWork): void {
     current !== undefined;
     current = current.parent
   ) {
+    noteTransferChange(current);
     current.work.delete(work);
     completeRetirement(current);
   }
+  releaseTransferWork(work);
 }
 
 export function recordCleanupFailure(work: PhysicalWork, cause: unknown): void {
   if (work.cleanupFailed) return;
+  noteTransferChange(work);
   work.cleanupFailed = true;
   const failure = { order: work.order, cause, work };
   for (
     let current: RetirementOwner | undefined = work.owner;
     current !== undefined;
     current = current.parent
-  )
+  ) {
+    noteTransferChange(current);
     current.failures.push(failure);
+  }
 }
 
 export function observePhysicalWork(
@@ -265,6 +280,7 @@ export function observePhysicalWork(
   cleanup = false,
   source?: unknown,
 ): void {
+  noteTransferChange(work);
   work.original = arguments.length >= 4 ? source : original;
   work.continuation = original;
   void nativeApply(nativeThen, original, [
@@ -278,6 +294,7 @@ export function observePhysicalWork(
 
 export function physicalCleanup(owner: RetirementOwner, action: () => void): void {
   const work = beginPhysicalWork(owner, "cleanup");
+  registerTransferWork(owner, work);
   try {
     action();
   } catch (cause) {
@@ -293,11 +310,13 @@ export function retireOwner(
   dispose: (work: PhysicalWork) => void,
 ): Promise<void> {
   if (owner.promise !== undefined) return owner.promise;
+  noteTransferChange(owner);
   owner.promise = createPhysicalPromise<void>((resolve, reject) => {
     owner.resolve = resolve;
     owner.reject = reject;
   });
   // Disposal may synchronously reenter retirement before it returns.
+  noteTransferChange(owner);
   owner.closing = true;
   const work = beginPhysicalWork(owner, "cleanup");
   try {
@@ -306,6 +325,7 @@ export function retireOwner(
     recordCleanupFailure(work, cause);
   } finally {
     finishPhysicalWork(work);
+    noteTransferChange(owner);
     owner.closed = true;
     owner.closing = false;
     completeRetirement(owner);

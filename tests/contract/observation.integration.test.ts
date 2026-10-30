@@ -5,6 +5,11 @@ import {
   createGraph,
   createQuery,
   createStream,
+  computed,
+  captureReactiveConstruction,
+  prepareRequiredTransferCapture,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
   defineContract,
   Fault,
   observeStore,
@@ -14,6 +19,8 @@ import {
   type ObservationLease,
   type QueryStore,
   type ValueOptions,
+  type ClosedEncodedValue,
+  type RequiredTransferCodec,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
@@ -433,5 +440,105 @@ it("cannot acquire through fabricated query wrappers, another graph or a dispose
   } finally {
     f.graph.dispose();
     other.graph.dispose();
+  }
+});
+
+it("maps cached observation metadata only to an existing receiver publisher", async () => {
+  const source = fixture();
+  const target = fixture();
+  const missing = fixture();
+  const codec: RequiredTransferCodec = {
+    encodeValue: (value) => value as ClosedEncodedValue,
+    encodeFailure: (cause) => String(cause),
+    decodeValue: (value) => value,
+    decodeFailure: (failure) => new Error(String(failure)),
+  };
+  let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
+  let claim: ReturnType<typeof preparePassiveTransferClaim> | undefined;
+  let missingClaim: ReturnType<typeof preparePassiveTransferClaim> | undefined;
+  let capturePublished = false;
+  let adoptionPublished = false;
+  let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+  try {
+    for (const [f, value] of [[source, 2], [target, 4], [missing, 6]] as const) {
+      const ready = f.store.ready;
+      f.backend.resolve(f.backend.calls[0]!, value);
+      await ready;
+    }
+
+    const sourceLease = observeStore(source.graph, source.store);
+    const sourceDerived = computed(() => sourceLease.active.get() && sourceLease.issue.get() === undefined);
+    expect(sourceDerived.get()).toBe(true);
+    capture = prepareRequiredTransferCapture({
+      graphs: [source.graph],
+      roots: [{ source: sourceDerived, construction: captureReactiveConstruction(sourceDerived) }],
+      codec,
+    });
+    const captureCommit = capture.seal();
+    if (captureCommit === undefined) throw new Error("The observation capture did not seal");
+    captureCommit.publish();
+    capturePublished = true;
+    captureCommit.notifications.deliver();
+    await capture.retired;
+
+    const targetLease = observeStore(target.graph, target.store);
+    expect(targetLease.active.get()).toBe(true);
+    expect(targetLease.issue.get()).toBeUndefined();
+    claim = preparePassiveTransferClaim(target.graph, target.binding, undefined);
+    const targetDerived = computed(() => targetLease.active.get() && targetLease.issue.get() === undefined);
+    const targetConstruction = captureReactiveConstruction(targetDerived);
+    const image = capture.image;
+    const nativeSource = image.stores[0];
+    if (nativeSource === undefined) throw new Error("The observation image omitted its native source");
+    adoption = prepareRequiredTransferAdoption(image, {
+      graphs: [target.graph],
+      sources: [{ slot: nativeSource.slot, claim }],
+      reactive: [{ slot: image.roots[0]!, target: targetDerived, construction: targetConstruction }],
+      codec,
+      mappedStateWrites: [],
+    });
+    const adoptionCommit = adoption.seal();
+    if (adoptionCommit === undefined) throw new Error("The observation adoption did not seal");
+    adoptionCommit.publish();
+    adoptionPublished = true;
+    expect(targetDerived.get()).toBe(true);
+    expect(targetLease.active.get()).toBe(true);
+    adoptionCommit.notifications.deliver();
+    await adoption.retired;
+
+    const browserIssue = Object.freeze({ kind: "browser" });
+    expect(targetLease.publish(browserIssue)).toBe(true);
+    expect(targetDerived.get()).toBe(false);
+    expect(sourceLease.issue.get()).toBeUndefined();
+
+    missingClaim = preparePassiveTransferClaim(missing.graph, missing.binding, undefined);
+    const missingDerived = computed(() => missingClaim!.store.value.get() !== undefined);
+    const missingConstruction = captureReactiveConstruction(missingDerived);
+    expect(() =>
+      prepareRequiredTransferAdoption(image, {
+        graphs: [missing.graph],
+        sources: [{ slot: nativeSource.slot, claim: missingClaim! }],
+        reactive: [{ slot: image.roots[0]!, target: missingDerived, construction: missingConstruction }],
+        codec,
+        mappedStateWrites: [],
+      }),
+    ).toThrow(TypeError);
+    missingClaim.discard();
+    await missingClaim.retired;
+    missingClaim = undefined;
+    const recoveredPublisher = observeStore(missing.graph, missing.store);
+    expect(recoveredPublisher.active.get()).toBe(true);
+  } finally {
+    if (!adoptionPublished) adoption?.discard();
+    if (!capturePublished) capture?.discard();
+    if (claim !== undefined && !adoptionPublished) claim.discard();
+    if (missingClaim !== undefined) missingClaim.discard();
+    if (adoption !== undefined) await adoption.retired.then(() => undefined, () => undefined);
+    if (claim !== undefined) await claim.retired.then(() => undefined, () => undefined);
+    if (missingClaim !== undefined) await missingClaim.retired.then(() => undefined, () => undefined);
+    if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
+    source.graph.dispose();
+    target.graph.dispose();
+    missing.graph.dispose();
   }
 });

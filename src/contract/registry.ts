@@ -13,6 +13,7 @@ import { Fault } from "../fault.ts";
 import type { QueryBinding, TypedTarget } from "./query-binding.ts";
 import type { Unsubscribe } from "../fault.ts";
 import { assertGraphOpen, assertStoreOpen, reportContinuationError } from "./faults.ts";
+import { noteTransferChange } from "./query-policy.ts";
 import type {
   BindingAddressRuntime,
   BindingContextRuntime,
@@ -41,6 +42,43 @@ export const runtimeByStore = new WeakMap<object, StoreRuntime<unknown>>();
 /** Exact query wrappers; inheriting from a genuine wrapper grants no ticket. */
 export const queryRuntimeByStore = new WeakMap<object, StoreRuntime<unknown>>();
 
+interface DormantStoreHandle {
+  readonly runtime: StoreRuntime<any>;
+  readonly isPublished: () => boolean;
+  readonly query: boolean;
+}
+const dormantStoreHandles = new WeakMap<object, DormantStoreHandle>();
+
+/** @internal Registers a private Store wrapper before the atomic receiver publication. */
+export function registerDormantStoreHandle<T>(
+  handle: object,
+  runtime: StoreRuntime<T>,
+  isPublished: () => boolean,
+  query = true,
+): void {
+  if (handle === runtime.store || runtimeByStore.has(handle) || queryRuntimeByStore.has(handle))
+    throw new TypeError("A passive claim must use a fresh Store wrapper");
+  if (typeof isPublished !== "function") throw new TypeError("Expected a native publication predicate");
+  if (typeof query !== "boolean") throw new TypeError("Expected a native Store role");
+  noteTransferChange(handle);
+  dormantStoreHandles.set(handle, { runtime, isPublished, query });
+  runtimeByStore.set(handle, runtime as StoreRuntime<unknown>);
+  if (query) queryRuntimeByStore.set(handle, runtime as StoreRuntime<unknown>);
+}
+
+/** @internal Refuses a pre-registered passive Store until its transfer publishes. */
+export function assertStoreHandlePublished(handle: object): void {
+  const claim = dormantStoreHandles.get(handle);
+  if (claim === undefined) return;
+  if (
+    runtimeByStore.get(handle) !== claim.runtime ||
+    (claim.query && queryRuntimeByStore.get(handle) !== claim.runtime) ||
+    (!claim.query && queryRuntimeByStore.has(handle))
+  )
+    throw new TypeError("The passive Store handle has changed");
+  if (!claim.isPublished()) throw new TypeError("The passive Store handle is still dormant");
+}
+
 /** Runtime lookup for graph objects used by internal adapters. */
 export const graphRuntimeByGraph = new WeakMap<object, GraphRuntimeState<any>>();
 
@@ -48,10 +86,14 @@ export function registerProjection(graph: Graph, projection: GraphProjection): U
   const state = graphRuntimeByGraph.get(graph as object);
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
+  noteTransferChange(state);
+  noteTransferChange(projection);
   state.projections.add(projection);
   let active = true;
   return () => {
     if (!active) return;
+    noteTransferChange(state);
+    noteTransferChange(projection);
     active = false;
     state.projections.delete(projection);
   };
@@ -66,10 +108,14 @@ export function reportGraphContinuationError(graph: Graph, error: unknown): void
 export function runtimeForStore(value: unknown): StoreRuntime<unknown> | undefined {
   if (value === null || (typeof value !== "object" && typeof value !== "function"))
     return undefined;
+  assertStoreHandlePublished(value as object);
   let current: object | null = value;
   while (current !== null) {
     const runtime = runtimeByStore.get(current);
-    if (runtime !== undefined) return runtime;
+    if (runtime !== undefined) {
+      assertStoreHandlePublished(current);
+      return runtime;
+    }
     current = Object.getPrototypeOf(current) as object | null;
   }
   return undefined;
@@ -193,6 +239,9 @@ export function bindingAddress(binding: StoreBindingRuntime, key: string): Bindi
   let address = binding.addresses.get(key);
   if (address === undefined) {
     address = { binding, key, operations: new Set(), guard: {} };
+    noteTransferChange(binding);
+    noteTransferChange(binding.handle);
+    noteTransferChange(address);
     binding.addresses.set(key, address);
   }
   return address;
@@ -200,9 +249,21 @@ export function bindingAddress(binding: StoreBindingRuntime, key: string): Bindi
 
 export function changeBoundAddress<T>(runtime: StoreRuntime<T>): void {
   const address = storeBindingAddress(runtime);
-  if (address !== undefined) address.guard = {};
-  if (runtime.readerScope !== undefined && runtime.binding !== undefined)
-    bindingAddress(runtime.binding, String(runtime.key)).guard = {};
+  if (address !== undefined) {
+    noteTransferChange(runtime);
+    noteTransferChange(address.binding);
+    noteTransferChange(address.binding.handle);
+    noteTransferChange(address);
+    address.guard = {};
+  }
+  if (runtime.readerScope !== undefined && runtime.binding !== undefined) {
+    const aggregate = bindingAddress(runtime.binding, String(runtime.key));
+    noteTransferChange(runtime);
+    noteTransferChange(runtime.binding);
+    noteTransferChange(runtime.binding.handle);
+    noteTransferChange(aggregate);
+    aggregate.guard = {};
+  }
 }
 
 interface StoreAddressOperationRecord {
@@ -233,9 +294,15 @@ export function beginStoreAddress<T>(runtime: StoreRuntime<T>): object | undefin
       ? bindingAddress(runtime.binding, String(runtime.key))
       : undefined;
   const token = {};
+  noteTransferChange(runtime);
+  noteTransferChange(address.binding);
+  noteTransferChange(address.binding.handle);
+  noteTransferChange(address);
   address.operations.add(token);
   address.guard = {};
   if (aggregate !== undefined && aggregate !== address) {
+    noteTransferChange(aggregate);
+    noteTransferChange(aggregate.binding.handle);
     aggregate.operations.add(token);
     aggregate.guard = {};
   }
@@ -251,9 +318,18 @@ export function endStoreAddress<T>(runtime: StoreRuntime<T>, token: object | und
   if (token === undefined) return;
   const operation = storeAddressOperations.get(token);
   if (operation === undefined || operation.runtime !== runtime) return;
+  noteTransferChange(runtime);
+  noteTransferChange(operation.address.binding);
+  noteTransferChange(operation.address.binding.handle);
+  noteTransferChange(operation.address);
   storeAddressOperations.delete(token);
   if (operation.address.operations.delete(token)) operation.address.guard = {};
-  if (operation.aggregate?.operations.delete(token)) operation.aggregate.guard = {};
+  if (operation.aggregate?.operations.has(token)) {
+    noteTransferChange(operation.aggregate);
+    noteTransferChange(operation.aggregate.binding.handle);
+    operation.aggregate.operations.delete(token);
+    operation.aggregate.guard = {};
+  }
 }
 
 export function beginBindingAddress(
@@ -263,6 +339,9 @@ export function beginBindingAddress(
   if (binding === undefined) return undefined;
   const address = bindingAddress(binding, key);
   const token = {};
+  noteTransferChange(binding);
+  noteTransferChange(binding.handle);
+  noteTransferChange(address);
   address.operations.add(token);
   address.guard = {};
   return token;
@@ -275,7 +354,13 @@ export function endBindingAddress(
 ): void {
   if (binding === undefined || token === undefined) return;
   const address = binding.addresses.get(key);
-  if (address?.operations.delete(token)) address.guard = {};
+  if (address?.operations.has(token)) {
+    noteTransferChange(binding);
+    noteTransferChange(binding.handle);
+    noteTransferChange(address);
+    address.operations.delete(token);
+    address.guard = {};
+  }
 }
 
 /** @internal One visible-fold kernel; retirement authority is a genuine native session record. */

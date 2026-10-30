@@ -45,7 +45,9 @@ interface NodeBase<T> {
   readonly name: string;
   readonly api: Readable<T>;
   readonly equals: (this: Signal<T>, a: T, b: T) => boolean;
-  readonly dependents: Map<ComputedNode<unknown>, number>;
+  dependents: Map<ComputedNode<unknown>, number>;
+  captureEpoch: number;
+  semanticEpoch: number;
   readonly watchers: WatchRecord[];
   subscriptions?: SubscriptionRecord[];
   readonly canonicalWatchers: Set<Watcher>;
@@ -66,6 +68,7 @@ interface NodeBase<T> {
 interface SignalNode<T> extends NodeBase<T> {
   readonly kind: "signal";
   value: T;
+  writeEpoch: number;
 }
 
 interface ComputedNode<T> extends NodeBase<T> {
@@ -80,9 +83,17 @@ interface ComputedNode<T> extends NodeBase<T> {
   error?: unknown;
   computing: boolean;
   marked: boolean;
+  adoptedBaseline?: AdoptedBaseline;
+  linkedBaseline?: AdoptedBaseline;
 }
 
 type Node<T> = SignalNode<T> | ComputedNode<T>;
+
+interface AdoptedBaseline {
+  readonly sources: readonly Node<unknown>[];
+  readonly epochs: readonly number[];
+  readonly semanticCurrent?: () => boolean;
+}
 
 interface ObserverState {
   readonly observer: Observer;
@@ -95,6 +106,7 @@ interface ObserverState {
 }
 
 const nodeByReadable = new WeakMap<object, Node<unknown>>();
+const constructionByNode = new WeakMap<Node<unknown>, ReactiveConstruction<unknown>>();
 const watcherNodes = new WeakSet<object>();
 const sourceNodesByWatcher = new WeakMap<object, Set<Node<unknown>>>();
 
@@ -120,6 +132,7 @@ let canonicalNotificationDepth = 0;
 let subscriptionDeliveryDepth = 0;
 let observerNotificationDepth = 0;
 let writeRefusalDepth = 0;
+let stateEqualityDepth = 0;
 
 interface PropagationState {
   readonly pendingSeeds: Set<Node<unknown>>;
@@ -135,6 +148,7 @@ const propagation: PropagationState = {
   batchDepth: 0,
 };
 
+const linkedEvaluationSeeds = new Set<Node<unknown>>();
 const pendingObserverNotifications = new Set<ObserverState>();
 const afterPropagationQueue = new Set<() => void>();
 
@@ -224,6 +238,7 @@ function addLiveEdge(source: Node<unknown>, dependent: ComputedNode<unknown>): v
   const count = source.dependents.get(dependent) ?? 0;
   source.dependents.set(dependent, count + 1);
   source.liveDependentRefs += 1;
+  source.captureEpoch += 1;
   if (!source.live && source.watcherRefs + source.liveDependentRefs > 0) activate(source);
 }
 
@@ -231,12 +246,14 @@ function attachObserver(state: ObserverState, node: Node<unknown>): void {
   if (node.observers.has(state)) return;
   node.observers.add(state);
   node.watcherRefs += 1;
+  node.captureEpoch += 1;
   if (!node.live) activate(node);
 }
 
 function detachObserver(state: ObserverState, node: Node<unknown>): void {
   if (!node.observers.delete(state)) return;
   node.watcherRefs = Math.max(0, node.watcherRefs - 1);
+  node.captureEpoch += 1;
   if (node.live && node.watcherRefs + node.liveDependentRefs === 0) deactivate(node);
 }
 
@@ -263,6 +280,7 @@ function removeLiveEdge(source: Node<unknown>, dependent: ComputedNode<unknown>)
   if (count <= 1) source.dependents.delete(dependent);
   else source.dependents.set(dependent, count - 1);
   source.liveDependentRefs = Math.max(0, source.liveDependentRefs - 1);
+  source.captureEpoch += 1;
   if (source.live && source.watcherRefs + source.liveDependentRefs === 0) deactivate(source);
 }
 
@@ -317,6 +335,7 @@ function notifyLiveness(node: Node<unknown>, live: boolean): void {
 function activate(node: Node<unknown>): void {
   if (node.live) return;
   node.live = true;
+  node.captureEpoch += 1;
   invokeLifecycle(node, node.watchedCallback);
   notifyLiveness(node, true);
   if (node.kind !== "computed") return;
@@ -328,6 +347,7 @@ function activate(node: Node<unknown>): void {
 function deactivate(node: Node<unknown>): void {
   if (!node.live) return;
   node.live = false;
+  node.captureEpoch += 1;
   if (node.kind === "computed") {
     for (const dependency of node.dependencies) {
       if (dependency !== node) removeLiveEdge(dependency, node);
@@ -343,6 +363,10 @@ function replaceDependencies(node: ComputedNode<unknown>, next: Node<unknown>[])
   const incoming = new Set(next);
   node.dependencies = next;
   node.dependencyTokens = new Map(next.map((dependency) => [dependency, dependency.token]));
+  node.captureEpoch += 1;
+  node.semanticEpoch += 1;
+  node.adoptedBaseline = undefined;
+  node.linkedBaseline = undefined;
   if (!node.live) return;
   for (const dependency of previous) {
     if (!incoming.has(dependency) && dependency !== node) removeLiveEdge(dependency, node);
@@ -404,6 +428,16 @@ function dependenciesChanged(
   });
 }
 
+function adoptedBaselineCurrent(baseline: AdoptedBaseline): boolean {
+  for (let index = 0; index < baseline.sources.length; index += 1) {
+    const source = baseline.sources[index]!;
+    if (source.semanticEpoch !== baseline.epochs[index]) return false;
+    if (source.kind === "computed" && source.adoptedBaseline !== undefined &&
+        !adoptedBaselineCurrent(source.adoptedBaseline)) return false;
+  }
+  return baseline.semanticCurrent?.() ?? true;
+}
+
 function dependencyChanged(node: ComputedNode<unknown>): boolean {
   return dependenciesChanged(node.dependencies, node.dependencyTokens);
 }
@@ -411,6 +445,21 @@ function dependencyChanged(node: ComputedNode<unknown>): boolean {
 function ensureFreshComputed<T>(node: ComputedNode<T>): void {
   if (node.computing) throw cycleFault(node as ComputedNode<unknown>);
   if (node.hasRun) {
+    if (node.adoptedBaseline !== undefined) {
+      if (adoptedBaselineCurrent(node.adoptedBaseline)) {
+        if (node.marked) {
+          node.marked = false;
+          node.captureEpoch += 1;
+        }
+        if (node.hasError) throw node.error;
+        return;
+      }
+      node.adoptedBaseline = undefined;
+      node.captureEpoch += 1;
+      recompute(node);
+      if (node.hasError) throw node.error;
+      return;
+    }
     if (node.live) {
       if (!node.marked && propagation.pendingSeeds.size === 0) {
         if (node.hasError) throw node.error;
@@ -430,7 +479,29 @@ function ensureFreshComputed<T>(node: ComputedNode<T>): void {
   if (node.hasError) throw node.error;
 }
 
+function queueLinkedEvaluation(node: ComputedNode<unknown>, previousToken: number): void {
+  if (node.token === previousToken) return;
+  if (propagation.inProgress) propagation.pendingSeeds.add(node);
+  else linkedEvaluationSeeds.add(node);
+}
+
+function flushLinkedEvaluationSeeds(): void {
+  if (
+    linkedEvaluationSeeds.size === 0 ||
+    trackingStack.length > 0 ||
+    stalenessWalkDepth > 0 ||
+    stateEqualityDepth > 0 ||
+    propagation.batchDepth > 0 ||
+    propagation.inProgress ||
+    subscriptionDeliveryDepth > 0 ||
+    nativeReadDepth > 0
+  ) return;
+  beginPropagation([]);
+}
+
 function recompute<T>(node: ComputedNode<T>): void {
+  const linkedFirstRun = !node.hasRun && node.linkedBaseline !== undefined && node.live;
+  const previousToken = node.token;
   const frame: ComputationFrame = {
     owner: node as ComputedNode<unknown>,
     dependencies: [],
@@ -475,6 +546,8 @@ function recompute<T>(node: ComputedNode<T>): void {
   if (node.explicitGraphId === undefined) node.graphId = frame.graphId;
   node.hasRun = true;
   node.marked = false;
+  node.captureEpoch += 1;
+  node.semanticEpoch += 1;
   if (!succeeded || thrown != null) {
     // A failed equality comparison is different from a failed computation:
     // the previous landing remains the cached value, and the comparison is
@@ -483,6 +556,7 @@ function recompute<T>(node: ComputedNode<T>): void {
     node.hasError = true;
     node.error = thrown;
     node.token += 1;
+    if (linkedFirstRun) queueLinkedEvaluation(node as ComputedNode<unknown>, previousToken);
     return;
   }
 
@@ -491,6 +565,7 @@ function recompute<T>(node: ComputedNode<T>): void {
   node.error = undefined;
   node.value = result as T;
   if (!hadValue || changed) node.token += 1;
+  if (linkedFirstRun) queueLinkedEvaluation(node as ComputedNode<unknown>, previousToken);
 }
 
 export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
@@ -504,19 +579,40 @@ export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
     return node.value;
   }
   if (node.computing) throw cycleFault(node as ComputedNode<unknown>);
+  let readFailure: unknown;
+  let readFailed = false;
   try {
     ensureFreshComputed(node);
+  } catch (error) {
+    readFailed = true;
+    readFailure = error;
   } finally {
     checkGraph(node as Node<unknown>, frame);
     if (frame !== undefined && node.kind === "computed") {
       frame.dependencyTokens.set(node as Node<unknown>, node.token);
     }
   }
-  if (node.hasError) throw node.error;
-  return node.value as T;
+  const value = node.value as T;
+  let notificationFailure: unknown;
+  let notificationFailed = false;
+  try {
+    flushLinkedEvaluationSeeds();
+  } catch (error) {
+    notificationFailed = true;
+    notificationFailure = error;
+  }
+  if (readFailed && notificationFailed)
+    throw new AggregateError([readFailure, notificationFailure], "Aeolia reactive read failed");
+  if (readFailed) throw readFailure;
+  if (notificationFailed) throw notificationFailure;
+  return value;
 }
 
-function markFrom(seeds: Iterable<Node<unknown>>): {
+function markFrom(
+  seeds: Iterable<Node<unknown>>,
+  protectedTransfers?: ReadonlySet<Node<unknown>>,
+  directAdoptions?: ReadonlySet<Node<unknown>>,
+): {
   readonly helperWatchers: WatchRecord[];
   readonly canonicalWatchers: Set<Watcher>;
   readonly subscriptions?: Set<SubscriptionRecord>;
@@ -531,8 +627,18 @@ function markFrom(seeds: Iterable<Node<unknown>>): {
     const current = queue[queueIndex++]!;
     if (visited.has(current)) continue;
     visited.add(current);
+    if (
+      protectedTransfers?.has(current) &&
+      !directAdoptions?.has(current) &&
+      current.kind === "computed" &&
+      (current.adoptedBaseline !== undefined || current.linkedBaseline !== undefined) &&
+      adoptedBaselineCurrent(current.adoptedBaseline ?? current.linkedBaseline!)
+    ) continue;
     const becameMarked = current.kind === "computed" && !current.marked;
-    if (becameMarked) current.marked = true;
+    if (becameMarked) {
+      current.marked = true;
+      current.captureEpoch += 1;
+    }
     for (const watcher of current.watchers) {
       if (watcher.active) reached.add(watcher);
     }
@@ -566,9 +672,15 @@ function markFrom(seeds: Iterable<Node<unknown>>): {
   };
 }
 
-function beginPropagation(seeds: Iterable<Node<unknown>>): void {
+function beginPropagation(
+  seeds: Iterable<Node<unknown>>,
+  protectedTransfers?: ReadonlySet<Node<unknown>>,
+  directAdoptions?: ReadonlySet<Node<unknown>>,
+): void {
   if (propagation.inProgress) {
     for (const seed of seeds) propagation.pendingSeeds.add(seed);
+    for (const seed of linkedEvaluationSeeds) propagation.pendingSeeds.add(seed);
+    linkedEvaluationSeeds.clear();
     return;
   }
   propagation.inProgress = true;
@@ -577,6 +689,8 @@ function beginPropagation(seeds: Iterable<Node<unknown>>): void {
   let pendingSubscriptions: Set<SubscriptionRecord> | undefined;
   try {
     for (const seed of seeds) propagation.pendingSeeds.add(seed);
+    for (const seed of linkedEvaluationSeeds) propagation.pendingSeeds.add(seed);
+    linkedEvaluationSeeds.clear();
     while (
       propagation.pendingSeeds.size > 0 ||
       (pendingSubscriptions?.size ?? 0) > 0 ||
@@ -586,7 +700,11 @@ function beginPropagation(seeds: Iterable<Node<unknown>>): void {
       if (propagation.pendingSeeds.size > 0) {
         const currentSeeds = new Set(propagation.pendingSeeds);
         propagation.pendingSeeds.clear();
-        const { helperWatchers, canonicalWatchers, subscriptions } = markFrom(currentSeeds);
+        const { helperWatchers, canonicalWatchers, subscriptions } = markFrom(
+          currentSeeds, protectedTransfers, directAdoptions,
+        );
+        protectedTransfers = undefined;
+        directAdoptions = undefined;
         if (subscriptions !== undefined) {
           for (const subscription of subscriptions)
             (pendingSubscriptions ??= new Set()).add(subscription);
@@ -707,12 +825,21 @@ function beginPropagation(seeds: Iterable<Node<unknown>>): void {
   throwOrAggregate(errors);
 }
 
-function invokeStateEquals<T>(node: SignalNode<T>, a: T, b: T): boolean {
+function invokeStateEquals<T>(
+  node: SignalNode<T>,
+  a: T,
+  b: T,
+  override?: (previous: T, proposed: T) => boolean,
+): boolean {
   const previousSuppressed = trackingSuppressed;
   trackingSuppressed += 1;
+  stateEqualityDepth += 1;
   try {
-    return node.equals.call(node.api, a, b);
+    return override === undefined
+      ? node.equals.call(node.api, a, b)
+      : override.call(node.api, a, b);
   } finally {
+    stateEqualityDepth -= 1;
     trackingSuppressed = previousSuppressed;
   }
 }
@@ -731,9 +858,18 @@ function writeState<T>(
   if (canonicalNotificationDepth > 0 || observerNotificationDepth > 0)
     throw watcherWriteFault(node as Node<unknown>);
   const equal = invokeStateEquals(node, node.value, value);
-  if (!current()) return false;
+  if (!current()) {
+    flushLinkedEvaluationSeeds();
+    return false;
+  }
   commit();
-  if (equal) return true;
+  node.writeEpoch += 1;
+  node.captureEpoch += 1;
+  if (equal) {
+    flushLinkedEvaluationSeeds();
+    return true;
+  }
+  node.semanticEpoch += 1;
   if (helperNotificationDepth > 0) {
     node.value = value;
     node.token += 1;
@@ -762,6 +898,7 @@ function removeWatchRecord(node: Node<unknown>, record: WatchRecord): void {
   const index = node.watchers.indexOf(record);
   if (index >= 0) node.watchers.splice(index, 1);
   node.watcherRefs = Math.max(0, node.watcherRefs - 1);
+  node.captureEpoch += 1;
   if (node.live && node.watcherRefs + node.liveDependentRefs === 0) deactivate(node);
 }
 
@@ -780,6 +917,7 @@ export function watchReadable(source: Readable<unknown>, observer: () => void): 
     };
     node.watchers.push(record);
     node.watcherRefs += 1;
+    node.captureEpoch += 1;
     if (!node.live) activate(node);
 
     let unsubscribed = false;
@@ -802,6 +940,7 @@ function removeSubscriptionRecord(node: Node<unknown>, record: SubscriptionRecor
     if (subscriptions.length === 0) node.subscriptions = undefined;
   }
   node.watcherRefs = Math.max(0, node.watcherRefs - 1);
+  node.captureEpoch += 1;
   if (node.live && node.watcherRefs + node.liveDependentRefs === 0) deactivate(node);
 }
 
@@ -836,6 +975,7 @@ export function subscribeReadable<T>(
       record = subscription;
       (sourceNode.subscriptions ??= []).push(subscription);
       sourceNode.watcherRefs += 1;
+      sourceNode.captureEpoch += 1;
       if (!sourceNode.live) activate(sourceNode);
 
       // A watched lifecycle callback can synchronously write this source. The
@@ -911,6 +1051,8 @@ function initializeNodeBase<T, K extends Node<T>["kind"]>(
     api,
     equals: options.equals ?? Object.is,
     dependents: new Map(),
+    captureEpoch: 0,
+    semanticEpoch: 0,
     watchers: [],
     canonicalWatchers: new Set(),
     observers: new Set(),
@@ -933,6 +1075,7 @@ export function initializeSignalNode<T>(
   const node: SignalNode<T> = {
     ...initializeNodeBase(api, "signal", options),
     value: initial,
+    writeEpoch: 0,
   };
   nodeByReadable.set(api, node as Node<unknown>);
   return node;
@@ -995,12 +1138,14 @@ function attachCanonicalSource(watcher: Watcher, node: Node<unknown>): void {
   if (node.canonicalWatchers.has(watcher)) return;
   node.canonicalWatchers.add(watcher);
   node.watcherRefs += 1;
+  node.captureEpoch += 1;
   if (!node.live) activate(node);
 }
 
 function detachCanonicalSource(watcher: Watcher, node: Node<unknown>): void {
   if (!node.canonicalWatchers.delete(watcher)) return;
   node.watcherRefs = Math.max(0, node.watcherRefs - 1);
+  node.captureEpoch += 1;
   if (node.live && node.watcherRefs + node.liveDependentRefs === 0) deactivate(node);
 }
 
@@ -1133,6 +1278,7 @@ export function observerTrack<T>(observer: Observer, run: () => T): T {
     }
   }
   if (pendingObserverNotifications.has(state) && !propagation.inProgress) beginPropagation([]);
+  else flushLinkedEvaluationSeeds();
   if (!succeeded) throw thrown;
   return result;
 }
@@ -1155,6 +1301,7 @@ export function observerCheck(observer: Observer): boolean {
     state.pending = false;
     pendingObserverNotifications.delete(state);
   }
+  flushLinkedEvaluationSeeds();
   return changed;
 }
 
@@ -1291,7 +1438,7 @@ export function batch<T>(run: () => T): T {
     failed = true;
   } finally {
     propagation.batchDepth = parentDepth;
-    if (parentDepth === 0 && propagation.batchSeeds.size > 0) {
+    if (parentDepth === 0 && (propagation.batchSeeds.size > 0 || linkedEvaluationSeeds.size > 0)) {
       const seeds = [...propagation.batchSeeds];
       propagation.batchSeeds.clear();
       try {
@@ -1312,6 +1459,7 @@ export function bindReadable(readable: Readable<unknown>, binding: ReactiveGraph
   if (node.graphId != null && node.graphId !== binding.graphId) {
     throw new Fault("cross-graph", [node.graphId, binding.graphId]);
   }
+  node.captureEpoch += 1;
   node.explicitGraphId = binding.graphId;
   node.graphId = binding.graphId;
   node.faultReporter = binding.reportFault;
@@ -1324,11 +1472,13 @@ export function onLivenessChange(
 ): Unsubscribe {
   const node = nodeFor(readable);
   node.livenessObservers.add(observer);
+  node.captureEpoch += 1;
   let active = true;
   return () => {
     if (!active) return;
     active = false;
     node.livenessObservers.delete(observer);
+    node.captureEpoch += 1;
   };
 }
 
@@ -1346,9 +1496,9 @@ export function onActualRead(readable: Readable<unknown>, observer: ReadObserver
 
 /** Read a writable state's committed value without invoking its public read path. */
 export function signalValue<T>(source: WritableSignal<T>): T {
-  const node = nodeFor(source);
+  const node = transferNode(source as Readable<unknown>);
   if (node.kind !== "signal") throw new TypeError("Expected a Signal.State");
-  return node.value;
+  return node.value as T;
 }
 
 /** Run code while rejecting reactive reads made by an optimistic predictor. */
@@ -1380,6 +1530,668 @@ export interface ReactiveGraphBinding {
   readonly reportFault?: FaultReporter;
 }
 
+
+const reactiveConstructionBrand = Symbol("Aeolia reactive construction");
+
+/** Native construction identity for a State or Computed, bound to its installed node. */
+export interface ReactiveConstruction<T> {
+  /** The exact readable returned by the native constructor. */
+  readonly source: Readable<T>;
+  /** The installed native node kind. */
+  readonly kind: "state" | "computed";
+  /** Private nominal identity; copied fields cannot authenticate a construction. */
+  readonly [reactiveConstructionBrand]: true;
+}
+
+/** A non-evaluating view of one node in a cached reactive closure. */
+export interface ReactiveTransferNode {
+  /** The exact native readable. */
+  readonly source: Readable<unknown>;
+  /** Native State or Computed kind. */
+  readonly kind: "state" | "computed";
+  /** Opaque construction identity for this node. */
+  readonly construction: ReactiveConstruction<unknown>;
+  /** Whether a Computed has completed an evaluation; true for State. */
+  readonly hasRun: boolean;
+  /** Whether a cached value is present, including present undefined. */
+  readonly hasValue: boolean;
+  /** Whether a cached failure is present. */
+  readonly hasError: boolean;
+  /** The cached value when hasValue is true. */
+  readonly value: unknown;
+  /** The cached failure when hasError is true. */
+  readonly error: unknown;
+  /** Exact immediate cached dependencies; an uninitialized node has none. */
+  readonly sources: readonly Readable<unknown>[];
+}
+
+/** Cached closure and its pure, non-evaluating currentness witness. */
+export interface ReactiveTransferCapture {
+  /** Root-first transitive native cached nodes, each listed once. */
+  readonly nodes: readonly ReactiveTransferNode[];
+  /** Return whether every captured epoch, edge and cache remains current. */
+  current(): boolean;
+}
+
+function transferQuiescent(): boolean {
+  return (
+    trackingStack.length === 0 &&
+    stalenessWalkDepth === 0 &&
+    stateEqualityDepth === 0 &&
+    activeWalk === undefined &&
+    propagation.batchDepth === 0 &&
+    !propagation.inProgress &&
+    propagation.pendingSeeds.size === 0 &&
+    propagation.batchSeeds.size === 0 &&
+    linkedEvaluationSeeds.size === 0 &&
+    helperNotificationDepth === 0 &&
+    canonicalNotificationDepth === 0 &&
+    observerNotificationDepth === 0 &&
+    subscriptionDeliveryDepth === 0
+  );
+}
+
+function transferNode(source: Readable<unknown>): Node<unknown> {
+  const node =
+    (typeof source === "object" && source !== null) || typeof source === "function"
+      ? nodeByReadable.get(source)
+      : undefined;
+  if (node === undefined || node.api !== source)
+    throw new TypeError("Expected an authentic Aeolia readable");
+  return node;
+}
+
+/** Return the stable opaque construction of an authentic native readable. */
+export function transferConstruction<T>(source: Readable<T>): ReactiveConstruction<T> {
+  const node = transferNode(source as Readable<unknown>);
+  let construction = constructionByNode.get(node);
+  if (construction === undefined) {
+    construction = Object.freeze({
+      source: node.api,
+      kind: node.kind === "signal" ? ("state" as const) : ("computed" as const),
+      [reactiveConstructionBrand]: true as const,
+    });
+    constructionByNode.set(node, construction);
+  }
+  return construction as ReactiveConstruction<T>;
+}
+
+/** Report whether an authentic native construction still has its original cache or State. */
+function transferConstructionInitial(source: Readable<unknown>): boolean {
+  const node = transferNode(source);
+  return node.kind === "signal" ? node.writeEpoch === 0 : !node.hasRun;
+}
+
+/** Walk the actual cached dependency closure without reading or evaluating it. */
+export function transferCapture(roots: readonly Readable<unknown>[]): ReactiveTransferCapture {
+  if (!transferQuiescent()) throw new TypeError("Reactive transfer requires a quiescent graph");
+  const pending = roots.map(transferNode);
+  const seen = new Set<Node<unknown>>();
+  const nodes: ReactiveTransferNode[] = [];
+  const witnesses: { readonly node: Node<unknown>; readonly epoch: number }[] = [];
+  for (let index = 0; index < pending.length; index += 1) {
+    const node = pending[index]!;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    const dependencies = node.kind === "computed" ? node.dependencies : [];
+    const sources = Object.freeze(dependencies.map((dependency) => dependency.api));
+    nodes.push(
+      Object.freeze({
+        source: node.api,
+        kind: node.kind === "signal" ? ("state" as const) : ("computed" as const),
+        construction: transferConstruction(node.api),
+        hasRun: node.kind === "signal" || node.hasRun,
+        hasValue: node.kind === "signal" || node.hasValue,
+        hasError: node.kind === "computed" && node.hasError,
+        value: node.value,
+        error: node.kind === "computed" ? node.error : undefined,
+        sources,
+      }),
+    );
+    witnesses.push({ node, epoch: node.captureEpoch });
+    for (const dependency of dependencies) pending.push(dependency);
+  }
+  const captured = Object.freeze(nodes);
+  return Object.freeze({
+    nodes: captured,
+    current: (): boolean => {
+      if (!transferQuiescent()) return false;
+      for (let index = 0; index < witnesses.length; index += 1) {
+        const { node, epoch } = witnesses[index]!;
+        if (node.captureEpoch !== epoch) return false;
+        if (node.kind === "computed") {
+          if (node.computing || node.marked) return false;
+          if (node.adoptedBaseline !== undefined) {
+            // The adopted baseline covers passive, uninitialized native facets.
+            if (!adoptedBaselineCurrent(node.adoptedBaseline)) return false;
+          } else if (node.hasRun) {
+            for (let sourceIndex = 0; sourceIndex < node.dependencies.length; sourceIndex += 1) {
+              const dependency = node.dependencies[sourceIndex]!;
+              if (node.dependencyTokens.get(dependency) !== dependency.token) return false;
+              if (dependency.kind === "computed" && !dependency.hasRun) return false;
+            }
+          }
+        }
+      }
+      return true;
+    },
+  });
+}
+
+
+/** A mapped State write staged for the same publication as cache adoption. */
+export interface ReactiveTransferWrite {
+  /** Exact native State to update. */
+  readonly target: WritableSignal<unknown>;
+  /** Prospective value; equality is decided during preparation. */
+  readonly value: unknown;
+  /** Trusted native policy comparator, called once with the exact State as receiver. */
+  readonly equals?: (previous: unknown, proposed: unknown) => boolean;
+}
+
+/** A cached Computed landing staged without invoking its evaluator. */
+export interface ReactiveTransferAdoption {
+  /** Exact native Computed to populate. */
+  readonly target: Computed<unknown>;
+  /** Actual mapped immediate dependencies in cached order. */
+  readonly sources: readonly Readable<unknown>[];
+  /** Cached value, including present undefined when hasValue is true. */
+  readonly value: unknown;
+  /** Cached failure when hasError is true. */
+  readonly error: unknown;
+  /** Whether a cached value is present. */
+  readonly hasValue: boolean;
+  /** Whether a cached failure is present. */
+  readonly hasError: boolean;
+  /** Trusted native semantic guard for Store facets omitted from the cache image. */
+  readonly semanticCurrent?: () => boolean;
+}
+
+/** Native-known dependency edges installed on an unrun Computed without evaluation. */
+export interface ReactiveTransferLink {
+  /** Authentic unrun native Computed whose cached fields remain untouched. */
+  readonly target: Computed<unknown>;
+  /** Exact immediate native dependencies to install before exposure. */
+  readonly sources: readonly Readable<unknown>[];
+}
+
+/** Prepared native reactive publication with a pure final guard and deferred delivery. */
+export interface ReactiveTransferPlan {
+  /** Check all preparation epochs without evaluating reactive or authored code. */
+  current(): boolean;
+  /** Read the value a planned State retains after prepared equality, before publication. */
+  valueFor(target: WritableSignal<unknown>): unknown;
+  /** Install the complete prebuilt State, cache and edge state without callbacks. */
+  publish(): void;
+  /** Deliver propagation and lifecycle callbacks after caller-wide publication. */
+  notify(): void;
+}
+
+interface PreparedTransferWrite {
+  readonly node: SignalNode<unknown>;
+  readonly value: unknown;
+  readonly changed: boolean;
+  readonly token: number;
+  readonly semanticEpoch: number;
+}
+
+interface PreparedTransferAdoption {
+  readonly node: ComputedNode<unknown>;
+  readonly sources: Node<unknown>[];
+  readonly tokens: Map<Node<unknown>, number>;
+  readonly baseline: AdoptedBaseline;
+  readonly value: unknown;
+  readonly error: unknown;
+  readonly hasValue: boolean;
+  readonly hasError: boolean;
+  readonly token: number;
+  graphId: string | undefined;
+}
+
+interface PreparedTransferLink {
+  readonly node: ComputedNode<unknown>;
+  readonly sources: Node<unknown>[];
+  readonly tokens: Map<Node<unknown>, number>;
+  readonly baseline: AdoptedBaseline;
+  graphId: string | undefined;
+}
+
+interface PreparedTransferLiveness {
+  readonly node: Node<unknown>;
+  readonly dependents: Map<ComputedNode<unknown>, number>;
+  readonly refs: number;
+  readonly live: boolean;
+  readonly changedLive: boolean;
+}
+
+function prepareTransferLiveness(
+  nextSources: ReadonlyMap<ComputedNode<unknown>, readonly Node<unknown>[]>,
+): PreparedTransferLiveness[] {
+  const edges = new Map<Node<unknown>, Map<ComputedNode<unknown>, number>>();
+  const refs = new Map<Node<unknown>, number>();
+  const live = new Map<Node<unknown>, boolean>();
+  const queue: Node<unknown>[] = [];
+
+  const effectiveSources = (node: ComputedNode<unknown>): readonly Node<unknown>[] =>
+    nextSources.get(node) ?? node.dependencies;
+  const edgeDelta = (source: Node<unknown>, dependent: ComputedNode<unknown>, delta: number): void => {
+    let next = edges.get(source);
+    if (next === undefined) {
+      next = new Map(source.dependents);
+      edges.set(source, next);
+    }
+    const count = (next.get(dependent) ?? 0) + delta;
+    if (count < 0) throw new TypeError("Reactive transfer has an inconsistent live edge");
+    if (count === 0) next.delete(dependent);
+    else next.set(dependent, count);
+    refs.set(source, (refs.get(source) ?? source.liveDependentRefs) + delta);
+    queue.push(source);
+  };
+
+  for (const [node, sources] of nextSources) {
+    if (!node.live) continue;
+    const previous = new Set(node.dependencies);
+    const incoming = new Set(sources);
+    for (const source of previous) {
+      if (!incoming.has(source) && source !== node) edgeDelta(source, node, -1);
+    }
+    for (const source of incoming) {
+      if (!previous.has(source) && source !== node) edgeDelta(source, node, 1);
+    }
+  }
+
+  for (let index = 0; index < queue.length; index += 1) {
+    const node = queue[index]!;
+    const shouldLive = node.watcherRefs + (refs.get(node) ?? node.liveDependentRefs) > 0;
+    const wasLive = live.get(node) ?? node.live;
+    if (shouldLive === wasLive) continue;
+    live.set(node, shouldLive);
+    if (node.kind === "computed") {
+      for (const source of effectiveSources(node)) {
+        if (source !== node) edgeDelta(source, node, shouldLive ? 1 : -1);
+      }
+    }
+    if (queue.length > 100000)
+      throw new TypeError("Reactive transfer has an unstable liveness graph");
+  }
+
+  const changed = new Set<Node<unknown>>([...edges.keys(), ...live.keys()]);
+  return [...changed].map((node) => ({
+    node,
+    dependents: edges.get(node) ?? node.dependents,
+    refs: refs.get(node) ?? node.liveDependentRefs,
+    live: live.get(node) ?? node.live,
+    changedLive: (live.get(node) ?? node.live) !== node.live,
+  }));
+}
+
+/**
+ * Prepare mapped State writes, cached Computed adoption and native links without publishing.
+ * The caller must run current and publish back-to-back after its other fallible
+ * checks, then notify only after its whole logical transaction is visible.
+ */
+export function transferPrepare(
+  writes: readonly ReactiveTransferWrite[],
+  adoptions: readonly ReactiveTransferAdoption[],
+  links: readonly ReactiveTransferLink[] = [],
+): ReactiveTransferPlan {
+  if (!transferQuiescent()) throw new TypeError("Reactive transfer requires a quiescent graph");
+
+  const preparedWrites: PreparedTransferWrite[] = [];
+  const preparedAdoptions: PreparedTransferAdoption[] = [];
+  const preparedLinks: PreparedTransferLink[] = [];
+  const writeByNode = new Map<SignalNode<unknown>, PreparedTransferWrite>();
+  const adoptionByNode = new Map<ComputedNode<unknown>, PreparedTransferAdoption>();
+  const linkByNode = new Map<ComputedNode<unknown>, PreparedTransferLink>();
+  const originalEpochs = new Map<Node<unknown>, number>();
+  const rootNodes: Node<unknown>[] = [];
+  const rememberedClosure = new Set<Node<unknown>>();
+  const remember = (node: Node<unknown>): void => {
+    if (!originalEpochs.has(node)) originalEpochs.set(node, node.captureEpoch);
+  };
+  const rememberClosure = (root: Node<unknown>): void => {
+    const pending = [root];
+    while (pending.length > 0) {
+      const node = pending.pop()!;
+      if (rememberedClosure.has(node)) continue;
+      rememberedClosure.add(node);
+      remember(node);
+      if (node.kind === "computed") pending.push(...node.dependencies);
+    }
+  };
+
+  const writeInputs = writes.map((write) => {
+    const node = transferNode(write.target);
+    remember(node);
+    const equals = write.equals;
+    return { node, value: write.value, equals };
+  });
+  const adoptionInputs = adoptions.map((adoption) => {
+    const node = transferNode(adoption.target);
+    remember(node);
+    const sources = adoption.sources.map((source) => {
+      const dependency = transferNode(source);
+      rememberClosure(dependency);
+      return dependency;
+    });
+    return {
+      node, sources, value: adoption.value, error: adoption.error,
+      hasValue: adoption.hasValue, hasError: adoption.hasError,
+      semanticCurrent: adoption.semanticCurrent,
+    };
+  });
+  const linkInputs = links.map((link) => {
+    const node = transferNode(link.target);
+    remember(node);
+    const sources = link.sources.map((source) => {
+      const dependency = transferNode(source);
+      rememberClosure(dependency);
+      return dependency;
+    });
+    return { node, sources };
+  });
+  for (const [node, epoch] of originalEpochs) {
+    if (node.captureEpoch !== epoch)
+      throw new TypeError("Reactive transfer changed during input preparation");
+  }
+  if (!transferQuiescent())
+    throw new TypeError("Reactive transfer changed during input preparation");
+
+  for (const write of writeInputs) {
+    const node = write.node;
+    if (node.kind !== "signal" || writeByNode.has(node))
+      throw new TypeError("Reactive transfer requires distinct native State targets");
+    ensureWritesAllowed(node);
+    if (write.equals !== undefined && typeof write.equals !== "function")
+      throw new TypeError("Reactive transfer State comparator must be a function");
+    const changed = !invokeStateEquals(node, node.value, write.value, write.equals);
+    const prepared: PreparedTransferWrite = {
+      node,
+      value: write.value,
+      changed,
+      token: node.token + (changed ? 1 : 0),
+      semanticEpoch: node.semanticEpoch + (changed ? 1 : 0),
+    };
+    preparedWrites.push(prepared);
+    writeByNode.set(node, prepared);
+    rootNodes.push(node);
+  }
+  const preparedValueFor = (target: WritableSignal<unknown>): unknown => {
+    const node = transferNode(target);
+    if (node.kind !== "signal")
+      throw new TypeError("Reactive transfer value requires a planned native State");
+    const write = writeByNode.get(node);
+    if (write === undefined)
+      throw new TypeError("Reactive transfer value requires a planned native State");
+    return write.changed ? write.value : write.node.value;
+  };
+
+  for (const adoption of adoptionInputs) {
+    const node = adoption.node;
+    if (node.kind !== "computed" || adoptionByNode.has(node))
+      throw new TypeError("Reactive transfer requires distinct native Computed targets");
+    if (!adoption.hasValue && !adoption.hasError)
+      throw new TypeError("Reactive transfer requires a cached value or failure");
+    if (adoption.semanticCurrent !== undefined && typeof adoption.semanticCurrent !== "function")
+      throw new TypeError("Reactive transfer semantic guard must be a function");
+    const sources = adoption.sources;
+    if (new Set(sources).size !== sources.length)
+      throw new TypeError("Reactive transfer requires distinct cached sources");
+    if (sources.includes(node)) throw new TypeError("Reactive transfer cannot adopt a self edge");
+    let graphId = node.explicitGraphId;
+    for (const source of sources) {
+      if (source.graphId !== undefined) {
+        if (graphId === undefined) graphId = source.graphId;
+        else if (graphId !== source.graphId)
+          throw new Fault("cross-graph", [graphId, source.graphId]);
+      }
+      rootNodes.push(source);
+    }
+    let changed = true;
+    if (!adoption.hasError && node.hasValue) {
+      const previousSuppressed = trackingSuppressed;
+      trackingSuppressed += 1;
+      try {
+        changed = !node.equals.call(node.api, node.value, adoption.value);
+      } finally {
+        trackingSuppressed = previousSuppressed;
+      }
+    }
+    const prepared: PreparedTransferAdoption = {
+      node,
+      sources,
+      tokens: new Map(),
+      baseline: {
+        sources: [],
+        epochs: [],
+        ...(adoption.semanticCurrent === undefined
+          ? {}
+          : { semanticCurrent: adoption.semanticCurrent }),
+      },
+      value: adoption.value,
+      error: adoption.error,
+      hasValue: adoption.hasValue,
+      hasError: adoption.hasError,
+      token: node.token + (changed ? 1 : 0),
+      graphId,
+    };
+    preparedAdoptions.push(prepared);
+    adoptionByNode.set(node, prepared);
+    rootNodes.push(node);
+  }
+
+  for (const link of linkInputs) {
+    const node = link.node;
+    if (node.kind !== "computed" || node.hasRun || adoptionByNode.has(node) || linkByNode.has(node))
+      throw new TypeError("Reactive transfer links require distinct unrun native Computeds");
+    const sources = link.sources;
+    if (new Set(sources).size !== sources.length || sources.includes(node))
+      throw new TypeError("Reactive transfer link has duplicate or self sources");
+    for (const source of sources) rootNodes.push(source);
+    const prepared: PreparedTransferLink = {
+      node, sources, tokens: new Map(), baseline: { sources: [], epochs: [] },
+      graphId: undefined,
+    };
+    preparedLinks.push(prepared);
+    linkByNode.set(node, prepared);
+    rootNodes.push(node);
+  }
+
+  for (const [node, epoch] of originalEpochs) {
+    if (node.captureEpoch !== epoch)
+      throw new TypeError("Reactive transfer changed during equality preparation");
+  }
+  if (!transferQuiescent())
+    throw new TypeError("Reactive transfer changed during preparation");
+
+  const nextSources = new Map<ComputedNode<unknown>, readonly Node<unknown>[]>();
+  for (const adoption of preparedAdoptions) nextSources.set(adoption.node, adoption.sources);
+  for (const link of preparedLinks) nextSources.set(link.node, link.sources);
+
+  for (const [target, sources] of nextSources) {
+    const visited = new Set<Node<unknown>>();
+    const pending = [...sources];
+    while (pending.length > 0) {
+      const source = pending.pop()!;
+      if (source === target)
+        throw new TypeError("Reactive transfer would create a dependency cycle");
+      if (visited.has(source)) continue;
+      visited.add(source);
+      if (source.kind === "computed")
+        pending.push(...(nextSources.get(source) ?? source.dependencies));
+    }
+  }
+
+  const graphIds = new Map<ComputedNode<unknown>, string | undefined>();
+  function graphIdFor(node: Node<unknown>): string | undefined {
+    if (node.kind === "signal" || !nextSources.has(node)) return node.graphId;
+    if (graphIds.has(node)) return graphIds.get(node);
+    let graphId = node.explicitGraphId;
+    for (const source of nextSources.get(node)!) {
+      const sourceGraphId = graphIdFor(source);
+      if (sourceGraphId === undefined) continue;
+      if (graphId === undefined) graphId = sourceGraphId;
+      else if (graphId !== sourceGraphId)
+        throw new Fault("cross-graph", [graphId, sourceGraphId]);
+    }
+    graphIds.set(node, graphId);
+    return graphId;
+  }
+  for (const adoption of preparedAdoptions) adoption.graphId = graphIdFor(adoption.node);
+  for (const link of preparedLinks) link.graphId = graphIdFor(link.node);
+
+  for (const prepared of [...preparedAdoptions, ...preparedLinks]) {
+    for (const source of prepared.sources) {
+      prepared.tokens.set(
+        source,
+        source.kind === "signal"
+          ? (writeByNode.get(source)?.token ?? source.token)
+          : (adoptionByNode.get(source)?.token ?? source.token),
+      );
+    }
+    const baselineSources = prepared.baseline.sources as Node<unknown>[];
+    const baselineSeen = new Set<Node<unknown>>();
+    const baselinePending = [...prepared.sources];
+    for (let index = 0; index < baselinePending.length; index += 1) {
+      const source = baselinePending[index]!;
+      if (baselineSeen.has(source)) continue;
+      baselineSeen.add(source);
+      baselineSources.push(source);
+      if (source.kind === "computed")
+        baselinePending.push(...(nextSources.get(source) ?? source.dependencies));
+    }
+    const epochs = prepared.baseline.epochs as number[];
+    for (const source of baselineSources)
+      epochs.push(
+        source.kind === "signal"
+          ? (writeByNode.get(source)?.semanticEpoch ?? source.semanticEpoch)
+          : (nextSources.has(source) ? source.semanticEpoch + 1 : source.semanticEpoch),
+      );
+    if (prepared.baseline.semanticCurrent !== undefined && !prepared.baseline.semanticCurrent())
+      throw new TypeError("Reactive transfer semantic source is stale");
+  }
+
+  const liveness = prepareTransferLiveness(nextSources);
+  for (const entry of liveness) rootNodes.push(entry.node);
+  const witness = transferCapture(rootNodes.map((node) => node.api));
+  if (!witness.current())
+    throw new TypeError("Reactive transfer became stale during preparation");
+
+  const changedStates = preparedWrites.filter((write) => write.changed).map((write) => write.node as Node<unknown>);
+  const changedAdoptions = preparedAdoptions.filter((adoption) => adoption.token !== adoption.node.token)
+    .map((adoption) => adoption.node as Node<unknown>);
+  const directAdoptions = new Set<Node<unknown>>(changedAdoptions);
+  const protectedTransfers = new Set<Node<unknown>>([
+    ...preparedAdoptions.map((adoption) => adoption.node),
+    ...preparedLinks.map((link) => link.node),
+  ]);
+  const seeds = [...changedStates, ...changedAdoptions];
+  let published = false;
+  let notified = false;
+
+  return Object.freeze({
+    valueFor: (target: WritableSignal<unknown>): unknown => {
+      if (published) throw new TypeError("Reactive transfer was already published");
+      return preparedValueFor(target);
+    },
+    current: (): boolean => {
+      if (published || !witness.current()) return false;
+      for (let index = 0; index < preparedAdoptions.length; index += 1) {
+        const semanticCurrent = preparedAdoptions[index]!.baseline.semanticCurrent;
+        if (semanticCurrent !== undefined && !semanticCurrent()) return false;
+      }
+      return true;
+    },
+    publish: (): void => {
+      if (published) throw new TypeError("Reactive transfer was already published");
+      published = true;
+      for (let index = 0; index < preparedWrites.length; index += 1) {
+        const write = preparedWrites[index]!;
+        if (write.changed) write.node.value = write.value;
+        write.node.token = write.token;
+        write.node.semanticEpoch = write.semanticEpoch;
+        write.node.writeEpoch += 1;
+        write.node.captureEpoch += 1;
+      }
+      for (let index = 0; index < preparedAdoptions.length; index += 1) {
+        const adoption = preparedAdoptions[index]!;
+        const node = adoption.node;
+        node.dependencies = adoption.sources;
+        node.dependencyTokens = adoption.tokens;
+        node.hasRun = true;
+        node.hasValue = adoption.hasValue;
+        node.hasError = adoption.hasError;
+        node.value = adoption.value;
+        node.error = adoption.error;
+        node.token = adoption.token;
+        node.graphId = adoption.graphId;
+        node.marked = false;
+        node.semanticEpoch += 1;
+        node.captureEpoch += 1;
+        node.adoptedBaseline = adoption.baseline;
+      }
+      for (let index = 0; index < preparedLinks.length; index += 1) {
+        const link = preparedLinks[index]!;
+        const node = link.node;
+        node.dependencies = link.sources;
+        node.dependencyTokens = link.tokens;
+        node.graphId = link.graphId;
+        node.semanticEpoch += 1;
+        node.captureEpoch += 1;
+        node.linkedBaseline = link.baseline;
+      }
+      for (let index = 0; index < liveness.length; index += 1) {
+        const entry = liveness[index]!;
+        const node = entry.node;
+        node.dependents = entry.dependents;
+        node.liveDependentRefs = entry.refs;
+        if (entry.changedLive) {
+          node.live = entry.live;
+          if (!entry.live && node.kind === "computed") node.marked = false;
+        }
+        node.captureEpoch += 1;
+      }
+    },
+    notify: (): void => {
+      if (!published || notified) throw new TypeError("Reactive transfer is not awaiting notification");
+      notified = true;
+      const errors: unknown[] = [];
+      const deliverLiveness = (entry: PreparedTransferLiveness): void => {
+        try {
+          invokeLifecycle(
+            entry.node,
+            entry.live ? entry.node.watchedCallback : entry.node.unwatchedCallback,
+          );
+        } catch (error) {
+          errors.push(error);
+        }
+        notifyLiveness(entry.node, entry.live);
+      };
+      propagation.batchDepth += 1;
+      try {
+        for (let index = liveness.length - 1; index >= 0; index -= 1) {
+          const entry = liveness[index]!;
+          if (entry.changedLive && !entry.live) deliverLiveness(entry);
+        }
+        for (let index = 0; index < liveness.length; index += 1) {
+          const entry = liveness[index]!;
+          if (entry.changedLive && entry.live) deliverLiveness(entry);
+        }
+      } finally {
+        propagation.batchDepth -= 1;
+      }
+      const actualSeeds = [...propagation.batchSeeds];
+      propagation.batchSeeds.clear();
+      try {
+        beginPropagation([...seeds, ...actualSeeds], protectedTransfers, directAdoptions);
+      } catch (error) {
+        errors.push(error);
+      }
+      throwOrAggregate(errors);
+    },
+  });
+}
+
 /**
  * Internal hooks used by the graph runtime.
  *
@@ -1388,6 +2200,18 @@ export interface ReactiveGraphBinding {
  * application API.
  */
 export const __internal = Object.freeze({
+  /** Return the installed construction without a public brand or evaluator call. */
+  transferConstruction,
+
+  /** Test original native construction state independently of late capture. */
+  transferConstructionInitial,
+
+  /** Snapshot the actual cached dependency closure without evaluation. */
+  transferCapture,
+
+  /** Prepare fixed reactive publication and deferred notification. */
+  transferPrepare,
+
   /** Read the existing computed without outer tracking or retention callbacks. */
   nativePeek: <T>(readable: Readable<T>, current: () => boolean = () => true): T => {
     const node = nodeFor(readable);
@@ -1401,6 +2225,10 @@ export const __internal = Object.freeze({
       if (node.kind === "computed" && !current()) {
         node.hasRun = false;
         node.marked = true;
+        node.adoptedBaseline = undefined;
+        node.linkedBaseline = undefined;
+        node.captureEpoch += 1;
+        node.semanticEpoch += 1;
       }
     }
   },

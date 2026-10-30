@@ -15,6 +15,13 @@ import {
   withoutWrites,
 } from "../../src/reactive.ts";
 import { adopt, snapshot } from "../../src/realm.ts";
+import {
+  captureReactiveConstruction,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
+  prepareRequiredTransferCapture,
+} from "../../src/index.ts";
+import type { ClosedEncodedValue, PassiveTransferClaim, RequiredTransferCodec } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
 interface Deferred<T> {
@@ -95,6 +102,12 @@ function throwingRemovalSignal(
   return { signal, state };
 }
 
+const requiredTransferCodec: RequiredTransferCodec = {
+  encodeValue: (value) => value as ClosedEncodedValue,
+  encodeFailure: (cause) => String(cause),
+  decodeValue: (value) => value,
+  decodeFailure: (failure) => new Error(String(failure)),
+};
 beforeEach(() => {
   jest.useFakeTimers();
   jest.setSystemTime(0);
@@ -1489,4 +1502,96 @@ describe("query progress", () => {
     stop();
     graph.dispose();
   });
+  it("forwards a cold passive progress facade to the native query progress State after publication", async () => {
+    const targetWork = deferred<number>();
+    let targetReport: ((value: string) => void) | undefined;
+    let targetFetches = 0;
+    const sourceQuery = createQuery<string, number, string, string>({
+      name: "progress.required-transfer",
+      key: (input) => input,
+      fetch: async (_input, options) => {
+        options.reportProgress("source-one");
+        options.reportProgress("source-two");
+        return 7;
+      },
+    });
+    const targetQuery = createQuery<string, number, string, string>({
+      name: "progress.required-transfer",
+      key: (input) => input,
+      fetch: (_input, options) => {
+        targetFetches += 1;
+        targetReport = options.reportProgress;
+        return targetWork.promise;
+      },
+    });
+    const sourceGraph = createGraph({
+      contract: defineContract({ namespace: "progress-required-transfer", operations: { query: sourceQuery } }),
+    });
+    const targetGraph = createGraph({
+      contract: defineContract({ namespace: "progress-required-transfer", operations: { query: targetQuery } }),
+    });
+    let claim: PassiveTransferClaim<typeof targetGraph.api.query> | undefined;
+    let stop: (() => void) | undefined;
+    let adoptionPublished = false;
+    try {
+      const sourceStore = sourceGraph.api.query("one");
+      await expect(sourceStore.ready).resolves.toBe(7);
+      const sourceRoot = computed(() => sourceStore.progress.get().reportRevision);
+      expect(sourceRoot.get()).toBe(2);
+      const sourceConstruction = captureReactiveConstruction(sourceRoot);
+      const capture = prepareRequiredTransferCapture({
+        graphs: [sourceGraph],
+        roots: [{ source: sourceRoot, construction: sourceConstruction }],
+        codec: requiredTransferCodec,
+      });
+      const captureCommit = capture.seal();
+      if (captureCommit === undefined) throw new Error("The progress capture did not seal");
+      captureCommit.publish();
+      captureCommit.notifications.deliver();
+      await capture.retired;
+
+      claim = preparePassiveTransferClaim(targetGraph, targetGraph.api.query, "one");
+      expect(targetFetches).toBe(0);
+      expect(() => claim!.store.progress.get()).toThrow(TypeError);
+      const targetRoot = computed(() => claim!.store.progress.get().reportRevision);
+      const targetConstruction = captureReactiveConstruction(targetRoot);
+      const rootSlot = capture.image.roots[0]!;
+      const sourceSlot = capture.image.stores[0]!.slot;
+      const adoption = prepareRequiredTransferAdoption(capture.image, {
+        graphs: [targetGraph],
+        sources: [{ slot: sourceSlot, claim }],
+        reactive: [{ slot: rootSlot, target: targetRoot, construction: targetConstruction }],
+        codec: requiredTransferCodec,
+        mappedStateWrites: [],
+      });
+      const adoptionCommit = adoption.seal();
+      if (adoptionCommit === undefined) throw new Error("The passive progress adoption did not seal");
+      adoptionCommit.publish();
+      adoptionPublished = true;
+      adoptionCommit.notifications.deliver();
+      await Promise.all([adoption.retired, claim.retired]);
+
+      const seen: number[] = [];
+      stop = subscribe(targetRoot, (revision) => seen.push(revision));
+      const revalidation = claim.store.revalidate();
+      const ready = claim.store.ready;
+      await flush();
+      expect(targetFetches).toBe(1);
+      if (targetReport === undefined) throw new Error("The target query did not receive its progress reporter");
+      targetReport("target-report");
+      await flush();
+      expect(targetRoot.get()).toBe(1);
+      expect(seen).toContain(1);
+      targetWork.resolve(9);
+      await expect(revalidation).resolves.toBeUndefined();
+      await expect(ready).resolves.toBe(9);
+      expect(claim.store.progress.get()).toMatchObject({ status: "complete", reportRevision: 1 });
+    } finally {
+      stop?.();
+      if (claim !== undefined && !adoptionPublished) claim.discard();
+      sourceGraph.dispose();
+      targetGraph.dispose();
+    }
+  });
+
 });

@@ -8,6 +8,9 @@ import {
   createStream,
   createPositionedStream,
   createBindingContext,
+  createTransferScope,
+  prepareTransferOperation,
+  prepareTransferOperationRetirement,
   bindStream,
   capturePositionedStore,
   isPositionedStoreCheckpointCurrent,
@@ -24,7 +27,10 @@ import {
   peekStore,
   snapshot,
   subscribe as subscribeStore,
+  captureReactiveConstruction,
+  prepareRequiredTransferCapture,
 } from "../../src/index.ts";
+import type { ClosedEncodedValue, RequiredTransferCodec } from "../../src/index.ts";
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -1671,4 +1677,90 @@ describe("Graph.reset", () => {
 
     graph.dispose();
   });
+});
+
+it("keeps a published transfer exclusion across reset until its original mutation retires", async () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "transfer-reset.query",
+    key: (input: string) => input,
+    fetch: backend.respond<string, number>("transfer-reset.query"),
+  });
+  const mutate = createMutation({
+    name: "transfer-reset.mutate",
+    run: backend.perform<object, void>("transfer-reset.mutate"),
+    affects: [],
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "transfer-reset", operations: { query, mutate } }),
+  });
+  const codec: RequiredTransferCodec = {
+    encodeValue: (value) => value as ClosedEncodedValue,
+    encodeFailure: (cause) => String(cause),
+    decodeValue: (value) => value,
+    decodeFailure: (failure) => new Error(String(failure)),
+  };
+  let mutationResult: Promise<unknown> | undefined;
+  let mutationResolved = false;
+  let mutationCall: (typeof backend.calls)[number] | undefined;
+  try {
+    const store = graph.api.query("one");
+    const initialReady = store.ready;
+    backend.resolve(backend.calls[0]!, 1);
+    await initialReady;
+
+    const scope = createTransferScope(graph, graph.api.query, store);
+    const carrier = Object.freeze({ request: "held" });
+    const operation = prepareTransferOperation([scope], [
+      { role: "raw", source: graph.api.mutate, input: carrier },
+    ]);
+    const operationCommit = operation.seal();
+    if (operationCommit === undefined) throw new Error("The transfer operation did not seal");
+    operationCommit.publish();
+    operationCommit.notifications.deliver();
+
+    mutationResult = graph.api.mutate(carrier);
+    mutationCall = backend.calls[1]!;
+    expect(mutationCall.input).toBe(carrier);
+    const reset = graph.reset();
+    expect(mutationCall.aborted).toBe(true);
+    await reset;
+
+    const resetStore = graph.api.query("one");
+    const refreshed = resetStore.ready;
+    const refreshCall = backend.calls[2]!;
+    backend.resolve(refreshCall, 2);
+    await refreshed;
+    const value = computed(() => resetStore.value.get());
+    expect(value.get()).toBe(2);
+    const construction = captureReactiveConstruction(value);
+    const captureOptions = {
+      graphs: [graph],
+      roots: [{ source: value, construction }],
+      codec,
+    } as const;
+
+    backend.resolve(mutationCall, undefined);
+    mutationResolved = true;
+    await mutationResult;
+    expect(() => prepareRequiredTransferCapture(captureOptions)).toThrow(TypeError);
+
+    const retirement = prepareTransferOperationRetirement(operation.operation);
+    const retirementCommit = retirement.seal();
+    if (retirementCommit === undefined) throw new Error("The transfer retirement did not seal");
+    retirementCommit.publish();
+    retirementCommit.notifications.deliver();
+    await retirement.retired;
+
+    const capture = prepareRequiredTransferCapture(captureOptions);
+    capture.discard();
+    await capture.retired;
+  } finally {
+    if (mutationCall !== undefined && mutationResult !== undefined && !mutationResolved) {
+      backend.resolve(mutationCall, undefined);
+      mutationResolved = true;
+      await mutationResult.then(() => undefined, () => undefined);
+    }
+    graph.dispose();
+  }
 });

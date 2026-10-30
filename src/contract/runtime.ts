@@ -242,7 +242,7 @@ export interface StoreRuntime<T> {
   readonly errorCell: WritableSignal<unknown>;
   readonly streamStatusCell: WritableSignal<StreamStatus>;
   readonly streamStatus: Computed<StreamStatus>;
-  readonly callers: QueryCaller<T>[];
+  callers: QueryCaller<T>[];
   readonly requests: Set<QueryRequest>;
   readonly livenessStops: Unsubscribe[];
   readonly readStops: Unsubscribe[];
@@ -374,7 +374,7 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly idleMs: number;
   readonly maxPredictions: number;
   readonly onUnobservedFault?: (error: unknown) => void;
-  readonly stores: Map<string | StoreIdentity, StoreRuntime<unknown>>;
+  stores: Map<string | StoreIdentity, StoreRuntime<unknown>>;
   readonly queryDefinitions: Map<QueryDefinition<any, any, any, any>, QueryAcquisition>;
   readonly mutationDefinitions: Set<MutationDefinition<any, any>>;
   /** Exact positioned declarations admitted by this graph before API exposure. */
@@ -422,7 +422,7 @@ export interface QueryBindingRuntime {
   readonly execution: QueryDefinition<any, any, any, any>;
   readonly value: ValueOptions<any> | undefined;
   handle: object;
-  readonly stores: Map<string, StoreRuntime<unknown>>;
+  stores: Map<string, StoreRuntime<unknown>>;
 }
 
 export interface StreamBindingRuntime {

@@ -566,6 +566,165 @@ Aeolia does not wrap, clamp, or renumber exhausted counters, and it supplies no
 automatic recovery from exhaustion. Incoming value revisions remain provenance,
 not a cross-graph clock.
 
+## Required cached-state transfer
+
+The `snapshot` and `adopt` APIs copy selected store values into another graph.
+Required transfer carries a selected cached reactive closure and its native
+source addresses through a caller-owned publication boundary. It does not change
+the snapshot formats.
+
+Choose already-constructed `State` and `Computed` roots with
+`captureReactiveConstruction`, then prepare a capture from their cached values:
+
+```ts
+const construction = captureReactiveConstruction(derived);
+const capture = prepareRequiredTransferCapture({
+  graphs: [sourceGraph],
+  roots: [{ source: derived, construction }],
+  codec,
+});
+```
+
+Capture walks the existing dependency graph and records cached results. It does
+not run a `Computed` to fill a missing value. Every encoded value or admitted
+failure passes through the selected codec. `seal()` checks that the captured
+native sources and reactive nodes are still current; it returns `undefined` if
+the source cut changed. After a successful seal, call `publish()` and then
+`notifications.deliver()` at the application publication boundary.
+
+For each native source, prepare a `preparePassiveTransferClaim` with the actual
+target graph, source member or binding, input, and target value options. It uses
+that input to establish the native address, but does not invoke the acquisition
+member, fetch, or open a stream. Its key callback can run during preparation.
+The returned handle exposes safe address metadata while body reads and
+operations remain gated until publication. Discard a claim that is not included
+in a published adoption.
+
+A required query image has one `stores` row per physical address and one
+`callers` row for each caller in the captured reactive closure. Each caller row
+links its own slot to the shared Store slot and records that caller's normalized
+freshness window and settled status. For example:
+
+```js
+{
+  slot: "c0",
+  store: "s0",
+  window: { kind: "finite", milliseconds: 60000.5 },
+  status: "ready",
+}
+```
+
+Native caller facets such as `query-status` and `query-pending` name the caller
+slot in `RequiredTransferNode.caller`. Their `store` field still names the
+physical Store slot. A caller source witness carries `physical`, its exact status
+readable, and the exact query wrapper returned to that caller. The physical base
+witness also carries a genuine published acquisition wrapper.
+
+Map every physical Store slot and caller slot in `prepareRequiredTransferAdoption`.
+One passive claim can cover a physical Store slot and its own caller slot. Prepare
+a distinct claim for each other caller. Claims for the same address share the
+receiver runtime while retaining distinct wrappers and caller state.
+
+Pass the matching `StoreOptions.revalidateAfterMs` on each query claim. Its
+effective window must match the source caller. If both the query definition and
+caller omit the option, the window is infinite. An explicit `Infinity` is invalid.
+Finite non-negative values, including fractional milliseconds, are accepted. The
+image records a caller's settled status; a source caller with an unresolved
+request cannot be captured.
+
+For a required closure that includes native observation facets, call `prepareObservation`
+on its query claim before preparing adoption:
+
+```ts
+const prepared = claim.prepareObservation(existingLease);
+const lease = prepared.lease;
+```
+
+The method returns a genuine native `ObservationLease`. Call `prepared.discard()`
+to discard the owning claim. It preserves an exact existing publisher that the
+participant reused. A new lease remains inactive until the required adoption
+publishes. Before that cut, `active` is false. The `publish`, `reject`, and
+`report` methods return false. Calling `dispose()` before
+publication discards the pending lease so it cannot activate later.
+
+To share pending observation metadata across caller claims for one physical
+query, prepare the first claim without an argument. Pass its exact pending lease
+to each additional claim before adoption:
+
+```ts
+const firstObservation = firstClaim.prepareObservation();
+const nextObservation = nextClaim.prepareObservation(firstObservation.lease);
+```
+
+The claims then join one publisher cohort. Their prepared observations expose the
+same lease, which remains inactive until adoption publishes. Separate no-argument
+calls create independent candidates. They cannot satisfy one shared observation
+closure in a single adoption. Discarding one independent candidate leaves the
+other candidate intact.
+
+Pass a previously published `existingLease` only when you hold that exact current
+lease for the same native query incarnation. Aeolia reuses that publisher
+without replacing or disposing it. A different active publisher on the receiver
+causes preparation to fail. The prepared participant's `retired` is the same
+Promise as the claim's `retired`. It reports claim-registration cleanup, not
+provider stop or graph retirement. Keep the consumer Resource's existing close
+promise for provider cleanup.
+
+The required image does not encode private observation issue values. Keep an
+existing receiver issue intact. If a required closure depends on a non-undefined
+source issue and the receiver cannot provide a compatible genuine native issue
+facet, the complete adoption fails before publication.
+
+`prepareRequiredTransferAdoption` maps source slots to those genuine claims and
+maps each selected reactive slot to a genuine target `State` or `Computed` plus
+its own construction receipt. Computed callbacks are never copied or invoked
+during preparation. A target `State` written since its construction is
+browser-owned and keeps its value. If a required cold target `Computed` would
+depend on a browser-owned value that differs from the image, the whole adoption
+fails before publication; no target State writes or cached values from that plan
+are installed. The target computation remains cold, and its first ordinary read
+evaluates against receiver values. A warm target `Computed` keeps its actual
+receiver cache when the rest of the required mapping is compatible; a conflict
+that makes the required closure incompatible fails the whole plan.
+
+Use `mappedStateWrites` for other genuine target `State` objects that must
+change in the same publication. These writes are staged with the adopted caches
+and applied before deferred notifications. A notification callback can throw
+after publication; its failure is reported, while the published values remain in
+place. The plan’s `retired` promise reports its own registration cleanup and
+notification outcome.
+
+Required transfer is an in-memory cache protocol. Its closed image contains
+values and native address descriptors, not callbacks, sessions, transport
+ownership, or authorization. It does not replace the host or provider checks
+that govern release of external work.
+
+## Required operation coverage and retirement
+
+When an external operation can still affect a query value, create a persistent
+scope from the genuine acquired target with `createTransferScope`. Pass every
+affected scope and each exact raw or bound mutation carrier to
+`prepareTransferOperation`. The carrier in each dispatch record must be the same
+object passed to the native mutation call. The operation publication records
+coverage; it does not dispatch the mutation or replace its existing result
+promise.
+
+Keep the original operation covered through graph reset, context changes,
+retries, and address successors. `prepareTransferScopeSuccessors` adds
+replacement query addresses for the same still-active operation in one
+publication while retaining predecessor coverage. It checks the replacement
+source and native key against the predecessor address.
+
+Release coverage only after the application confirms its external operation has
+retired and every joined native mutation has completed its original work and
+cleanup. `prepareTransferOperationRetirement` refuses while a dispatch is
+unjoined, active, or has failed cleanup. Reset, disposal, a successful query
+landing, and settlement of a public result promise do not by themselves release
+this coverage.
+
+These APIs track native lifecycle facts. They do not authorize an external
+write, commit a transaction, or prove that a server action has finished.
+
 ## Resetting graph state
 
 `graph.reset()` starts a new state epoch while preserving the graph, API, store

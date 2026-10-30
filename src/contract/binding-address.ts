@@ -8,6 +8,7 @@ import type {
   StreamBindingRuntime,
 } from "./runtime.ts";
 import { storeKey } from "./identity.ts";
+import { noteTransferChange } from "./query-policy.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
 import {
   assertBindingContextOpen,
@@ -353,12 +354,20 @@ export function reserveBoundStreamAddress(
       throw new TypeError("Empty condition does not belong to this stream address");
     if (record.used || !record.facts.empty || !factsCurrent(record.facts))
       throw new TypeError("The inspected stream address is no longer empty");
+    const address = bindingAddress(binding, String(key));
+    noteTransferChange(binding);
+    noteTransferChange(binding.handle);
+    noteTransferChange(address);
     const token = beginBindingAddress(binding, String(key))!;
+    noteTransferChange(condition as object);
     record.used = true;
     return token;
   }
   const address = bindingAddress(binding, String(key));
   if (address.operations.size !== 0)
     throw new TypeError("The bound stream address is transitioning");
+  noteTransferChange(binding);
+  noteTransferChange(binding.handle);
+  noteTransferChange(address);
   return beginBindingAddress(binding, String(key))!;
 }
