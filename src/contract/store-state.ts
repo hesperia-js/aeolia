@@ -103,7 +103,11 @@ export function recordLanding<T>(
           const positioned = runtime.stream?.positioned;
           if (positioned !== undefined) {
             positioned.baseRevision = revision;
-            if (expectedPositionedSession === runtime.stream && positioned.dispatch !== undefined) {
+            if (
+              expectedPositionedSession !== undefined &&
+              expectedPositionedSession === runtime.stream &&
+              positioned.dispatch !== undefined
+            ) {
               positioned.dispatch.landingRevision = revision;
               positioned.diverged = !expectedPositionedSession.hasPosition;
             } else if (

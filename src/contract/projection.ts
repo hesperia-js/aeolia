@@ -2007,9 +2007,11 @@ export function preparePositionedStoreRestore<
         .some((prediction) => !prediction.dead) ||
       projections.some((projection, index) => {
         const projectionRuntime = positionedProjectionByHandle.get(projection as object);
+        const projectionPositioned = projectionRuntime?.positioned;
         return (
-          projectionRuntime?.positioned?.tuple !== seededTuples[index] ||
-          projectionRuntime.positioned.storeParticipant?.event !== targetGroup.completed
+          projectionPositioned === undefined ||
+          projectionPositioned.tuple !== seededTuples[index] ||
+          projectionPositioned.storeParticipant?.event !== targetGroup.completed
         );
       })
     ) {
@@ -2541,6 +2543,7 @@ function acknowledgePositionedStoreFold(
     [...group.participants].some((required) => required.failed || required.event !== event)
   )
     throw new TypeError("Fold receipt is not at the current completed Store group frontier");
+  const bindingContextIsOpen = (): boolean => group.runtime.binding?.context.disposed !== true;
   if (
     group.runtime.stream !== group.runtime.readerScope?.session ||
     group.runtime.stream?.positioned !== group ||
@@ -2548,7 +2551,7 @@ function acknowledgePositionedStoreFold(
     !group.runtime.stream.hasPosition ||
     !Object.is(group.runtime.stream.position, event.position) ||
     group.runtime.graph.__runtime.disposed ||
-    group.runtime.binding?.context.disposed === true
+    !bindingContextIsOpen()
   )
     throw new TypeError("Positioned Store session is no longer current");
   if (group.provider.isReaderCurrent(group.input, lease.reader, lease.after, lease.seed) !== true)
@@ -2578,7 +2581,7 @@ function acknowledgePositionedStoreFold(
     !group.runtime.stream?.ended &&
     group.runtime.graph.__runtime.resetEpoch === group.runtime.stream?.resetEpoch &&
     !group.runtime.graph.__runtime.disposed &&
-    group.runtime.binding?.context.disposed !== true &&
+    bindingContextIsOpen() &&
     lease.owned &&
     !lease.released &&
     [...group.participants].every((required) => !required.failed && required.event === event);

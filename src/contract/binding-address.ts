@@ -82,11 +82,15 @@ interface ReaderAddressSnapshot {
   readonly predictions: readonly { readonly id: number; readonly dead: boolean }[];
 }
 
+function readerStoreRuntimes(binding: StoreBindingRuntime): readonly StoreRuntime<unknown>[] {
+  return binding.kind === "stream" ? [...(binding.readerStores ?? [])] : [];
+}
+
 function readerAddressSnapshots(
   binding: StoreBindingRuntime,
   key: string,
 ): readonly ReaderAddressSnapshot[] {
-  return [...(binding.readerStores ?? [])]
+  return readerStoreRuntimes(binding)
     .filter((runtime) => String(runtime.key) === key)
     .map((runtime) => ({
       runtime,
@@ -172,7 +176,7 @@ export function importedBaselineCurrent(runtime: StoreRuntime<unknown>): boolean
 /** @internal Used by inspection and guarded stream import; empty shells grant no occupation. */
 export function boundAddressOccupied(binding: StoreBindingRuntime, key: string): boolean {
   const runtime = binding.stores.get(key);
-  const readerOccupied = [...(binding.readerStores ?? [])].some(
+  const readerOccupied = readerStoreRuntimes(binding).some(
     (reader) =>
       String(reader.key) === key &&
       !reader.disposed &&
@@ -206,7 +210,7 @@ export function boundAddressOccupied(binding: StoreBindingRuntime, key: string):
 function factsCurrent(facts: AddressFacts): boolean {
   const { binding, runtime, address } = facts;
   const state = binding.context.state;
-  const readerStores = [...(binding.readerStores ?? [])].filter(
+  const readerStores = readerStoreRuntimes(binding).filter(
     (reader) => String(reader.key) === facts.key,
   );
   const readerSnapshotsCurrent = facts.readerSnapshots.every(readerAddressSnapshotCurrent);
@@ -280,7 +284,7 @@ export function inspectBoundAddress(
     guard: address.guard,
     epoch: state.resetEpoch,
     runtime,
-    readerStores: [...(binding.readerStores ?? [])].filter(
+    readerStores: readerStoreRuntimes(binding).filter(
       (reader) => String(reader.key) === checkedKey,
     ),
     readerSnapshots: readerAddressSnapshots(binding, checkedKey),

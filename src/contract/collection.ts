@@ -265,7 +265,8 @@ export function discardPositionedStoreSession<T>(
   runtime.disposed = true;
   runtime.incarnation = undefined;
   runtime.graph.__runtime.stores.delete(runtime.identity);
-  runtime.binding?.readerStores?.delete(runtime as StoreRuntime<unknown>);
+  const binding = runtime.binding;
+  if (binding?.kind === "stream") binding.readerStores?.delete(runtime as StoreRuntime<unknown>);
   if (runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
   updateCollectionCandidate(runtime);
 }
