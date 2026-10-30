@@ -2079,15 +2079,15 @@ export function preparePositionedStoreRestore<
   reader: NoInfer<Reader>,
   options?: ValueOptions<NoInfer<Event>>,
 ): PositionedStoreRestoration<Event, PositionedStorePolicyValues<Event, Policies>> {
-  return preparePositionedStoreGroup(member, input, policies, seed, reader, options, false)
+  return preparePositionedStoreGroup<Event>(member, input, policies, seed, reader, options, false)
     .restoration as PositionedStoreRestoration<Event, PositionedStorePolicyValues<Event, Policies>>;
 }
 
-export interface PreparedPositionedStoreTransfer {
+export interface PreparedPositionedStoreTransfer<Event = unknown> {
   readonly runtime: StoreRuntime<unknown>;
   readonly session: StreamSession<unknown>;
   readonly group: PositionedStoreSessionState<unknown>;
-  readonly restoration: PositionedStoreRestoration<unknown, readonly unknown[]>;
+  readonly restoration: PositionedStoreRestoration<Event, readonly unknown[]>;
   readonly seed: object;
   readonly projections: readonly Projection<unknown>[];
   issue(): void;
@@ -2108,7 +2108,7 @@ export function preparePositionedStoreTransfer(
   reader: unknown,
   options?: ValueOptions<unknown>,
 ): PreparedPositionedStoreTransfer {
-  return preparePositionedStoreGroup(member, input, policies, seed, reader, options, true);
+  return preparePositionedStoreGroup<unknown>(member, input, policies, seed, reader, options, true);
 }
 
 function positionedOwnData(value: unknown, allowed: readonly string[]): Record<string, unknown> {
@@ -2126,15 +2126,15 @@ function positionedOwnData(value: unknown, allowed: readonly string[]): Record<s
   return result;
 }
 
-function preparePositionedStoreGroup(
-  member: PositionedStreamAccess<any, any, any, any>,
+function preparePositionedStoreGroup<Event>(
+  member: PositionedStreamAccess<any, Event, any, any>,
   input: unknown,
   policies: readonly ProjectionPolicy<any, any>[],
-  seed: PositionedStoreRestoreSeed<any, any, readonly unknown[]>,
+  seed: PositionedStoreRestoreSeed<Event, any, readonly unknown[]>,
   reader: unknown,
-  options: ValueOptions<unknown> | undefined,
+  options: ValueOptions<Event> | undefined,
   detached: boolean,
-): PreparedPositionedStoreTransfer {
+): PreparedPositionedStoreTransfer<Event> {
   const target = positionedMemberRecord(member);
   const targetEpoch = target.graphState.resetEpoch;
   const targetCurrent = (): boolean =>
@@ -2235,7 +2235,36 @@ function preparePositionedStoreGroup(
       throw new TypeError("Positioned reader is no longer current");
     if (detached && legacy)
       throw new TypeError("Required positioned transfer needs explicit boundary/base presence");
-    const source = createPositionedStoreSession(
+    const typedBase = base.present
+      ? { present: true as const, value: base.value as Event }
+      : { present: false as const };
+    const setup = legacy
+      ? (() => {
+          if (!typedBase.present)
+            throw new TypeError("Legacy positioned seed requires a latest Event");
+          return {
+            kind: "legacy" as const,
+            latest: typedBase.value,
+            construction: {
+              boundary,
+              base: typedBase,
+              legacy: true as const,
+              detached,
+              retirement,
+            },
+          };
+        })()
+      : {
+          kind: "boundary" as const,
+          construction: {
+            boundary,
+            base: typedBase,
+            legacy: false as const,
+            detached,
+            retirement,
+          },
+        };
+    const source = createPositionedStoreSession<Event>(
       target.graphState,
       target.definition,
       input,
@@ -2243,11 +2272,10 @@ function preparePositionedStoreGroup(
       target.member,
       target.binding,
       boundary.after,
-      base.present ? base.value : undefined,
       reader,
       seed,
       capturedOptions,
-      { boundary, base, legacy, detached, retirement },
+      setup,
     );
     runtime = runtimeByStore.get(source as object) as StoreRuntime<unknown>;
     session = runtime.stream!;
@@ -2373,7 +2401,7 @@ function preparePositionedStoreGroup(
               throw new TypeError("The positioned projection is still unpublished");
           });
     }
-    const activate = (): StreamStore<unknown> => {
+    const activate = (): StreamStore<Event> => {
       if (phase !== "dormant" || !published || !preparation.published)
         throw new TypeError("Positioned Store activation requires its published dormant group");
       if (!currentAt(readerLifetimeNow())) {
@@ -2389,14 +2417,14 @@ function preparePositionedStoreGroup(
       }
       return source;
     };
-    const restoration: PositionedStoreRestoration<unknown, readonly unknown[]> = Object.freeze({
+    const restoration: PositionedStoreRestoration<Event, readonly unknown[]> = Object.freeze({
       source,
       projections: Object.freeze(projections),
       retired: retirement.promise,
       activate,
       discard,
     });
-    const result: PreparedPositionedStoreTransfer = Object.freeze({
+    const result: PreparedPositionedStoreTransfer<Event> = Object.freeze({
       runtime: actualRuntime,
       session: actualSession,
       group,

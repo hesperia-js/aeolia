@@ -2608,7 +2608,7 @@ export function prepareRequiredTransferAdoption(
       adoptionSlots.push(row.slot);
       adoptions.push({
         target: target as Computed<unknown>,
-        sources: row.sources.map((slot) => targets.get(slot)!),
+        sources: row.sources.map((slot: TransferSlot) => targets.get(slot)!),
         value,
         error,
         hasValue: row.hasValue,
@@ -2701,7 +2701,7 @@ export function prepareRequiredTransferAdoption(
     if (row.kind !== "native" && row.kind !== "authority") continue;
     const target = targets.get(row.slot)!;
     if (!unrunNative(target) || linkByTarget.has(target)) continue;
-    const dependencies = row.sources.map((slot) => targets.get(slot)!);
+    const dependencies = row.sources.map((slot: TransferSlot) => targets.get(slot)!);
     const native = row.store === undefined ? undefined : nativeBySlot.get(row.store);
     if (
       native !== undefined &&

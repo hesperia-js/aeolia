@@ -22,7 +22,7 @@ import type {
   PositionedStorePreparation,
   PositionedContinuationAnchor,
 } from "./runtime.ts";
-import { AbortError, assertGraphOpen, graphFault, reportContinuationError } from "./faults.ts";
+import { AbortError, assertGraphOpen, assertStoreOpen, graphFault, reportContinuationError } from "./faults.ts";
 import { nextValueRevision, storeKey } from "./identity.ts";
 import { configureKeyedValue, issue, nextGeneration, recordLanding } from "./store-state.ts";
 import {
@@ -1254,6 +1254,18 @@ interface PositionedStoreSessionConstruction<T> {
   readonly retirement: RetirementOwner & { readonly promise: Promise<void> };
 }
 
+type PositionedStoreSessionSetup<T> =
+  | { readonly kind: "ordinary"; readonly latest: T }
+  | {
+      readonly kind: "legacy";
+      readonly latest: T;
+      readonly construction: PositionedStoreSessionConstruction<T> & { readonly legacy: true };
+    }
+  | {
+      readonly kind: "boundary";
+      readonly construction: PositionedStoreSessionConstruction<T> & { readonly legacy: false };
+    };
+
 function addPendingPositionedStore<T>(
   state: GraphRuntimeState<any>,
   binding: StreamBindingRuntime | undefined,
@@ -1283,11 +1295,6 @@ function removePendingPositionedStore<T>(
 ): void {
   state.pendingPositionedStores?.delete(runtime as StoreRuntime<unknown>);
   binding?.context.pendingPositionedStores?.delete(runtime as StoreRuntime<unknown>);
-}
-
-function suspendDetachedStoreReadTouches<T>(runtime: StoreRuntime<T>): void {
-  for (const stop of runtime.readStops) stop();
-  runtime.readStops.length = 0;
 }
 
 function materializePositionedStoreInitial<T>(runtime: StoreRuntime<T>): void {
@@ -1380,12 +1387,12 @@ export function createPositionedStoreSession<T>(
   member: object,
   binding: StreamBindingRuntime | undefined,
   after: unknown,
-  latest: T,
   reader: unknown,
   seed: unknown,
-  options?: ValueOptions<T>,
-  construction?: PositionedStoreSessionConstruction<T>,
+  options: ValueOptions<T> | undefined,
+  setup: PositionedStoreSessionSetup<T>,
 ): StreamStore<T> {
+  const construction = setup.kind === "ordinary" ? undefined : setup.construction;
   const detached = construction?.detached === true;
   let provider: PositionedStreamSource<any, T, any, any> | undefined;
   try {
@@ -1530,9 +1537,9 @@ export function createPositionedStoreSession<T>(
     configureKeyedValue(runtime, definition, options, session.bound, false, false, !detached);
     if (construction !== undefined && !construction.legacy)
       materializePositionedStoreInitial(runtime);
-    if (construction === undefined) {
+    if (setup.kind === "ordinary") {
       admitStore(runtime);
-      recordLanding(runtime, latest, undefined, session.bound, session);
+      recordLanding(runtime, setup.latest, undefined, session.bound, session);
       session.position = after;
       session.hasPosition = true;
       session.emitted = true;
@@ -1541,19 +1548,19 @@ export function createPositionedStoreSession<T>(
         identity: Object.freeze({}),
         ordinal: 0,
         position: after,
-        latest,
+        latest: setup.latest,
         landingRevision: revision,
       });
       session.positioned.completed = completed;
       session.positioned.continuation = { kind: "event", after, token: completed.identity };
       session.positioned.baseRevision = revision;
       session.positioned.diverged = false;
-    } else if (construction.legacy) {
+    } else if (setup.kind === "legacy") {
       if (!detached) admitStore(runtime);
       if (detached)
-        seedLegacyPositionedStoreBase(runtime, session, session.positioned, after, latest);
+        seedLegacyPositionedStoreBase(runtime, session, session.positioned, after, setup.latest);
       else {
-        recordLanding(runtime, latest, undefined, session.bound, session);
+        recordLanding(runtime, setup.latest, undefined, session.bound, session);
         session.position = after;
         session.hasPosition = true;
         session.emitted = true;
@@ -1562,7 +1569,7 @@ export function createPositionedStoreSession<T>(
           identity: Object.freeze({}),
           ordinal: 0,
           position: after,
-          latest,
+          latest: setup.latest,
           landingRevision: revision,
         });
         session.positioned.completed = completed;
@@ -1572,7 +1579,7 @@ export function createPositionedStoreSession<T>(
       }
     } else {
       if (!detached) admitStore(runtime);
-      seedPreparedPositionedStoreBase(runtime, session.positioned, construction);
+      seedPreparedPositionedStoreBase(runtime, session.positioned, setup.construction);
     }
     return binding === undefined
       ? rawStreamWrapper(runtime, definition)

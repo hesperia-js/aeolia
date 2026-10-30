@@ -1365,6 +1365,7 @@ interface PassiveQueryPolicy {
 interface PassiveQueryConfiguration {
   readonly before: PassiveQueryPolicy;
   readonly after: PassiveQueryPolicy;
+  readonly compare: (left: unknown, right: unknown) => boolean;
   readonly current: () => boolean;
   publish(): void;
 }
