@@ -57,8 +57,7 @@ export function createQueryRuntimeActivation<T>(runtime: StoreRuntime<T>): () =>
     const activeSource = runtime.source;
     const activeCaller = runtime.callers.find(
       (candidate) =>
-        candidate.query === activeSource.query &&
-        Object.is(candidate.input, activeSource.input),
+        candidate.query === activeSource.query && Object.is(candidate.input, activeSource.input),
     );
     if (activeCaller === undefined) return;
     try {
@@ -104,7 +103,7 @@ export function readinessState<T>(
   );
 }
 
-export /** @internal Starts the normal caller readiness wait for a genuine query view. */
+/** @internal Starts the normal caller readiness wait for a genuine query view. */
 export function ready<T>(runtime: StoreRuntime<T>, caller: QueryCaller<T>): Promise<T> {
   assertStoreOpen(runtime);
   if (!runtime.callers.includes(caller)) {

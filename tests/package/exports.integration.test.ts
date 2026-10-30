@@ -135,7 +135,6 @@ test("the published entry point resolves to the built ESM artifact", async () =>
         "projectPositioned",
         "queryOptions",
         "storeKey",
-      
       ],
     ],
   ] as const) {

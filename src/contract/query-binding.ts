@@ -34,7 +34,12 @@ import {
 } from "./engine.ts";
 import { beginPhysicalWork, createRetirementOwner, finishPhysicalWork } from "./retirement.ts";
 import { makeQueryStore } from "./query.ts";
-import { beginTransferAdmission, finishTransferAdmission, registerTransferAuthority, registerTransferSource } from "./query-policy.ts";
+import {
+  beginTransferAdmission,
+  finishTransferAdmission,
+  registerTransferAuthority,
+  registerTransferSource,
+} from "./query-policy.ts";
 import type { TransferAdmission } from "./query-policy.ts";
 import type { BindingContextRuntime, QueryBindingRuntime } from "./runtime.ts";
 
@@ -183,7 +188,11 @@ export function createBindingContext(graph: Graph): BindingContext {
   };
   contexts.set(handle, context);
   state.bindingContexts.add(context);
-  registerTransferAuthority(activeCell, { graph: state.graph, owner: context, kind: "context-active-cell" });
+  registerTransferAuthority(activeCell, {
+    graph: state.graph,
+    owner: context,
+    kind: "context-active-cell",
+  });
   registerTransferAuthority(active, { graph: state.graph, owner: context, kind: "context-active" });
   return handle;
 }

@@ -22,7 +22,11 @@ import {
   targetPredictionByHandle,
 } from "./registry.ts";
 import type { MutationBindingRuntime } from "./runtime.ts";
-import { beginTransferAdmission, finishTransferAdmission, registerTransferSource } from "./query-policy.ts";
+import {
+  beginTransferAdmission,
+  finishTransferAdmission,
+  registerTransferSource,
+} from "./query-policy.ts";
 import type { TransferAdmission } from "./query-policy.ts";
 
 type AnyMutation = MutationDefinition<any, any>;
@@ -297,7 +301,10 @@ export function bindMutationOperation<M extends AnyMutation, R>(
   };
   const member = (...args: [input?: unknown, options?: BindingMutationOptions<M>]): Promise<R> => {
     let admission: TransferAdmission | undefined = beginTransferAdmission(
-      context.state, definition, binding, args[0]
+      context.state,
+      definition,
+      binding,
+      args[0],
     );
     let attempt: ReturnType<typeof beginBoundMutation> | undefined;
     try {

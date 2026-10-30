@@ -185,7 +185,47 @@ export type {
   BoundAddressStamp,
 } from "./contract/binding-address.ts";
 
-export { createTransferScope, prepareTransferOperation, prepareTransferScopeSuccessors, prepareTransferOperationRetirement } from "./contract/index.ts";
-export type { TransferScope, TransferOperation, TransferPublication, TransferCommit, TransferNotifications, QueryTransferSource, MutationTransferSource, TransferOperationDispatch, TransferScopeSuccessor } from "./contract/index.ts";
-export { captureReactiveConstruction, prepareRequiredTransferCapture, preparePassiveTransferClaim, prepareRequiredTransferAdoption } from "./realm.ts";
-export type { ReactiveConstruction, TransferSlot, ClosedEncodedValue, ClosedEncodedFailure, TransferSourceWitness, TransferTargetWitness, RequiredTransferCodec, NativeTransferSource, ExistingNativeValueOptions, NativeStoreFor, PassiveTransferClaim, PreparedPassiveObservation, RequiredTransferNode, RequiredTransferStore, TransferCallerWindow, RequiredTransferCaller, EncodedRequiredTransfer, RequiredTransferCaptureOptions, RequiredTransferAdoptionOptions } from "./realm.ts";
+export {
+  createTransferScope,
+  prepareTransferOperation,
+  prepareTransferScopeSuccessors,
+  prepareTransferOperationRetirement,
+} from "./contract/index.ts";
+export type {
+  TransferScope,
+  TransferOperation,
+  TransferPublication,
+  TransferCommit,
+  TransferNotifications,
+  QueryTransferSource,
+  MutationTransferSource,
+  TransferOperationDispatch,
+  TransferScopeSuccessor,
+} from "./contract/index.ts";
+export {
+  captureReactiveConstruction,
+  prepareRequiredTransferCapture,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
+} from "./realm.ts";
+export type {
+  ReactiveConstruction,
+  TransferSlot,
+  ClosedEncodedValue,
+  ClosedEncodedFailure,
+  TransferSourceWitness,
+  TransferTargetWitness,
+  RequiredTransferCodec,
+  NativeTransferSource,
+  ExistingNativeValueOptions,
+  NativeStoreFor,
+  PassiveTransferClaim,
+  PreparedPassiveObservation,
+  RequiredTransferNode,
+  RequiredTransferStore,
+  TransferCallerWindow,
+  RequiredTransferCaller,
+  EncodedRequiredTransfer,
+  RequiredTransferCaptureOptions,
+  RequiredTransferAdoptionOptions,
+} from "./realm.ts";

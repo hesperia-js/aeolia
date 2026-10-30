@@ -127,7 +127,10 @@ async function verifyPositionedRequiredTransferConsumer() {
     const sourceA = graphA.api.events(inputA);
     projectionA = project(sourceA, sourcePolicy);
     check(providerA.opens.length === 1, "The source Store did not open exactly once");
-    check(providerA.initialBoundaries.length === 1, "The source did not report its genuine initial boundary");
+    check(
+      providerA.initialBoundaries.length === 1,
+      "The source did not report its genuine initial boundary",
+    );
     check(
       providerA.initialBoundaries[0].options === providerA.opens[0].options,
       "The source boundary used a different opening options object",
@@ -191,16 +194,26 @@ async function verifyPositionedRequiredTransferConsumer() {
       codec,
     });
     check(capture.image.version === 2, "The positioned capture did not use image version 2");
-    check(capture.image.stores[0].hasValue === false, "The snapshot:false base was copied into the Store row");
-    const positionedRows = capture.image.positioned;
-    check(Array.isArray(positionedRows) && positionedRows.length === 1, "The positioned group row was omitted");
-    const group = positionedRows[0];
-    check(JSON.stringify(group.seed) === JSON.stringify({ $ref: seedId }), "The group seed did not use its stable codec reference");
-    check(decodedSeeds.get(seedId) === decodedSeed, "The codec arena lost the exact decoded seed object");
     check(
-      group.slot === "p0" &&
-        group.store === "s0" &&
-        group.projections === 1,
+      capture.image.stores[0].hasValue === false,
+      "The snapshot:false base was copied into the Store row",
+    );
+    const positionedRows = capture.image.positioned;
+    check(
+      Array.isArray(positionedRows) && positionedRows.length === 1,
+      "The positioned group row was omitted",
+    );
+    const group = positionedRows[0];
+    check(
+      JSON.stringify(group.seed) === JSON.stringify({ $ref: seedId }),
+      "The group seed did not use its stable codec reference",
+    );
+    check(
+      decodedSeeds.get(seedId) === decodedSeed,
+      "The codec arena lost the exact decoded seed object",
+    );
+    check(
+      group.slot === "p0" && group.store === "s0" && group.projections === 1,
       "The positioned group did not preserve its Store and projection ordinal",
     );
     check(
@@ -225,14 +238,15 @@ async function verifyPositionedRequiredTransferConsumer() {
     );
 
     reader = providerB.reserve(inputB, 5, undefined, decodedSeed);
-    claim = preparePassiveTransferClaim(
-      graphB,
-      graphB.api.events,
-      inputB,
-      undefined,
-      { policies: [policy], seed: decodedSeed, reader },
+    claim = preparePassiveTransferClaim(graphB, graphB.api.events, inputB, undefined, {
+      policies: [policy],
+      seed: decodedSeed,
+      reader,
+    });
+    check(
+      claim.restoration.source === claim.store,
+      "The positioned claim did not own its restoration Store",
     );
-    check(claim.restoration.source === claim.store, "The positioned claim did not own its restoration Store");
     check(providerB.opens.length === 0, "Claim preparation opened the target source");
     check(providerB.lifetimeCalls.length === 1, "The target reader lifetime was not captured");
     check(
@@ -249,11 +263,13 @@ async function verifyPositionedRequiredTransferConsumer() {
       graphs: [graphB],
       sources: [{ slot: "s0", claim }],
       positioned: [{ slot: "p0", claim, seed: decodedSeed }],
-      reactive: [{
-        slot: capture.image.roots[0],
-        target: targetValue,
-        construction: captureReactiveConstruction(targetValue),
-      }],
+      reactive: [
+        {
+          slot: capture.image.roots[0],
+          target: targetValue,
+          construction: captureReactiveConstruction(targetValue),
+        },
+      ],
       codec,
       mappedStateWrites: [],
     });
@@ -285,19 +301,30 @@ async function verifyPositionedRequiredTransferConsumer() {
         providerB.opens[0].hasReader,
       "The target initial boundary did not keep its original reader opening",
     );
-    check(providerB.acknowledgements.length === 0, "Opening the initial boundary acknowledged a fold");
+    check(
+      providerB.acknowledgements.length === 0,
+      "Opening the initial boundary acknowledged a fold",
+    );
 
-    const folded = waitForPositionedValue(claim.restoration.projections[0], (value) => value === 12);
+    const folded = waitForPositionedValue(
+      claim.restoration.projections[0],
+      (value) => value === 12,
+    );
     providerB.emitReader(reader, { position: 6, value: 2 });
     await folded;
     check(targetSteps === 1, "The first suffix event did not fold exactly once");
-    check(claim.store.available.get() && claim.store.value.get() === 2, "The first suffix did not create the source landing");
+    check(
+      claim.store.available.get() && claim.store.value.get() === 2,
+      "The first suffix did not create the source landing",
+    );
     const receipt = positionedFoldReceipt(claim.restoration.projections[0]);
-    check(receipt !== undefined && receipt.position === 6, "The suffix did not create a native fold receipt");
+    check(
+      receipt !== undefined && receipt.position === 6,
+      "The suffix did not create a native fold receipt",
+    );
     acknowledgePositionedFold(claim.restoration.projections[0], receipt);
     check(
-      providerB.acknowledgements.length === 1 &&
-        providerB.acknowledgements[0].receipt === receipt,
+      providerB.acknowledgements.length === 1 && providerB.acknowledgements[0].receipt === receipt,
       "The first suffix fold did not acknowledge its exact native receipt",
     );
     claim.restoration.discard();
@@ -1064,7 +1091,6 @@ async function verifyWarmFetchAcquisition(backend, label, previousCalls, acquire
   );
 }
 
-
 async function verifyRequiredTransferConsumer() {
   const backend = testBackend();
   const query = createQuery({
@@ -1077,19 +1103,28 @@ async function verifyRequiredTransferConsumer() {
     run: backend.perform("required.mutate"),
     affects: [],
   });
-  const graphContract = defineContract({ namespace: "packed-required-transfer", operations: { query, mutate } });
+  const graphContract = defineContract({
+    namespace: "packed-required-transfer",
+    operations: { query, mutate },
+  });
   const sourceGraph = createGraph({ contract: graphContract });
   const targetGraph = createGraph({ contract: graphContract });
   const codec = {
     encodeValue: (value, witness) => {
       if (witness.store !== undefined)
-        check(witness.store === sourceStore, "Required source witness lost the exact caller Store wrapper");
+        check(
+          witness.store === sourceStore,
+          "Required source witness lost the exact caller Store wrapper",
+        );
       return value;
     },
     encodeFailure: (cause) => String(cause),
     decodeValue: (value, witness) => {
       if (witness.store !== undefined)
-        check(witness.store === claim.store, "Required target witness lost the exact passive claim wrapper");
+        check(
+          witness.store === claim.store,
+          "Required target witness lost the exact passive claim wrapper",
+        );
       return value;
     },
     decodeFailure: (failure) => new Error(String(failure)),
@@ -1110,7 +1145,9 @@ async function verifyRequiredTransferConsumer() {
     const sourceReady = sourceStore.ready;
     backend.resolve(backend.pending("required.query")[0], "source value");
     await sourceReady;
-    const sourceValue = computed(() => sourceStore.status.get() === "ready" ? sourceStore.value.get() + "!" : "");
+    const sourceValue = computed(() =>
+      sourceStore.status.get() === "ready" ? sourceStore.value.get() + "!" : "",
+    );
     check(sourceValue.get() === "source value!", "Required source cache was not initialized");
     capture = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
@@ -1135,8 +1172,10 @@ async function verifyRequiredTransferConsumer() {
     );
     check(sourceCaller.status === "ready", "Required caller did not retain settled source status");
     const sourceStatusNode = image.nodes.find(
-      (node) => node.kind === "native" &&
-        node.facet === "query-status" && node.caller === sourceCaller.slot,
+      (node) =>
+        node.kind === "native" &&
+        node.facet === "query-status" &&
+        node.caller === sourceCaller.slot,
     );
     check(
       sourceStatusNode !== undefined && sourceStatusNode.store === nativeSource.slot,
@@ -1144,10 +1183,14 @@ async function verifyRequiredTransferConsumer() {
     );
     const physicalWitness = capture.sources.find((witness) => witness.slot === nativeSource.slot);
     const callerWitness = capture.sources.find((witness) => witness.slot === sourceCaller.slot);
-    check(physicalWitness?.store === sourceStore, "Physical source witness lost the actual acquisition wrapper");
+    check(
+      physicalWitness?.store === sourceStore,
+      "Physical source witness lost the actual acquisition wrapper",
+    );
     check(
       callerWitness?.physical === nativeSource.slot &&
-        callerWitness.readable === sourceStore.status && callerWitness.store === sourceStore,
+        callerWitness.readable === sourceStore.status &&
+        callerWitness.store === sourceStore,
       "Caller witness lost its exact status wrapper or physical source",
     );
     const captureCommit = capture.seal();
@@ -1157,13 +1200,12 @@ async function verifyRequiredTransferConsumer() {
     captureCommit.notifications.deliver();
     await capture.retired;
 
-    claim = preparePassiveTransferClaim(
-      targetGraph,
-      targetGraph.api.query,
-      "one",
-      { revalidateAfterMs: 60000.5 },
+    claim = preparePassiveTransferClaim(targetGraph, targetGraph.api.query, "one", {
+      revalidateAfterMs: 60000.5,
+    });
+    const targetValue = computed(() =>
+      claim.store.status.get() === "ready" ? claim.store.value.get() + "!" : "",
     );
-    const targetValue = computed(() => claim.store.status.get() === "ready" ? claim.store.value.get() + "!" : "");
     const targetConstruction = captureReactiveConstruction(targetValue);
     adoption = prepareRequiredTransferAdoption(image, {
       graphs: [targetGraph],
@@ -1179,16 +1221,20 @@ async function verifyRequiredTransferConsumer() {
     check(adoptionCommit !== undefined, "Required adoption did not seal");
     adoptionCommit.publish();
     adoptionPublished = true;
-    check(targetValue.get() === "source value!", "Required cache was not installed in the target graph");
+    check(
+      targetValue.get() === "source value!",
+      "Required cache was not installed in the target graph",
+    );
     adoptionCommit.notifications.deliver();
     await adoption.retired;
 
     const targetStore = targetGraph.api.query("one");
     const scope = createTransferScope(targetGraph, targetGraph.api.query, targetStore);
     const carrier = Object.freeze({ request: "consumer" });
-    operationPlan = prepareTransferOperation([scope], [
-      { role: "raw", source: targetGraph.api.mutate, input: carrier },
-    ]);
+    operationPlan = prepareTransferOperation(
+      [scope],
+      [{ role: "raw", source: targetGraph.api.mutate, input: carrier }],
+    );
     const operationCommit = operationPlan.seal();
     check(operationCommit !== undefined, "Transfer operation did not seal");
     operationCommit.publish();
@@ -1201,15 +1247,20 @@ async function verifyRequiredTransferConsumer() {
     check((await mutationResult) === "mutated", "The original mutation result changed");
 
     targetGraphSuccessor = createGraph({ contract: graphContract });
-    const successorPlan = prepareTransferScopeSuccessors([{
-      operation: operationPlan.operation,
-      predecessor: scope,
-      graph: targetGraphSuccessor,
-      source: targetGraphSuccessor.api.query,
-      input: "one",
-    }]);
+    const successorPlan = prepareTransferScopeSuccessors([
+      {
+        operation: operationPlan.operation,
+        predecessor: scope,
+        graph: targetGraphSuccessor,
+        source: targetGraphSuccessor.api.query,
+        input: "one",
+      },
+    ]);
     const successorCommit = successorPlan.seal();
-    check(successorCommit !== undefined && successorPlan.scopes.length === 1, "Transfer successor did not seal");
+    check(
+      successorCommit !== undefined && successorPlan.scopes.length === 1,
+      "Transfer successor did not seal",
+    );
     successorCommit.publish();
     successorCommit.notifications.deliver();
     await successorPlan.retired;
@@ -1223,7 +1274,10 @@ async function verifyRequiredTransferConsumer() {
   } finally {
     if (mutationCall !== undefined && mutationResult !== undefined && !mutationResolved) {
       backend.resolve(mutationCall, "mutated");
-      await mutationResult.then(() => undefined, () => undefined);
+      await mutationResult.then(
+        () => undefined,
+        () => undefined,
+      );
     }
     if (!adoptionPublished) adoption?.discard();
     if (!capturePublished) capture?.discard();

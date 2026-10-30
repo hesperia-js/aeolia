@@ -1908,7 +1908,7 @@ function createPassiveQueryView(
         const subscribeStore = (runtime.store as unknown as Record<PropertyKey, unknown>)[storeSubscribe];
         if (typeof subscribeStore !== "function")
           throw new TypeError("The native Store has no subscription owner");
-        return (subscribeStore as (observer: (value: unknown) => Unsubscribe))(observer);
+        return (subscribeStore as (observer: (value: unknown) => void) => Unsubscribe)(observer);
       },
     },
   });
@@ -1989,7 +1989,7 @@ function createPassiveStoreShell(
       assertPublished();
       const subscribeStore = (runtime.store as unknown as Record<PropertyKey, unknown>)[storeSubscribe];
       if (typeof subscribeStore !== "function") throw new TypeError("The native Store has no subscription owner");
-      return (subscribeStore as (observer: (value: unknown) => Unsubscribe))(observer);
+      return (subscribeStore as (observer: (value: unknown) => void) => Unsubscribe)(observer);
     } },
   });
   return {

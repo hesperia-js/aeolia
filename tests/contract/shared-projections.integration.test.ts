@@ -569,7 +569,10 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     const openings: Opening[] = [];
     const boundaries: Array<{ readonly options: object; readonly after: number }> = [];
     const trace: string[] = [];
-    const acknowledgements: Array<{ readonly reader: object; readonly receipt: PositionedFoldReceipt<number> }> = [];
+    const acknowledgements: Array<{
+      readonly reader: object;
+      readonly receipt: PositionedFoldReceipt<number>;
+    }> = [];
     const makeChannel = () => {
       const waiters: Array<(result: IteratorResult<Event>) => void> = [];
       const iterable: AsyncIterable<Event> = {
@@ -591,7 +594,8 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
         iterable,
         emit(event: Event) {
           const waiter = waiters.shift();
-          if (waiter === undefined) throw new Error("The positioned reader has no pending next call");
+          if (waiter === undefined)
+            throw new Error("The positioned reader has no pending next call");
           waiter({ done: false, value: event });
         },
       };
@@ -607,23 +611,33 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       initialBoundary: (_input, options) => {
         trace.push("boundary");
         const after = Object.hasOwn(options, "after") ? options.after : 5;
-        if (typeof after !== "number") throw new Error("The genuine initial boundary was not numeric");
+        if (typeof after !== "number")
+          throw new Error("The genuine initial boundary was not numeric");
         boundaries.push({ options, after });
         return { available: true, after };
       },
       readerLifetime: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        if (reservation === undefined || reservation.input !== _input || reservation.after !== after || reservation.seed !== seed)
+        if (
+          reservation === undefined ||
+          reservation.input !== _input ||
+          reservation.after !== after ||
+          reservation.seed !== seed
+        )
           throw new TypeError("The provider lifetime does not match its exact reservation");
         return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
       },
       validateReader: (_input, reader, after, _checkpoint, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined && reservation.after === after && reservation.seed === seed;
+        return (
+          reservation !== undefined && reservation.after === after && reservation.seed === seed
+        );
       },
       isReaderCurrent: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined && reservation.after === after && reservation.seed === seed;
+        return (
+          reservation !== undefined && reservation.after === after && reservation.seed === seed
+        );
       },
       acknowledge: (_input, reader, receipt) => acknowledgements.push({ reader, receipt }),
       releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
@@ -636,7 +650,13 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       acknowledgements,
       reserve(after: number, seed: unknown) {
         const reader = Object.freeze({});
-        reservations.set(reader, { input: undefined, after, seed, controller: new AbortController(), expiresAt: providerClockNow() + 60_000 });
+        reservations.set(reader, {
+          input: undefined,
+          after,
+          seed,
+          controller: new AbortController(),
+          expiresAt: providerClockNow() + 60_000,
+        });
         return reader;
       },
       emit(reader: object, event: Event) {
@@ -690,12 +710,14 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
   let sourceProjection: Projection<number> | undefined;
   let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
   let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
-  let claim: {
-    readonly store: StreamStore<number>;
-    readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
-    readonly retired: Promise<void>;
-    discard(): void;
-  } | undefined;
+  let claim:
+    | {
+        readonly store: StreamStore<number>;
+        readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+        readonly retired: Promise<void>;
+        discard(): void;
+      }
+    | undefined;
   let reader: object | undefined;
   let capturePublished = false;
   let adoptionPublished = false;
@@ -762,7 +784,8 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     });
     expect(capture.image.version).toBe(2);
     const positionedRows = capture.image.positioned;
-    if (positionedRows === undefined) throw new Error("The initial positioned group row was omitted");
+    if (positionedRows === undefined)
+      throw new Error("The initial positioned group row was omitted");
     expect(positionedRows).toMatchObject([
       {
         slot: "p0",
@@ -776,16 +799,18 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     expect(seed.boundary).toEqual({ kind: "initial", after: 5 });
     expect(seed.base).toEqual({ present: false });
     expect(seed.values).toEqual([10]);
-    expect(capture.image.nodes).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: "native",
-        positioned: "p0",
-        projection: 0,
-        facet: "projection-value",
-        hasValue: false,
-        hasError: false,
-      }),
-    ]));
+    expect(capture.image.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "native",
+          positioned: "p0",
+          projection: 0,
+          facet: "projection-value",
+          hasValue: false,
+          hasError: false,
+        }),
+      ]),
+    );
     const captureCommit = capture.seal();
     if (captureCommit === undefined) throw new Error("The genuine initial capture did not seal");
     captureCommit.publish();
@@ -817,11 +842,13 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       graphs: [targetGraph],
       sources: [{ slot: "s0", claim: receiverClaim }],
       positioned: [{ slot: "p0", claim: receiverClaim, seed }],
-      reactive: [{
-        slot: capture.image.roots[0]!,
-        target: targetValue,
-        construction: captureReactiveConstruction(targetValue),
-      }],
+      reactive: [
+        {
+          slot: capture.image.roots[0]!,
+          target: targetValue,
+          construction: captureReactiveConstruction(targetValue),
+        },
+      ],
       codec,
       mappedStateWrites: [],
     });
@@ -847,7 +874,10 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     expect(providerB.trace.indexOf("boundary")).toBeLessThan(providerB.trace.indexOf("pull"));
     expect(providerB.acknowledgements).toHaveLength(0);
 
-    const suffixFold = until(receiverClaim.restoration.projections[0]!.value, (value) => value === 12);
+    const suffixFold = until(
+      receiverClaim.restoration.projections[0]!.value,
+      (value) => value === 12,
+    );
     providerB.emit(targetReader, { position: 6, value: 2 });
     await suffixFold;
     expect(targetSteps).toBe(1);
@@ -872,11 +902,25 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     targetGraph.dispose();
     if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
       providerB.source.releaseReader(undefined, reader);
-    if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
-    if (adoption !== undefined) await adoption.retired.then(() => undefined, () => undefined);
+    if (capture !== undefined)
+      await capture.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (adoption !== undefined)
+      await adoption.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (claim !== undefined) {
-      await claim.retired.then(() => undefined, () => undefined);
-      await claim.restoration.retired.then(() => undefined, () => undefined);
+      await claim.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+      await claim.restoration.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     }
   }
 });

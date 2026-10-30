@@ -319,7 +319,10 @@ describe("canonical Signals graph behavior", () => {
   });
 
   it("refuses required adoption when a browser dependency conflicts with its cached Computed", async () => {
-    const contract = defineContract({ namespace: "required-transfer-browser-dependency", operations: {} });
+    const contract = defineContract({
+      namespace: "required-transfer-browser-dependency",
+      operations: {},
+    });
     const sourceGraph = createGraph({ contract });
     const targetGraph = createGraph({ contract });
     const codec: RequiredTransferCodec = {
@@ -379,7 +382,11 @@ describe("canonical Signals graph behavior", () => {
           reactive: [
             { slot: sourceStateSlot, target: targetState, construction: targetStateConstruction },
             { slot: derivedSlot, target: targetDerived, construction: targetDerivedConstruction },
-            { slot: serverStateSlot, target: targetServerState, construction: targetServerConstruction },
+            {
+              slot: serverStateSlot,
+              target: targetServerState,
+              construction: targetServerConstruction,
+            },
           ],
           codec,
           mappedStateWrites: [],
@@ -393,14 +400,21 @@ describe("canonical Signals graph behavior", () => {
       expect(targetDerivedRuns).toBe(1);
     } finally {
       if (!capturePublished) capture?.discard();
-      if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
+      if (capture !== undefined)
+        await capture.retired.then(
+          () => undefined,
+          () => undefined,
+        );
       sourceGraph.dispose();
       targetGraph.dispose();
     }
   });
 
   it("preserves an already-run browser Computed during a compatible required publication", async () => {
-    const contract = defineContract({ namespace: "required-transfer-warm-browser-cache", operations: {} });
+    const contract = defineContract({
+      namespace: "required-transfer-warm-browser-cache",
+      operations: {},
+    });
     const sourceGraph = createGraph({ contract });
     const targetGraph = createGraph({ contract });
     const codec: RequiredTransferCodec = {
@@ -423,7 +437,10 @@ describe("canonical Signals graph behavior", () => {
         graphs: [sourceGraph],
         roots: [
           { source: sourceDerived, construction: captureReactiveConstruction(sourceDerived) },
-          { source: sourceServerState, construction: captureReactiveConstruction(sourceServerState) },
+          {
+            source: sourceServerState,
+            construction: captureReactiveConstruction(sourceServerState),
+          },
         ],
         codec,
       });
@@ -461,13 +478,18 @@ describe("canonical Signals graph behavior", () => {
         reactive: [
           { slot: sourceStateSlot, target: targetState, construction: targetStateConstruction },
           { slot: derivedSlot, target: targetDerived, construction: targetDerivedConstruction },
-          { slot: image.roots[1]!, target: targetServerState, construction: targetServerConstruction },
+          {
+            slot: image.roots[1]!,
+            target: targetServerState,
+            construction: targetServerConstruction,
+          },
         ],
         codec,
         mappedStateWrites: [],
       });
       const adoptionCommit = adoption.seal();
-      if (adoptionCommit === undefined) throw new Error("The compatible warm adoption did not seal");
+      if (adoptionCommit === undefined)
+        throw new Error("The compatible warm adoption did not seal");
       adoptionCommit.publish();
       adoptionPublished = true;
       expect(targetState.get()).toBe(5);
@@ -479,8 +501,16 @@ describe("canonical Signals graph behavior", () => {
     } finally {
       if (!adoptionPublished) adoption?.discard();
       if (!capturePublished) capture?.discard();
-      if (adoption !== undefined) await adoption.retired.then(() => undefined, () => undefined);
-      if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
+      if (adoption !== undefined)
+        await adoption.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      if (capture !== undefined)
+        await capture.retired.then(
+          () => undefined,
+          () => undefined,
+        );
       sourceGraph.dispose();
       targetGraph.dispose();
     }

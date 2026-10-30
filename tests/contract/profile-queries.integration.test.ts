@@ -676,7 +676,11 @@ describe("context-bound query entries", () => {
     try {
       const beforeKeys = keyCalls();
       for (const invalid of [Number.POSITIVE_INFINITY, Number.NaN, -1]) {
-        expect(() => preparePassiveTransferClaim(graph, graph.api.query, input, { revalidateAfterMs: invalid })).toThrow(Fault);
+        expect(() =>
+          preparePassiveTransferClaim(graph, graph.api.query, input, {
+            revalidateAfterMs: invalid,
+          }),
+        ).toThrow(Fault);
         expect(keyCalls()).toBe(beforeKeys);
       }
       expect(backend.calls).toHaveLength(0);
@@ -795,11 +799,15 @@ describe("context-bound query entries", () => {
         throw new Error("The caller freshness descriptors were not captured");
       expect(zeroCaller.status).toBe("stale");
       expect(oneSecondCaller.status).toBe("ready");
-      expect(capture.image.nodes.filter((node) => node.caller === zeroCaller.slot).length).toBeGreaterThan(1);
+      expect(
+        capture.image.nodes.filter((node) => node.caller === zeroCaller.slot).length,
+      ).toBeGreaterThan(1);
       const physicalSlot = capture.image.stores[0]!.slot;
       const physicalWitness = capture.sources.find((witness) => witness.slot === physicalSlot);
       const zeroWitness = capture.sources.find((witness) => witness.slot === zeroCaller.slot);
-      const oneSecondWitness = capture.sources.find((witness) => witness.slot === oneSecondCaller.slot);
+      const oneSecondWitness = capture.sources.find(
+        (witness) => witness.slot === oneSecondCaller.slot,
+      );
       expect([zeroWindow, oneSecond]).toContain(physicalWitness?.store);
       expect(zeroWitness?.store).toBe(zeroWindow);
       expect(oneSecondWitness?.store).toBe(oneSecond);
@@ -814,7 +822,8 @@ describe("context-bound query entries", () => {
         oneSecondClaim = preparePassiveTransferClaim(target.graph, target.graph.api.query, input, {
           revalidateAfterMs: 1000,
         });
-        if (oneSecondClaim === undefined) throw new Error("The second caller claim was not prepared");
+        if (oneSecondClaim === undefined)
+          throw new Error("The second caller claim was not prepared");
         const secondClaim = oneSecondClaim;
         expect(target.keyCalls()).toBe(2);
         expect(target.backend.calls).toHaveLength(0);
@@ -833,9 +842,21 @@ describe("context-bound query entries", () => {
           { slot: oneSecondCaller.slot, claim: secondClaim },
         ];
         const reactiveRows = [
-          { slot: capture.image.roots[0]!, target: targetZero, construction: captureReactiveConstruction(targetZero) },
-          { slot: capture.image.roots[1]!, target: targetZeroAlias, construction: captureReactiveConstruction(targetZeroAlias) },
-          { slot: capture.image.roots[2]!, target: targetOneSecond, construction: captureReactiveConstruction(targetOneSecond) },
+          {
+            slot: capture.image.roots[0]!,
+            target: targetZero,
+            construction: captureReactiveConstruction(targetZero),
+          },
+          {
+            slot: capture.image.roots[1]!,
+            target: targetZeroAlias,
+            construction: captureReactiveConstruction(targetZeroAlias),
+          },
+          {
+            slot: capture.image.roots[2]!,
+            target: targetOneSecond,
+            construction: captureReactiveConstruction(targetOneSecond),
+          },
         ];
         const adoptionOptions = {
           graphs: [target.graph],
@@ -852,14 +873,19 @@ describe("context-bound query entries", () => {
               : caller,
           ),
         } as typeof capture.image;
-        expect(() => prepareRequiredTransferAdoption(wrongWindowImage, adoptionOptions)).toThrow(TypeError);
+        expect(() => prepareRequiredTransferAdoption(wrongWindowImage, adoptionOptions)).toThrow(
+          TypeError,
+        );
         const collapsedRows = [
           sourceRows[0]!,
           sourceRows[1]!,
           { slot: oneSecondCaller.slot, claim: zeroClaim },
         ];
         expect(() =>
-          prepareRequiredTransferAdoption(capture.image, { ...adoptionOptions, sources: collapsedRows }),
+          prepareRequiredTransferAdoption(capture.image, {
+            ...adoptionOptions,
+            sources: collapsedRows,
+          }),
         ).toThrow(TypeError);
         const crossedRows = [
           sourceRows[0]!,
@@ -867,7 +893,10 @@ describe("context-bound query entries", () => {
           { slot: oneSecondCaller.slot, claim: zeroClaim },
         ];
         expect(() =>
-          prepareRequiredTransferAdoption(capture.image, { ...adoptionOptions, sources: crossedRows }),
+          prepareRequiredTransferAdoption(capture.image, {
+            ...adoptionOptions,
+            sources: crossedRows,
+          }),
         ).toThrow(TypeError);
         expect(target.keyCalls()).toBe(receiverKeys);
         expect(target.backend.calls).toHaveLength(0);
@@ -898,9 +927,11 @@ describe("context-bound query entries", () => {
           zeroClaim.discard();
           oneSecondClaim?.discard();
         }
-        await Promise.all(oneSecondClaim === undefined
-          ? [zeroClaim.retired]
-          : [zeroClaim.retired, oneSecondClaim.retired]);
+        await Promise.all(
+          oneSecondClaim === undefined
+            ? [zeroClaim.retired]
+            : [zeroClaim.retired, oneSecondClaim.retired],
+        );
       }
     } finally {
       source.graph.dispose();
@@ -934,7 +965,9 @@ describe("context-bound query entries", () => {
       expect(capture.image.stores[0]!.hasValue).toBe(false);
       expect(capture.image.callers).toHaveLength(1);
 
-      const claim = preparePassiveTransferClaim(target.graph, target.graph.api.query, input, { snapshot: false });
+      const claim = preparePassiveTransferClaim(target.graph, target.graph.api.query, input, {
+        snapshot: false,
+      });
       expect(target.keyCalls()).toBe(1);
       expect(target.backend.calls).toHaveLength(0);
       expect(() => claim.store.ready).toThrow(TypeError);
@@ -948,11 +981,13 @@ describe("context-bound query entries", () => {
             { slot: capture.image.stores[0]!.slot, claim },
             { slot: capture.image.callers[0]!.slot, claim },
           ],
-          reactive: [{
-            slot: capture.image.roots[0]!,
-            target: targetRoot,
-            construction: captureReactiveConstruction(targetRoot),
-          }],
+          reactive: [
+            {
+              slot: capture.image.roots[0]!,
+              target: targetRoot,
+              construction: captureReactiveConstruction(targetRoot),
+            },
+          ],
           codec: profileTransferCodec,
           mappedStateWrites: [],
         });
@@ -1014,7 +1049,6 @@ describe("context-bound query entries", () => {
       graph.dispose();
     }
   });
-
 });
 
 it("keeps a passive bound query claim on its exact profile at a shared key", async () => {
@@ -1044,7 +1078,9 @@ it("keeps a passive bound query claim on its exact profile at a shared key", asy
   const controller = new AbortController();
   try {
     const beforeKeys = f.keyCalls();
-    const claim = preparePassiveTransferClaim(f.graph, first, input, { abortSignal: controller.signal });
+    const claim = preparePassiveTransferClaim(f.graph, first, input, {
+      abortSignal: controller.signal,
+    });
     expect(f.keyCalls()).toBe(beforeKeys + 1);
     expect(firstFetches).toBe(0);
     expect(secondFetches).toBe(0);

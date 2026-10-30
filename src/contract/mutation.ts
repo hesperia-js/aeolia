@@ -145,8 +145,7 @@ function applyMutationEffects(
       const resolved = resolveMutationTarget(state, affected, input, resetEpoch);
       if (resolved === undefined) return;
       target = resolved;
-      if (target.runtime !== undefined)
-        registerTransferDispatchTarget(dispatch, target.runtime);
+      if (target.runtime !== undefined) registerTransferDispatchTarget(dispatch, target.runtime);
     } catch {
       if (!isCurrentMutationEpoch(state, resetEpoch)) return;
       graphFault(state, new Fault("contract", [affected.query.name]));
@@ -212,8 +211,7 @@ export function runMutation<I, R>(
     for (const affected of definition.affects) {
       const target = resolveMutationTarget(state, affected, input, resetEpoch);
       if (target === undefined) return superseded();
-      if (target.runtime !== undefined)
-        registerTransferDispatchTarget(dispatch, target.runtime);
+      if (target.runtime !== undefined) registerTransferDispatchTarget(dispatch, target.runtime);
       targets.push(target);
     }
     if (admission !== undefined) {
@@ -451,7 +449,10 @@ function effectPhase(
 ): { readonly phase: EffectPhaseRuntime; readonly result: unknown } {
   assertBoundPhase(attempt);
   const selectorAdmission = beginTransferAdmission(
-    attempt.binding.context.state, effect.query, attempt.binding, input
+    attempt.binding.context.state,
+    effect.query,
+    attempt.binding,
+    input,
   );
   let selectedInput: unknown;
   try {
@@ -497,7 +498,10 @@ function effectPhase(
     existing(queryInput: unknown): readonly ExistingTarget<any>[] {
       assertActive();
       const admission = beginTransferAdmission(
-        attempt.binding.context.state, effect.query, attempt.binding, queryInput
+        attempt.binding.context.state,
+        effect.query,
+        attempt.binding,
+        queryInput,
       );
       let key: ReturnType<typeof storeKey>;
       try {

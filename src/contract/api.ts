@@ -261,9 +261,10 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
       typeof events[Symbol.asyncIterator] !== "function"
     )
       throw new TypeError("Positioned stream open must return an AsyncIterable.");
-    const initialBoundary = capturedSource.initialBoundary === undefined
-      ? undefined
-      : Reflect.apply(capturedSource.initialBoundary, capturedSource, [value, positionedOptions]);
+    const initialBoundary =
+      capturedSource.initialBoundary === undefined
+        ? undefined
+        : Reflect.apply(capturedSource.initialBoundary, capturedSource, [value, positionedOptions]);
     positionedInitialBoundaryWriterByOpenOptions.get(options)?.(initialBoundary);
     return (async function* (): AsyncGenerator<Value> {
       for await (const event of events as AsyncIterable<PositionedStreamEvent<Position, Value>>) {

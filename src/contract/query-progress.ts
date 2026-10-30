@@ -16,7 +16,12 @@ import { signal, __internal as reactiveInternal } from "../reactive.ts";
 import type { WritableSignal } from "../reactive.ts";
 import { assertStoreOpen, graphFault, reportContinuationError } from "./faults.ts";
 import { scheduleSweep, updateCollectionCandidate } from "./collection.ts";
-import { noteTransferChange, prepareTransferChange, registerTransferReadable, unregisterTransferReadable } from "./query-policy.ts";
+import {
+  noteTransferChange,
+  prepareTransferChange,
+  registerTransferReadable,
+  unregisterTransferReadable,
+} from "./query-policy.ts";
 
 function idleSnapshot(): QueryProgressSnapshot<unknown> {
   return Object.freeze({

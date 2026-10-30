@@ -337,7 +337,9 @@ export function retireOwner(
 }
 
 /** @internal Creates the original completion before a reader session is exposed. */
-export function prepareReaderRetirement(parent: RetirementOwner): RetirementOwner & { readonly promise: Promise<void> } {
+export function prepareReaderRetirement(
+  parent: RetirementOwner,
+): RetirementOwner & { readonly promise: Promise<void> } {
   const owner = createRetirementOwner(parent);
   const completion = createPhysicalCompletion<void>();
   owner.promise = completion.promise;
@@ -348,15 +350,23 @@ export function prepareReaderRetirement(parent: RetirementOwner): RetirementOwne
 }
 
 const readerClock = Date.now;
-const readerAborted = typeof AbortSignal === "undefined" ? undefined :
-  Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get;
-const readerAbortReason = typeof AbortSignal === "undefined" ? undefined :
-  Object.getOwnPropertyDescriptor(AbortSignal.prototype, "reason")?.get;
-const readerAddListener = typeof EventTarget === "undefined" ? undefined : EventTarget.prototype.addEventListener;
-const readerRemoveListener = typeof EventTarget === "undefined" ? undefined : EventTarget.prototype.removeEventListener;
+const readerAborted =
+  typeof AbortSignal === "undefined"
+    ? undefined
+    : Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get;
+const readerAbortReason =
+  typeof AbortSignal === "undefined"
+    ? undefined
+    : Object.getOwnPropertyDescriptor(AbortSignal.prototype, "reason")?.get;
+const readerAddListener =
+  typeof EventTarget === "undefined" ? undefined : EventTarget.prototype.addEventListener;
+const readerRemoveListener =
+  typeof EventTarget === "undefined" ? undefined : EventTarget.prototype.removeEventListener;
 
 /** @internal The platform epoch clock captured before provider callbacks. */
-export function readerLifetimeNow(): number { return nativeApply(readerClock, undefined, []); }
+export function readerLifetimeNow(): number {
+  return nativeApply(readerClock, undefined, []);
+}
 
 export interface PreparedReaderLifetime {
   readonly signal: AbortSignal;
@@ -366,28 +376,44 @@ export interface PreparedReaderLifetime {
 }
 
 /** @internal Captures a genuine reservation lifetime without retaining provider getters. */
-export function prepareReaderLifetime(value: unknown, abort: (reason: unknown) => void): PreparedReaderLifetime {
-  if (value === null || typeof value !== "object" || readerAborted === undefined ||
-      readerAddListener === undefined || readerRemoveListener === undefined)
+export function prepareReaderLifetime(
+  value: unknown,
+  abort: (reason: unknown) => void,
+): PreparedReaderLifetime {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    readerAborted === undefined ||
+    readerAddListener === undefined ||
+    readerRemoveListener === undefined
+  )
     throw new TypeError("Required positioned transfer needs a native reservation lifetime");
   const fields = Reflect.ownKeys(value);
   if (fields.some((key) => key !== "signal" && key !== "expiresAt"))
     throw new TypeError("Unknown reader lifetime field");
   const signalField = Object.getOwnPropertyDescriptor(value, "signal");
   const deadlineField = Object.getOwnPropertyDescriptor(value, "expiresAt");
-  if (signalField === undefined || !("value" in signalField) ||
-      (deadlineField !== undefined && !("value" in deadlineField)))
+  if (
+    signalField === undefined ||
+    !("value" in signalField) ||
+    (deadlineField !== undefined && !("value" in deadlineField))
+  )
     throw new TypeError("Reader lifetime requires own data fields");
   const signal = signalField.value as AbortSignal;
   const expiresAt = deadlineField?.value as number | undefined;
   if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)))
     throw new TypeError("Reader deadline must be its existing finite epoch deadline");
-  if (nativeApply(readerAborted, signal, []) !== false ||
-      (expiresAt !== undefined && readerLifetimeNow() >= expiresAt))
+  if (
+    nativeApply(readerAborted, signal, []) !== false ||
+    (expiresAt !== undefined && readerLifetimeNow() >= expiresAt)
+  )
     throw new TypeError("Reader reservation is already invalid");
   let disposed = false;
   const listener = (): void => {
-    if (!disposed) abort(readerAbortReason === undefined ? undefined : nativeApply(readerAbortReason, signal, []));
+    if (!disposed)
+      abort(
+        readerAbortReason === undefined ? undefined : nativeApply(readerAbortReason, signal, []),
+      );
   };
   nativeApply(readerAddListener, signal, ["abort", listener, { once: true }]);
   const dispose = (): void => {
@@ -399,9 +425,15 @@ export function prepareReaderLifetime(value: unknown, abort: (reason: unknown) =
     dispose();
     throw new TypeError("Reader lifetime changed during preparation");
   }
-  return Object.freeze({ signal, ...(expiresAt === undefined ? {} : { expiresAt }),
-    currentAt: (now: number): boolean => !disposed && nativeApply(readerAborted, signal, readerGetterArguments) === false &&
-      (expiresAt === undefined || now < expiresAt), dispose });
+  return Object.freeze({
+    signal,
+    ...(expiresAt === undefined ? {} : { expiresAt }),
+    currentAt: (now: number): boolean =>
+      !disposed &&
+      nativeApply(readerAborted, signal, readerGetterArguments) === false &&
+      (expiresAt === undefined || now < expiresAt),
+    dispose,
+  });
 }
 
 /** @internal Observe a completion whose constructor failed before exposing its resource. */
@@ -410,6 +442,10 @@ export function observeUnreturnedReaderRetirement(retired: Promise<void>): void 
 }
 
 /** @internal Observe actual reader cleanup without replacing either public completion. */
-export function observeReaderCompletion(retired: Promise<void>, fulfilled: () => void, rejected: (cause: unknown) => void): void {
+export function observeReaderCompletion(
+  retired: Promise<void>,
+  fulfilled: () => void,
+  rejected: (cause: unknown) => void,
+): void {
   void nativeApply(nativeThen, retired, [fulfilled, rejected]);
 }

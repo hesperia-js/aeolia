@@ -834,7 +834,8 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
         };
         const emit = (event: Event): void => {
           const waiter = waiters.shift();
-          if (waiter === undefined) throw new Error("The positioned address source has no pending next call");
+          if (waiter === undefined)
+            throw new Error("The positioned address source has no pending next call");
           waiter({ done: false, value: event });
         };
         openings.push({ reader: options.reader });
@@ -844,23 +845,32 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
       },
       readerLifetime: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        if (reservation === undefined || reservation.input !== _input || reservation.after !== after || reservation.seed !== seed)
+        if (
+          reservation === undefined ||
+          reservation.input !== _input ||
+          reservation.after !== after ||
+          reservation.seed !== seed
+        )
           throw new TypeError("The reader lifetime does not match its exact reservation");
         return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
       },
       validateReader: (input, reader, after, _checkpoint, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined &&
+        return (
+          reservation !== undefined &&
           reservation.input === input &&
           reservation.after === after &&
-          reservation.seed === seed;
+          reservation.seed === seed
+        );
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined &&
+        return (
+          reservation !== undefined &&
           reservation.input === input &&
           reservation.after === after &&
-          reservation.seed === seed;
+          reservation.seed === seed
+        );
       },
       acknowledge: () => undefined,
       releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
@@ -870,7 +880,13 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
       openings,
       reserve(input: Input, after: number, seed: unknown) {
         const reader = Object.freeze({});
-        reservations.set(reader, { input, after, seed, controller: new AbortController(), expiresAt: positionedProviderClockNow() + 60_000 });
+        reservations.set(reader, {
+          input,
+          after,
+          seed,
+          controller: new AbortController(),
+          expiresAt: positionedProviderClockNow() + 60_000,
+        });
         return reader;
       },
       emitLive(event: Event) {
@@ -920,12 +936,14 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
   const sourceProjection = project(sourceStore, policy);
   let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
   let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
-  let firstClaim: {
-    readonly store: StreamStore<number>;
-    readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
-    readonly retired: Promise<void>;
-    discard(): void;
-  } | undefined;
+  let firstClaim:
+    | {
+        readonly store: StreamStore<number>;
+        readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+        readonly retired: Promise<void>;
+        discard(): void;
+      }
+    | undefined;
   let peerClaim: typeof firstClaim;
   let firstReader: object | undefined;
   let peerReader: object | undefined;
@@ -957,14 +975,17 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     const decodedSeeds = new Map<string, unknown>([[seedId, seed]]);
     const codec: RequiredTransferCodec = {
       encodeValue: (value) =>
-        value !== null && typeof value === "object" &&
-        Object.hasOwn(value, "boundary") && Object.hasOwn(value, "base")
+        value !== null &&
+        typeof value === "object" &&
+        Object.hasOwn(value, "boundary") &&
+        Object.hasOwn(value, "base")
           ? ({ $ref: seedId } as ClosedEncodedValue)
           : (value as ClosedEncodedValue),
       encodeFailure: (cause) => String(cause),
       decodeValue: (value) => {
         if (
-          value !== null && typeof value === "object" &&
+          value !== null &&
+          typeof value === "object" &&
           Object.hasOwn(value, "$ref") &&
           (value as { readonly $ref?: unknown }).$ref === seedId
         ) {
@@ -1002,23 +1023,19 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     expect(empty).toMatchObject({ kind: "stable", state: "empty" });
     const firstReaderLocal = providerB.reserve(input, 5, seed);
     firstReader = firstReaderLocal;
-    const first = preparePassiveTransferClaim(
-      targetGraph,
-      targetBinding,
-      input,
-      undefined,
-      { policies: [policy] as const, seed, reader: firstReaderLocal },
-    );
+    const first = preparePassiveTransferClaim(targetGraph, targetBinding, input, undefined, {
+      policies: [policy] as const,
+      seed,
+      reader: firstReaderLocal,
+    });
     firstClaim = first;
     const peerReaderLocal = providerB.reserve(input, 5, seed);
     peerReader = peerReaderLocal;
-    const peer = preparePassiveTransferClaim(
-      targetGraph,
-      targetBinding,
-      input,
-      undefined,
-      { policies: [policy] as const, seed, reader: peerReaderLocal },
-    );
+    const peer = preparePassiveTransferClaim(targetGraph, targetBinding, input, undefined, {
+      policies: [policy] as const,
+      seed,
+      reader: peerReaderLocal,
+    });
     peerClaim = peer;
     expect(first.store.identity).not.toBe(peer.store.identity);
     expect(providerB.openings).toHaveLength(0);
@@ -1036,11 +1053,13 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
       graphs: [targetGraph],
       sources: [{ slot: "s0", claim: first }],
       positioned: [{ slot: "p0", claim: first, seed }],
-      reactive: [{
-        slot: image.roots[0]!,
-        target: targetValue,
-        construction: captureReactiveConstruction(targetValue),
-      }],
+      reactive: [
+        {
+          slot: image.roots[0]!,
+          target: targetValue,
+          construction: captureReactiveConstruction(targetValue),
+        },
+      ],
       codec,
       mappedStateWrites: [],
     });
@@ -1053,8 +1072,14 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     expect(targetValue.get()).toBe(3);
     expect(targetRuns).toBe(0);
     const occupied = inspectBoundAddress(targetBinding, key);
-    if (occupied.kind !== "stable") throw new Error("Expected the published reader address to be stable");
-    expect(occupied).toMatchObject({ kind: "stable", state: "occupied", present: true, basePresent: true });
+    if (occupied.kind !== "stable")
+      throw new Error("Expected the published reader address to be stable");
+    expect(occupied).toMatchObject({
+      kind: "stable",
+      state: "occupied",
+      present: true,
+      basePresent: true,
+    });
     expect(inspectBoundAddress(targetBinding, key, { expected: empty.stamp })).toMatchObject({
       kind: "changed",
     });
@@ -1094,17 +1119,43 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     sourceGraph.dispose();
     targetContext.dispose();
     targetGraph.dispose();
-    if (firstReader !== undefined && firstClaim === undefined && providerB.releaseCount(firstReader) === 0)
+    if (
+      firstReader !== undefined &&
+      firstClaim === undefined &&
+      providerB.releaseCount(firstReader) === 0
+    )
       providerB.source.releaseReader(input, firstReader);
-    if (peerReader !== undefined && peerClaim === undefined && providerB.releaseCount(peerReader) === 0)
+    if (
+      peerReader !== undefined &&
+      peerClaim === undefined &&
+      providerB.releaseCount(peerReader) === 0
+    )
       providerB.source.releaseReader(input, peerReader);
-    if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
-    if (adoption !== undefined) await adoption.retired.then(() => undefined, () => undefined);
+    if (capture !== undefined)
+      await capture.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (adoption !== undefined)
+      await adoption.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (firstClaim !== undefined) {
-      await firstClaim.retired.then(() => undefined, () => undefined);
-      await firstClaim.restoration.retired.then(() => undefined, () => undefined);
+      await firstClaim.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+      await firstClaim.restoration.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     }
-    if (peerClaim !== undefined) await peerClaim.retired.then(() => undefined, () => undefined);
+    if (peerClaim !== undefined)
+      await peerClaim.retired.then(
+        () => undefined,
+        () => undefined,
+      );
   }
 });
 

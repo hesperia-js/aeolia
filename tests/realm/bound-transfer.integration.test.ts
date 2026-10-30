@@ -968,7 +968,9 @@ it("joins a bound mutation to the exact native operation role until physical com
   let runs = 0;
   let completion: Promise<void> | undefined;
   let runSettled = false;
-  const work = new Promise<void>((resolve) => { resolveRun = resolve; });
+  const work = new Promise<void>((resolve) => {
+    resolveRun = resolve;
+  });
   const query = createQuery({
     name: "bound-transfer.work-query",
     key: (input: Input) => input.key,
@@ -999,11 +1001,16 @@ it("joins a bound mutation to the exact native operation role until physical com
     const queryStore = graph.api.query(input);
     await expect(queryStore.ready).resolves.toBe(1);
     const scope = createTransferScope(graph, graph.api.query, queryStore);
-    const pending = prepareTransferOperation([scope], [{
-      role: "bound",
-      source: mutationBinding,
-      input,
-    }]);
+    const pending = prepareTransferOperation(
+      [scope],
+      [
+        {
+          role: "bound",
+          source: mutationBinding,
+          input,
+        },
+      ],
+    );
     const operationCommit = pending.seal();
     if (operationCommit === undefined) throw new Error("The bound mutation operation did not seal");
     operationCommit.publish();
@@ -1020,7 +1027,8 @@ it("joins a bound mutation to the exact native operation role until physical com
     runSettled = true;
     const retirement = prepareTransferOperationRetirement(pending.operation);
     const retirementCommit = retirement.seal();
-    if (retirementCommit === undefined) throw new Error("The completed bound mutation did not retire");
+    if (retirementCommit === undefined)
+      throw new Error("The completed bound mutation did not retire");
     retirementCommit.publish();
     retirementCommit.notifications.deliver();
     await retirement.retired;

@@ -21,7 +21,11 @@ import {
   prepareRequiredTransferAdoption,
   prepareRequiredTransferCapture,
 } from "../../src/index.ts";
-import type { ClosedEncodedValue, PassiveTransferClaim, RequiredTransferCodec } from "../../src/index.ts";
+import type {
+  ClosedEncodedValue,
+  PassiveTransferClaim,
+  RequiredTransferCodec,
+} from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
 interface Deferred<T> {
@@ -1525,10 +1529,16 @@ describe("query progress", () => {
       },
     });
     const sourceGraph = createGraph({
-      contract: defineContract({ namespace: "progress-required-transfer", operations: { query: sourceQuery } }),
+      contract: defineContract({
+        namespace: "progress-required-transfer",
+        operations: { query: sourceQuery },
+      }),
     });
     const targetGraph = createGraph({
-      contract: defineContract({ namespace: "progress-required-transfer", operations: { query: targetQuery } }),
+      contract: defineContract({
+        namespace: "progress-required-transfer",
+        operations: { query: targetQuery },
+      }),
     });
     let claim: PassiveTransferClaim<typeof targetGraph.api.query> | undefined;
     let stop: (() => void) | undefined;
@@ -1565,7 +1575,8 @@ describe("query progress", () => {
         mappedStateWrites: [],
       });
       const adoptionCommit = adoption.seal();
-      if (adoptionCommit === undefined) throw new Error("The passive progress adoption did not seal");
+      if (adoptionCommit === undefined)
+        throw new Error("The passive progress adoption did not seal");
       adoptionCommit.publish();
       adoptionPublished = true;
       adoptionCommit.notifications.deliver();
@@ -1577,7 +1588,8 @@ describe("query progress", () => {
       const ready = claim.store.ready;
       await flush();
       expect(targetFetches).toBe(1);
-      if (targetReport === undefined) throw new Error("The target query did not receive its progress reporter");
+      if (targetReport === undefined)
+        throw new Error("The target query did not receive its progress reporter");
       targetReport("target-report");
       await flush();
       expect(targetRoot.get()).toBe(1);
@@ -1593,5 +1605,4 @@ describe("query progress", () => {
       targetGraph.dispose();
     }
   });
-
 });

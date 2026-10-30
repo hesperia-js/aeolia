@@ -256,8 +256,7 @@ function closePositionedStoreSession<T>(runtime: StoreRuntime<T>, session: Strea
   const preparation = positioned.preparation;
   const unpublished = preparation !== undefined && !preparation.published;
   noteTransferChange(runtime);
-  if (!unpublished && runtime.binding !== undefined)
-    noteTransferChange(runtime.binding.handle);
+  if (!unpublished && runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
   noteTransferChange(session);
   noteTransferChange(positioned);
   positioned.phase = "closed";
@@ -282,8 +281,7 @@ function closePositionedStoreSession<T>(runtime: StoreRuntime<T>, session: Strea
       }
     }
   }
-  if (!unpublished && runtime.binding?.context.disposed !== true)
-    changeBoundAddress(runtime);
+  if (!unpublished && runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
   const reader = positioned.reader;
   try {
     if (reader !== undefined && reader.owned && !reader.released) {
@@ -317,8 +315,7 @@ export function discardPositionedStoreSession<T>(
   let failure: unknown;
   let failed = false;
   try {
-    if (!session.ended)
-      endStream(runtime, session, "closed", undefined, { abortReason });
+    if (!session.ended) endStream(runtime, session, "closed", undefined, { abortReason });
   } catch (error) {
     failure = error;
     failed = true;
@@ -330,8 +327,7 @@ export function discardPositionedStoreSession<T>(
   removePendingPositionedStoreRoots(runtime);
   if (!unpublished) {
     const state = runtime.graph.__runtime;
-    if (state.stores.get(runtime.identity) === runtime)
-      state.stores.delete(runtime.identity);
+    if (state.stores.get(runtime.identity) === runtime) state.stores.delete(runtime.identity);
     const binding = runtime.binding;
     if (binding?.kind === "stream" && binding.readerStores?.has(runtime as StoreRuntime<unknown>))
       binding.readerStores.delete(runtime as StoreRuntime<unknown>);
@@ -401,8 +397,7 @@ function endDetachedPositionedStoreSession<T>(
   if (removeCallerAbort !== undefined) attempt(removeCallerAbort);
   if (removeControllerAbort !== undefined) attempt(removeControllerAbort);
   attempt(() => session.controller.abort(options?.abortReason ?? reason));
-  if (iterator !== undefined)
-    attempt(() => returnStreamIterator(session, iterator, true), false);
+  if (iterator !== undefined) attempt(() => returnStreamIterator(session, iterator, true), false);
   finishPhysicalWork(cleanupWork);
   removePendingPositionedStoreRoots(runtime);
   for (const error of failures) reportContinuationError(runtime.graph.__runtime, error);
@@ -425,8 +420,11 @@ export function endStream<T>(
     const deferred = endBoundStream(runtime, session, status, reason, options);
     if (options?.deferCleanup && deferred !== undefined)
       return () => {
-        try { deferred(); }
-        finally { retirePositionedStoreResource(runtime, session); }
+        try {
+          deferred();
+        } finally {
+          retirePositionedStoreResource(runtime, session);
+        }
       };
     retirePositionedStoreResource(runtime, session);
     return deferred;
@@ -515,12 +513,18 @@ export function endStream<T>(
     session.listeners.clear();
     if (runtime.stream === session) runtime.stream = undefined;
     return () => {
-      try { cleanup(); }
-      finally { retirePositionedStoreResource(runtime, session); }
+      try {
+        cleanup();
+      } finally {
+        retirePositionedStoreResource(runtime, session);
+      }
     };
   }
-  try { cleanup(); }
-  finally { retirePositionedStoreResource(runtime, session); }
+  try {
+    cleanup();
+  } finally {
+    retirePositionedStoreResource(runtime, session);
+  }
 }
 
 function endBoundStream<T>(

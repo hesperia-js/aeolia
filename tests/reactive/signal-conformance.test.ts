@@ -239,7 +239,11 @@ describe("canonical Signals surface", () => {
         expect(evaluations).toBe(1);
       } finally {
         if (!published) capture?.discard();
-        if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
+        if (capture !== undefined)
+          await capture.retired.then(
+            () => undefined,
+            () => undefined,
+          );
         graph.dispose();
       }
     });

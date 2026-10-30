@@ -58,7 +58,8 @@ export function registerDormantStoreHandle<T>(
 ): void {
   if (handle === runtime.store || runtimeByStore.has(handle) || queryRuntimeByStore.has(handle))
     throw new TypeError("A passive claim must use a fresh Store wrapper");
-  if (typeof isPublished !== "function") throw new TypeError("Expected a native publication predicate");
+  if (typeof isPublished !== "function")
+    throw new TypeError("Expected a native publication predicate");
   if (typeof query !== "boolean") throw new TypeError("Expected a native Store role");
   noteTransferChange(handle);
   dormantStoreHandles.set(handle, { runtime, isPublished, query });
@@ -224,7 +225,10 @@ export const positionedStreamSourceByDefinition = new WeakMap<
 >();
 
 /** Native event-position writer attached only to one active source-open call. */
-export const positionedInitialBoundaryWriterByOpenOptions = new WeakMap<object, (result: unknown) => void>();
+export const positionedInitialBoundaryWriterByOpenOptions = new WeakMap<
+  object,
+  (result: unknown) => void
+>();
 
 export const positionedPositionWriterByOpenOptions = new WeakMap<
   object,

@@ -1,5 +1,15 @@
 import { expect, test } from "bun:test";
-import { affects, createGraph, createMutation, createQuery, createTransferScope, preparePassiveTransferClaim, prepareTransferOperation, prepareTransferOperationRetirement, subscribe } from "../../src/index.ts";
+import {
+  affects,
+  createGraph,
+  createMutation,
+  createQuery,
+  createTransferScope,
+  preparePassiveTransferClaim,
+  prepareTransferOperation,
+  prepareTransferOperationRetirement,
+  subscribe,
+} from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
 async function fixture(on: "invalidate" | "revalidate" = "revalidate") {
@@ -192,7 +202,9 @@ test("joins the exact raw mutation dispatch through its original physical work",
   let completion: Promise<void> | undefined;
   let repeated: Promise<void> | undefined;
   let runSettled = false;
-  const runWork = new Promise<void>((resolve) => { resolveRun = resolve; });
+  const runWork = new Promise<void>((resolve) => {
+    resolveRun = resolve;
+  });
   const query = createQuery({
     name: "transfer.work-query",
     key: (input: { readonly key: string }) => input.key,
@@ -204,7 +216,15 @@ test("joins the exact raw mutation dispatch through its original physical work",
       runs += 1;
       await runWork;
     },
-    affects: [affects(query, { select: (input: { readonly key: string }) => { selections += 1; return input; }, on: "invalidate" })],
+    affects: [
+      affects(query, {
+        select: (input: { readonly key: string }) => {
+          selections += 1;
+          return input;
+        },
+        on: "invalidate",
+      }),
+    ],
   });
   const graph = createGraph({
     contract: { namespace: "mutation-transfer-work", operations: { query, mutation } },
@@ -232,7 +252,8 @@ test("joins the exact raw mutation dispatch through its original physical work",
     runSettled = true;
     const retirement = prepareTransferOperationRetirement(pending.operation);
     const retirementCommit = retirement.seal();
-    if (retirementCommit === undefined) throw new Error("The completed native mutation did not retire");
+    if (retirementCommit === undefined)
+      throw new Error("The completed native mutation did not retire");
     retirementCommit.publish();
     retirementCommit.notifications.deliver();
     await retirement.retired;
@@ -242,15 +263,21 @@ test("joins the exact raw mutation dispatch through its original physical work",
     const selectionsBeforeReuse = selections;
     let reusePreparationError: unknown;
     let reusedOperation: ReturnType<typeof prepareTransferOperation> | undefined;
-    try { reusedOperation = prepareTransferOperation([scope], [dispatch]); }
-    catch (error) { reusePreparationError = error; }
+    try {
+      reusedOperation = prepareTransferOperation([scope], [dispatch]);
+    } catch (error) {
+      reusePreparationError = error;
+    }
     if (reusedOperation !== undefined) {
       reusedOperation.discard();
       await reusedOperation.retired;
     }
     let repeatedDispatchError: unknown;
-    try { repeated = graph.api.mutation(input); }
-    catch (error) { repeatedDispatchError = error; }
+    try {
+      repeated = graph.api.mutation(input);
+    } catch (error) {
+      repeatedDispatchError = error;
+    }
     if (repeated !== undefined) await repeated.catch(() => undefined);
     expect(reusePreparationError).toBeInstanceOf(TypeError);
     expect(repeatedDispatchError).toBeInstanceOf(TypeError);

@@ -1128,7 +1128,8 @@ it("binds positioned reader lifetime to native abort and physical restoration re
         openings.push(opening);
         const emit = (event: Event): void => {
           const waiter = waiters.shift();
-          if (waiter === undefined) throw new Error("The positioned stream has no pending next call");
+          if (waiter === undefined)
+            throw new Error("The positioned stream has no pending next call");
           waiter({ done: false, value: event });
         };
         if (options.reader === undefined) emitLive = emit;
@@ -1137,23 +1138,32 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       },
       readerLifetime: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        if (reservation === undefined || reservation.input !== _input || reservation.after !== after || reservation.seed !== seed)
+        if (
+          reservation === undefined ||
+          reservation.input !== _input ||
+          reservation.after !== after ||
+          reservation.seed !== seed
+        )
           throw new TypeError("The positioned lifetime did not match its exact reservation");
         return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
       },
       validateReader: (input, reader, after, _checkpoint, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined &&
+        return (
+          reservation !== undefined &&
           reservation.input === input &&
           reservation.after === after &&
-          reservation.seed === seed;
+          reservation.seed === seed
+        );
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined &&
+        return (
+          reservation !== undefined &&
           reservation.input === input &&
           reservation.after === after &&
-          reservation.seed === seed;
+          reservation.seed === seed
+        );
       },
       acknowledge: () => undefined,
       releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
@@ -1213,22 +1223,26 @@ it("binds positioned reader lifetime to native abort and physical restoration re
   let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
   let pendingGraph: ReturnType<typeof createGraph> | undefined;
   let pendingContext: ReturnType<typeof createBindingContext> | undefined;
-  let pendingClaim: {
-    readonly store: StreamStore<number>;
-    readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
-    readonly retired: Promise<void>;
-    discard(): void;
-  } | undefined;
+  let pendingClaim:
+    | {
+        readonly store: StreamStore<number>;
+        readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+        readonly retired: Promise<void>;
+        discard(): void;
+      }
+    | undefined;
   let pendingAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
   let pendingReader: object | undefined;
   let activeGraph: ReturnType<typeof createGraph> | undefined;
   let activeContext: ReturnType<typeof createBindingContext> | undefined;
-  let activeClaim: {
-    readonly store: StreamStore<number>;
-    readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
-    readonly retired: Promise<void>;
-    discard(): void;
-  } | undefined;
+  let activeClaim:
+    | {
+        readonly store: StreamStore<number>;
+        readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+        readonly retired: Promise<void>;
+        discard(): void;
+      }
+    | undefined;
   let activeAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
   let activeReader: object | undefined;
   let activePublished = false;
@@ -1264,14 +1278,17 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     const decodedSeeds = new Map<string, unknown>([[seedId, seed]]);
     const codec: RequiredTransferCodec = {
       encodeValue: (value) =>
-        value !== null && typeof value === "object" &&
-        Object.hasOwn(value, "boundary") && Object.hasOwn(value, "base")
+        value !== null &&
+        typeof value === "object" &&
+        Object.hasOwn(value, "boundary") &&
+        Object.hasOwn(value, "base")
           ? ({ $ref: seedId } as ClosedEncodedValue)
           : (value as ClosedEncodedValue),
       encodeFailure: (cause) => String(cause),
       decodeValue: (value) => {
         if (
-          value !== null && typeof value === "object" &&
+          value !== null &&
+          typeof value === "object" &&
           Object.hasOwn(value, "$ref") &&
           (value as { readonly $ref?: unknown }).$ref === seedId
         ) {
@@ -1331,11 +1348,13 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       graphs: [pendingGraph],
       sources: [{ slot: "s0", claim: pendingClaim }],
       positioned: [{ slot: "p0", claim: pendingClaim, seed }],
-      reactive: [{
-        slot: image.roots[0]!,
-        target: pendingValue,
-        construction: captureReactiveConstruction(pendingValue),
-      }],
+      reactive: [
+        {
+          slot: image.roots[0]!,
+          target: pendingValue,
+          construction: captureReactiveConstruction(pendingValue),
+        },
+      ],
       codec,
       mappedStateWrites: [],
     });
@@ -1358,13 +1377,11 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     });
     const activeReaderLocal = activeProvider.reserve(sourceInput, 5, seed);
     activeReader = activeReaderLocal;
-    activeClaim = preparePassiveTransferClaim(
-      activeGraph,
-      activeBinding,
-      sourceInput,
-      undefined,
-      { policies: [sourcePolicy] as const, seed, reader: activeReaderLocal },
-    );
+    activeClaim = preparePassiveTransferClaim(activeGraph, activeBinding, sourceInput, undefined, {
+      policies: [sourcePolicy] as const,
+      seed,
+      reader: activeReaderLocal,
+    });
     expect(activeClaim.retired).not.toBe(activeClaim.restoration.retired);
     expect(activeProvider.openings).toHaveLength(0);
     const activeValue = computed(() => activeClaim!.restoration.projections[0].value.get());
@@ -1372,16 +1389,19 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       graphs: [activeGraph],
       sources: [{ slot: "s0", claim: activeClaim }],
       positioned: [{ slot: "p0", claim: activeClaim, seed }],
-      reactive: [{
-        slot: image.roots[0]!,
-        target: activeValue,
-        construction: captureReactiveConstruction(activeValue),
-      }],
+      reactive: [
+        {
+          slot: image.roots[0]!,
+          target: activeValue,
+          construction: captureReactiveConstruction(activeValue),
+        },
+      ],
       codec,
       mappedStateWrites: [],
     });
     const activeCommit = activeAdoption.seal();
-    if (activeCommit === undefined) throw new Error("The active bound reader adoption did not seal");
+    if (activeCommit === undefined)
+      throw new Error("The active bound reader adoption did not seal");
     activeCommit.publish();
     activePublished = true;
     activeCommit.notifications.deliver();
@@ -1421,20 +1441,52 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     pendingGraph?.dispose();
     activeContext?.dispose();
     activeGraph?.dispose();
-    if (pendingReader !== undefined && pendingClaim === undefined && pendingProvider.releaseCount(pendingReader) === 0)
+    if (
+      pendingReader !== undefined &&
+      pendingClaim === undefined &&
+      pendingProvider.releaseCount(pendingReader) === 0
+    )
       pendingProvider.source.releaseReader(sourceInput, pendingReader);
-    if (activeReader !== undefined && activeClaim === undefined && activeProvider.releaseCount(activeReader) === 0)
+    if (
+      activeReader !== undefined &&
+      activeClaim === undefined &&
+      activeProvider.releaseCount(activeReader) === 0
+    )
       activeProvider.source.releaseReader(sourceInput, activeReader);
-    if (capture !== undefined) await capture.retired.then(() => undefined, () => undefined);
-    if (pendingAdoption !== undefined) await pendingAdoption.retired.then(() => undefined, () => undefined);
-    if (activeAdoption !== undefined) await activeAdoption.retired.then(() => undefined, () => undefined);
+    if (capture !== undefined)
+      await capture.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (pendingAdoption !== undefined)
+      await pendingAdoption.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (activeAdoption !== undefined)
+      await activeAdoption.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (pendingClaim !== undefined) {
-      await pendingClaim.retired.then(() => undefined, () => undefined);
-      await pendingClaim.restoration.retired.then(() => undefined, () => undefined);
+      await pendingClaim.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+      await pendingClaim.restoration.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     }
     if (activeClaim !== undefined) {
-      await activeClaim.retired.then(() => undefined, () => undefined);
-      await activeClaim.restoration.retired.then(() => undefined, () => undefined);
+      await activeClaim.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+      await activeClaim.restoration.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     }
   }
 });

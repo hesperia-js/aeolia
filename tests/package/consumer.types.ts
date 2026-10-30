@@ -1375,7 +1375,12 @@ function publicPassiveTransferTypeSurface<Source extends NativeTransferSource>(
   input: unknown,
   options: ExistingNativeValueOptions,
 ): NativeStoreFor<Source> {
-  const claim: PassiveTransferClaim<Source> = preparePassiveTransferClaim(graph, source, input, options);
+  const claim: PassiveTransferClaim<Source> = preparePassiveTransferClaim(
+    graph,
+    source,
+    input,
+    options,
+  );
   const store: NativeStoreFor<Source> = claim.store;
   const retirement: Promise<void> = claim.retired;
   claim.discard();
@@ -1397,23 +1402,46 @@ function publicRequiredTransferTypeSurface(
   const dispatch: TransferOperationDispatch = { role: "raw", source: mutation, input: carrier };
   const operation = prepareTransferOperation([scope], [dispatch]);
   const operationHandle: TransferOperation = operation.operation;
-  const successor: TransferScopeSuccessor = { operation: operationHandle, predecessor: scope, graph, source, input };
-  const operationRetirement: TransferPublication = prepareTransferOperationRetirement(operationHandle);
+  const successor: TransferScopeSuccessor = {
+    operation: operationHandle,
+    predecessor: scope,
+    graph,
+    source,
+    input,
+  };
+  const operationRetirement: TransferPublication =
+    prepareTransferOperationRetirement(operationHandle);
   const successors: TransferPublication & { readonly scopes: readonly TransferScope[] } =
     prepareTransferScopeSuccessors([]);
   const commit: TransferCommit | undefined = operation.seal();
   const notifications: TransferNotifications | undefined = commit?.notifications;
   const slot: TransferSlot | undefined = undefined;
-  const sourceConstruction: ReactiveConstruction<unknown> = captureReactiveConstruction(root as Computed<unknown>);
+  const sourceConstruction: ReactiveConstruction<unknown> = captureReactiveConstruction(
+    root as Computed<unknown>,
+  );
   const captureOptions: RequiredTransferCaptureOptions = {
-    graphs: [graph], roots: [{ source: root, construction }], codec,
+    graphs: [graph],
+    roots: [{ source: root, construction }],
+    codec,
   };
   const capture = prepareRequiredTransferCapture(captureOptions);
   const adoptionOptions: RequiredTransferAdoptionOptions = {
-    graphs: [graph], sources: [], reactive: [], codec, mappedStateWrites: [],
+    graphs: [graph],
+    sources: [],
+    reactive: [],
+    codec,
+    mappedStateWrites: [],
   };
   const adoption = prepareRequiredTransferAdoption(capture.image, adoptionOptions);
-  void [operationRetirement, successors, notifications, slot, adoption, successor, sourceConstruction];
+  void [
+    operationRetirement,
+    successors,
+    notifications,
+    slot,
+    adoption,
+    successor,
+    sourceConstruction,
+  ];
 }
 
 void publicPassiveTransferTypeSurface;
@@ -1456,10 +1484,8 @@ function positionedTransferConsumerTypesOnly(): void {
       reader: { token: "reader" },
     },
   );
-  const restoration: PositionedStoreRestoration<
-    number,
-    readonly [{ readonly total: number }]
-  > = claim.restoration;
+  const restoration: PositionedStoreRestoration<number, readonly [{ readonly total: number }]> =
+    claim.restoration;
   const restoredStore: StreamStore<number> = claim.store;
   const restoredValue: { readonly total: number } = restoration.projections[0].value.get();
   const registrationRetired: Promise<void> = claim.retired;
@@ -1472,7 +1498,11 @@ function positionedTransferConsumerTypesOnly(): void {
     base: { present: false, value: undefined },
     values: [3],
   };
-  const invalidPresentBase: PositionedStoreRestoreSeed<number | undefined, number, readonly [number]> = {
+  const invalidPresentBase: PositionedStoreRestoreSeed<
+    number | undefined,
+    number,
+    readonly [number]
+  > = {
     boundary: { kind: "event", after: 4 },
     // @ts-expect-error A present base must own a value, even when its value is undefined.
     base: { present: true },

@@ -3,7 +3,11 @@ import type { Readable, WritableSignal } from "../reactive.ts";
 import type { ObservationState, StoreRuntime } from "./runtime.ts";
 import { reportContinuationError } from "./faults.ts";
 import { physicalCleanup } from "./retirement.ts";
-import { noteTransferChange, registerTransferReadable, unregisterTransferReadable } from "./query-policy.ts";
+import {
+  noteTransferChange,
+  registerTransferReadable,
+  unregisterTransferReadable,
+} from "./query-policy.ts";
 
 interface PublisherActivityEntry {
   readable: Readable<boolean> | undefined;
@@ -36,35 +40,47 @@ export function createObservationState<T>(
 }
 
 /** @internal Installs a genuine allocated ObservationState as the runtime actual state. */
-export function installObservationState<T>(runtime: StoreRuntime<T>, state: ObservationState): void {
+export function installObservationState<T>(
+  runtime: StoreRuntime<T>,
+  state: ObservationState,
+): void {
   if (
     runtime.incarnation !== state.incarnation ||
     (runtime.observation !== undefined &&
       !runtime.observation.retired &&
       runtime.observation.incarnation === runtime.incarnation)
   )
-    throw new TypeError('Observation state no longer matches its Store incarnation');
-  registerTransferReadable(state.issue, runtime, 'observation-issue-cell');
-  registerTransferReadable(state.live, runtime, 'observation-live');
+    throw new TypeError("Observation state no longer matches its Store incarnation");
+  registerTransferReadable(state.issue, runtime, "observation-issue-cell");
+  registerTransferReadable(state.live, runtime, "observation-live");
   noteTransferChange(runtime);
   runtime.observation = state;
 }
 
 /** @internal Releases only facets allocated for an unpublished ObservationState. */
-export function discardObservationState<T>(runtime: StoreRuntime<T>, state: ObservationState): void {
+export function discardObservationState<T>(
+  runtime: StoreRuntime<T>,
+  state: ObservationState,
+): void {
   if (runtime.observation === state) return;
   unregisterTransferReadable(state.issue, runtime);
   unregisterTransferReadable(state.live, runtime);
 }
 
-export function preparePublisherActivity(state: ObservationState, initiallyActive: boolean): PublisherActivity {
+export function preparePublisherActivity(
+  state: ObservationState,
+  initiallyActive: boolean,
+): PublisherActivity {
   const cell = signal(initiallyActive);
   const readable = computed(() => state.live.get() && cell.get());
   return { cell, readable };
 }
 
 /** @internal Publishes the already-allocated publisher activity facets. */
-export function installPublisherActivity(state: ObservationState, activity: PublisherActivity): void {
+export function installPublisherActivity(
+  state: ObservationState,
+  activity: PublisherActivity,
+): void {
   state.publisherActivity = activity.cell;
   let entry = publisherActivityReadableByState.get(state);
   if (entry === undefined) {
@@ -97,7 +113,11 @@ export function reservePublisherActivityReadable(
     discard: () => {
       if (published || discarded) return;
       discarded = true;
-      if (reserveEmpty && entry!.readable === undefined && publisherActivityReadableByState.get(state) === entry)
+      if (
+        reserveEmpty &&
+        entry!.readable === undefined &&
+        publisherActivityReadableByState.get(state) === entry
+      )
         publisherActivityReadableByState.delete(state);
     },
   };
@@ -126,7 +146,9 @@ export function getObservationTransferFacet<T>(
     case "observation-activity-cell":
       return state.publisher === undefined ? undefined : state.publisherActivity;
     case "observation-activity":
-      return state.publisher === undefined ? undefined : publisherActivityReadableByState.get(state)?.readable;
+      return state.publisher === undefined
+        ? undefined
+        : publisherActivityReadableByState.get(state)?.readable;
     default:
       return undefined;
   }

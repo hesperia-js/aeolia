@@ -77,20 +77,20 @@ export function observeStoreReadable<T>(
   });
   runtime.readStops.push(readStop);
   const livenessStop = reactiveInternal.onLivenessChange(readable, (live) => {
-      runtime.liveReadableCount += live ? 1 : -1;
-      if (runtime.liveReadableCount < 0) runtime.liveReadableCount = 0;
-      if (observation.isValue === true) runtime.valueLive = live;
-      if (runtime.stream !== undefined) {
-        if (live) runtime.stream.unobservedSince = undefined;
-        else if (!isLive(runtime)) runtime.stream.unobservedSince = Date.now();
-      }
-      if (live) {
-        touch(runtime);
-        if (observation.metadata !== true) runtime.onReadableActivation?.();
-        if (observation.armsFreshness === true) armStoreTimer(runtime);
-      }
-      updateCollectionCandidate(runtime);
-      scheduleSweep(state);
+    runtime.liveReadableCount += live ? 1 : -1;
+    if (runtime.liveReadableCount < 0) runtime.liveReadableCount = 0;
+    if (observation.isValue === true) runtime.valueLive = live;
+    if (runtime.stream !== undefined) {
+      if (live) runtime.stream.unobservedSince = undefined;
+      else if (!isLive(runtime)) runtime.stream.unobservedSince = Date.now();
+    }
+    if (live) {
+      touch(runtime);
+      if (observation.metadata !== true) runtime.onReadableActivation?.();
+      if (observation.armsFreshness === true) armStoreTimer(runtime);
+    }
+    updateCollectionCandidate(runtime);
+    scheduleSweep(state);
   });
   runtime.livenessStops.push(livenessStop);
   return [readStop, livenessStop];

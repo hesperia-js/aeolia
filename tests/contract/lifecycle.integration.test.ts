@@ -1541,7 +1541,6 @@ it("drains later contexts when context.active reenters graph retirement and join
       if (secondReady !== undefined) await secondReady;
     }
   }
-
 });
 
 it("keeps overlapping mutation coverage until both original carriers retire", async () => {
@@ -1581,16 +1580,18 @@ it("keeps overlapping mutation coverage until both original carriers retire", as
     const scope = createTransferScope(graph, graph.api.query, store);
     const firstInput = Object.freeze({ request: "first" });
     const secondInput = Object.freeze({ request: "second" });
-    const firstOperation = prepareTransferOperation([scope], [
-      { role: "raw", source: graph.api.mutate, input: firstInput },
-    ]);
+    const firstOperation = prepareTransferOperation(
+      [scope],
+      [{ role: "raw", source: graph.api.mutate, input: firstInput }],
+    );
     const firstCommit = firstOperation.seal();
     if (firstCommit === undefined) throw new Error("The first operation did not seal");
     firstCommit.publish();
     firstCommit.notifications.deliver();
-    const secondOperation = prepareTransferOperation([scope], [
-      { role: "raw", source: graph.api.mutate, input: secondInput },
-    ]);
+    const secondOperation = prepareTransferOperation(
+      [scope],
+      [{ role: "raw", source: graph.api.mutate, input: secondInput }],
+    );
     const secondCommit = secondOperation.seal();
     if (secondCommit === undefined) throw new Error("The overlapping operation did not seal");
     secondCommit.publish();
@@ -1610,7 +1611,8 @@ it("keeps overlapping mutation coverage until both original carriers retire", as
 
     const firstRetirement = prepareTransferOperationRetirement(firstOperation.operation);
     const firstRetirementCommit = firstRetirement.seal();
-    if (firstRetirementCommit === undefined) throw new Error("The first operation retirement did not seal");
+    if (firstRetirementCommit === undefined)
+      throw new Error("The first operation retirement did not seal");
     firstRetirementCommit.publish();
     firstRetirementCommit.notifications.deliver();
     await firstRetirement.retired;
@@ -1618,7 +1620,8 @@ it("keeps overlapping mutation coverage until both original carriers retire", as
 
     const secondRetirement = prepareTransferOperationRetirement(secondOperation.operation);
     const secondRetirementCommit = secondRetirement.seal();
-    if (secondRetirementCommit === undefined) throw new Error("The second operation retirement did not seal");
+    if (secondRetirementCommit === undefined)
+      throw new Error("The second operation retirement did not seal");
     secondRetirementCommit.publish();
     secondRetirementCommit.notifications.deliver();
     await secondRetirement.retired;

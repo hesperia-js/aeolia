@@ -385,15 +385,17 @@ function acceptPositionedInitialBoundary<T>(
   const preparation = positioned.preparation;
   if (preparation !== undefined && (preparation.discarded || !preparation.published))
     throw new TypeError("The positioned reader was not published before opening");
-  if (preparation?.lifetime !== undefined &&
-      !preparation.lifetime.currentAt(readerLifetimeNow()))
+  if (preparation?.lifetime !== undefined && !preparation.lifetime.currentAt(readerLifetimeNow()))
     throw new TypeError("Positioned Store reader lifetime expired before opening");
   if (result === null || typeof result !== "object")
     throw new TypeError("Positioned initial boundary must be an own-data result");
   const fields = Reflect.ownKeys(result);
   const availableField = Object.getOwnPropertyDescriptor(result, "available");
-  if (availableField === undefined || !("value" in availableField) ||
-      (availableField.value !== true && availableField.value !== false))
+  if (
+    availableField === undefined ||
+    !("value" in availableField) ||
+    (availableField.value !== true && availableField.value !== false)
+  )
     throw new TypeError("Positioned initial boundary requires an own boolean available field");
   if (availableField.value === false) {
     if (fields.length !== 1 || fields[0] !== "available")
@@ -408,17 +410,21 @@ function acceptPositionedInitialBoundary<T>(
   if (fields.length !== 2 || !fields.includes("available") || !fields.includes("after"))
     throw new TypeError("An available positioned boundary has an invalid shape");
   const after = afterField.value;
-  const existing = positioned.continuation !== undefined
-    ? positioned.continuation.after
-    : positioned.completed !== undefined
-      ? positioned.completed.position
-      : positioned.hasPendingPosition
-        ? positioned.pendingPosition
-        : session.hasPosition
-          ? session.position
-          : undefined;
-  const hasExisting = positioned.continuation !== undefined ||
-    positioned.completed !== undefined || positioned.hasPendingPosition || session.hasPosition;
+  const existing =
+    positioned.continuation !== undefined
+      ? positioned.continuation.after
+      : positioned.completed !== undefined
+        ? positioned.completed.position
+        : positioned.hasPendingPosition
+          ? positioned.pendingPosition
+          : session.hasPosition
+            ? session.position
+            : undefined;
+  const hasExisting =
+    positioned.continuation !== undefined ||
+    positioned.completed !== undefined ||
+    positioned.hasPendingPosition ||
+    session.hasPosition;
   if (hasExisting) {
     if (!Object.is(after, existing))
       throw new TypeError("The positioned opening boundary changed after reader admission");
@@ -799,7 +805,8 @@ function boundFacets<T>(
       if (boundSessionCurrent(bound)) touch(runtime);
     });
     reactiveInternal.onLivenessChange(readable, (live) => {
-      if ((preparation !== undefined && !preparation.published) || !boundSessionCurrent(bound)) return;
+      if ((preparation !== undefined && !preparation.published) || !boundSessionCurrent(bound))
+        return;
       bound.liveReadables = Math.max(0, bound.liveReadables + (live ? 1 : -1));
       if (bound.liveReadables > 0 || bound.session.listeners.size > 0)
         bound.session.unobservedSince = undefined;
@@ -852,14 +859,12 @@ function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): S
     key: runtime.key,
     ...facets,
     set(value: T): void {
-      if (preparation !== undefined && !preparation.published)
-        assertStoreHandlePublished(wrapper);
+      if (preparation !== undefined && !preparation.published) assertStoreHandlePublished(wrapper);
       assertBoundSession(bound);
       directWrite(runtime, value, bound);
     },
     update(next: (current: T | undefined) => T): void {
-      if (preparation !== undefined && !preparation.published)
-        assertStoreHandlePublished(wrapper);
+      if (preparation !== undefined && !preparation.published) assertStoreHandlePublished(wrapper);
       assertBoundSession(bound);
       reactiveInternal.assertWritesAllowed(runtime.committed);
       nextValueRevision(runtime.valueRevision);
@@ -876,8 +881,7 @@ function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): S
   };
   Object.defineProperty(wrapper, storeSubscribe, {
     value: (observer: (value: T) => void) => {
-      if (preparation !== undefined && !preparation.published)
-        assertStoreHandlePublished(wrapper);
+      if (preparation !== undefined && !preparation.published) assertStoreHandlePublished(wrapper);
       const present = computed(
         () => {
           const value = facets.value.get();
@@ -1102,13 +1106,15 @@ function rawStreamWrapper<T>(
   const dormant = preparation !== undefined && !preparation.published;
   const streamStore = Object.create(dormant ? Object.prototype : runtime.store) as StreamStore<T>;
   Object.assign(streamStore, {
-    ...(dormant ? {
-      graph: runtime.store.graph,
-      identity: runtime.store.identity,
-      key: runtime.store.key,
-      value: runtime.value,
-      available: runtime.store.available,
-    } : {}),
+    ...(dormant
+      ? {
+          graph: runtime.store.graph,
+          identity: runtime.store.identity,
+          key: runtime.store.key,
+          value: runtime.value,
+          available: runtime.store.available,
+        }
+      : {}),
     pending,
     error: runtime.error,
     status,
@@ -1125,8 +1131,11 @@ function rawStreamWrapper<T>(
       },
     });
     const subscribeDescriptor = Object.getOwnPropertyDescriptor(runtime.store, storeSubscribe);
-    if (subscribeDescriptor === undefined || !("value" in subscribeDescriptor) ||
-        typeof subscribeDescriptor.value !== "function")
+    if (
+      subscribeDescriptor === undefined ||
+      !("value" in subscribeDescriptor) ||
+      typeof subscribeDescriptor.value !== "function"
+    )
       throw new TypeError("The native Store has no subscription implementation");
     Object.defineProperty(streamStore, storeSubscribe, {
       value: (observer: (value: T) => void) => {
@@ -1394,7 +1403,9 @@ export function createPositionedStoreSession<T>(
     if (provider === undefined) throw new TypeError("Positioned source provider is not registered");
   } catch (error) {
     if (construction !== undefined) {
-      try { retireOwner(construction.retirement, () => {}); } catch {}
+      try {
+        retireOwner(construction.retirement, () => {});
+      } catch {}
     }
     throw error;
   }
@@ -1405,7 +1416,9 @@ export function createPositionedStoreSession<T>(
     inheritTransferCoverage(runtime);
   } catch (error) {
     if (construction !== undefined) {
-      try { retireOwner(construction.retirement, () => {}); } catch {}
+      try {
+        retireOwner(construction.retirement, () => {});
+      } catch {}
     }
     throw error;
   }
@@ -1443,12 +1456,7 @@ export function createPositionedStoreSession<T>(
       }
     }
     if (binding !== undefined) {
-      session = installBoundSession(
-        runtime,
-        binding,
-        construction?.retirement,
-        detached,
-      );
+      session = installBoundSession(runtime, binding, construction?.retirement, detached);
     } else {
       const physical = beginPhysicalWork(construction?.retirement ?? state.retirement, "stream");
       session = {
@@ -1475,17 +1483,18 @@ export function createPositionedStoreSession<T>(
       session,
       ...(ownAddress === undefined ? {} : { address: ownAddress }),
     };
-    const prepared: PositionedStorePreparation | undefined = construction === undefined
-      ? undefined
-      : {
-          published: !detached,
-          discarded: false,
-          observed: !detached,
-          retirement: construction.retirement,
-          retired: construction.retirement.promise,
-          registrations: [],
-          registerStops: [],
-        };
+    const prepared: PositionedStorePreparation | undefined =
+      construction === undefined
+        ? undefined
+        : {
+            published: !detached,
+            discarded: false,
+            observed: !detached,
+            retirement: construction.retirement,
+            retired: construction.retirement.promise,
+            registrations: [],
+            registerStops: [],
+          };
     const continuation: PositionedContinuationAnchor | undefined =
       construction === undefined || construction.legacy
         ? undefined
@@ -1510,9 +1519,8 @@ export function createPositionedStoreSession<T>(
       participants: new Set(),
       reader: {
         reader,
-        after: construction !== undefined && !construction.legacy
-          ? construction.boundary.after
-          : after,
+        after:
+          construction !== undefined && !construction.legacy ? construction.boundary.after : after,
         seed,
         owned: false,
         released: false,
@@ -1542,7 +1550,8 @@ export function createPositionedStoreSession<T>(
       session.positioned.diverged = false;
     } else if (construction.legacy) {
       if (!detached) admitStore(runtime);
-      if (detached) seedLegacyPositionedStoreBase(runtime, session, session.positioned, after, latest);
+      if (detached)
+        seedLegacyPositionedStoreBase(runtime, session, session.positioned, after, latest);
       else {
         recordLanding(runtime, latest, undefined, session.bound, session);
         session.position = after;
@@ -1586,8 +1595,7 @@ export function createPositionedStoreSession<T>(
     } else {
       if (binding?.readerStores !== undefined)
         binding.readerStores.delete(runtime as StoreRuntime<unknown>);
-      if (state.stores.get(runtime.identity) === runtime)
-        state.stores.delete(runtime.identity);
+      if (state.stores.get(runtime.identity) === runtime) state.stores.delete(runtime.identity);
       if (runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
     }
     if (construction !== undefined) {
@@ -1727,22 +1735,25 @@ export function activatePositionedStoreSession<T>(
     ) !== true
   )
     throw new TypeError("Positioned Store reader reservation is no longer current");
-  if (preparation?.lifetime !== undefined &&
-      !preparation.lifetime.currentAt(readerLifetimeNow()))
+  if (preparation?.lifetime !== undefined && !preparation.lifetime.currentAt(readerLifetimeNow()))
     throw new TypeError("Positioned Store reader lifetime is no longer current");
-  const stagedContinuation = admittedEvent === undefined &&
-    preparation !== undefined && continuation !== undefined;
-  const legacyEventCurrent = admittedEvent !== undefined &&
+  const stagedContinuation =
+    admittedEvent === undefined && preparation !== undefined && continuation !== undefined;
+  const legacyEventCurrent =
+    admittedEvent !== undefined &&
     positioned.completed === admittedEvent &&
     positioned.baseRevision === admittedEvent.landingRevision &&
     [...positioned.participants].every(
       (participant) => !participant.failed && participant.event === admittedEvent,
     );
-  const continuationCurrent = stagedContinuation &&
+  const continuationCurrent =
+    stagedContinuation &&
     Object.is(continuation.after, reader.after) &&
     (positioned.baseRevision === undefined || runtime.valueRevision === positioned.baseRevision) &&
     [...positioned.participants].every(
-      (participant) => !participant.failed && participant.anchor === continuation.token &&
+      (participant) =>
+        !participant.failed &&
+        participant.anchor === continuation.token &&
         participant.event === undefined,
     );
   if (

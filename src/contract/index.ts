@@ -145,5 +145,20 @@ export type {
   BoundAddressStamp,
 } from "./binding-address.ts";
 
-export { createTransferScope, prepareTransferOperation, prepareTransferScopeSuccessors, prepareTransferOperationRetirement } from "./query-policy.ts";
-export type { TransferScope, TransferOperation, TransferPublication, TransferCommit, TransferNotifications, QueryTransferSource, MutationTransferSource, TransferOperationDispatch, TransferScopeSuccessor } from "./query-policy.ts";
+export {
+  createTransferScope,
+  prepareTransferOperation,
+  prepareTransferScopeSuccessors,
+  prepareTransferOperationRetirement,
+} from "./query-policy.ts";
+export type {
+  TransferScope,
+  TransferOperation,
+  TransferPublication,
+  TransferCommit,
+  TransferNotifications,
+  QueryTransferSource,
+  MutationTransferSource,
+  TransferOperationDispatch,
+  TransferScopeSuccessor,
+} from "./query-policy.ts";

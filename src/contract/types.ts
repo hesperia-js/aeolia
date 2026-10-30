@@ -947,9 +947,7 @@ export interface PositionedStreamSource<Input, Value, Position, Reader> {
   readonly initialBoundary?: (
     input: Input,
     options: PositionedStreamOpenOptions<Position, Reader>,
-  ) =>
-    | { readonly available: false }
-    | { readonly available: true; readonly after: Position };
+  ) => { readonly available: false } | { readonly available: true; readonly after: Position };
   /**
    * Reports the genuine invalidation signal and any already-issued immutable
    * expiry for this exact reservation. Required-transfer restoration needs this

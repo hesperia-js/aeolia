@@ -79,7 +79,6 @@ function until<T>(readable: Readable<T>, matches: (value: T) => boolean): Promis
   });
 }
 
-
 function queryContract<const T extends OperationTree>(operations: T): Contract<T> {
   return defineContract({ namespace: "realm-tests", operations } as never) as Contract<T>;
 }
@@ -1056,7 +1055,9 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
   }
 });
 it("refuses a required capture when its codec changes the cached source", () => {
-  const graph = createGraph({ contract: defineContract({ namespace: "required-capture-reentry", operations: {} }) });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "required-capture-reentry", operations: {} }),
+  });
   const sourceState = signal(1);
   const source = computed(() => sourceState.get() * 2);
   expect(source.get()).toBe(2);
@@ -1144,7 +1145,9 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     captureCommit.notifications.deliver();
     await capturePlan.retired;
 
-    const claim = preparePassiveTransferClaim(targetGraph, targetGraph.api.query, "one", { snapshot: false });
+    const claim = preparePassiveTransferClaim(targetGraph, targetGraph.api.query, "one", {
+      snapshot: false,
+    });
     discardClaim = () => claim.discard();
     claimRetired = claim.retired;
     expect(backend.calls).toHaveLength(1);
@@ -1170,7 +1173,9 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
       sources: [{ slot: captured.stores[0]!.slot, claim }],
       reactive: [{ slot: valueNode.slot, target: targetValue, construction: targetConstruction }],
       codec: requiredTransferCodec,
-      mappedStateWrites: [{ target: mappedState, construction: mappedConstruction, value: "published" }],
+      mappedStateWrites: [
+        { target: mappedState, construction: mappedConstruction, value: "published" },
+      ],
     });
     const commit = adoptionPlan.seal();
     if (commit === undefined) throw new Error("The stable required adoption did not seal");
@@ -1215,14 +1220,26 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
       if (adoptionPlan !== undefined) adoptionPlan.discard();
       else discardClaim?.();
     }
-    if (claimRetired !== undefined) await claimRetired.then(() => undefined, () => undefined);
+    if (claimRetired !== undefined)
+      await claimRetired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (!capturePublished) capturePlan?.discard();
     if (!sourceRequestResolved && backend.calls[0] !== undefined)
       backend.resolve(backend.calls[0], 4);
     if (!targetRequestResolved && backend.calls[1] !== undefined)
       backend.resolve(backend.calls[1], 5);
-    if (adoptionPlan !== undefined) await adoptionPlan.retired.then(() => undefined, () => undefined);
-    if (capturePlan !== undefined) await capturePlan.retired.then(() => undefined, () => undefined);
+    if (adoptionPlan !== undefined)
+      await adoptionPlan.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (capturePlan !== undefined)
+      await capturePlan.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     sourceGraph.dispose();
     targetGraph.dispose();
   }
@@ -1240,7 +1257,10 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
     const reservations = new WeakMap<object, Reservation>();
     const readers = new WeakMap<object, (event: Event) => void>();
     const releases = new WeakMap<object, number>();
-    const openings: Array<{ readonly reader: object | undefined; readonly after: number | undefined }> = [];
+    const openings: Array<{
+      readonly reader: object | undefined;
+      readonly after: number | undefined;
+    }> = [];
     const acknowledgements: Array<{ readonly receipt: { readonly position: number } }> = [];
     let emitLive: ((event: Event) => void) | undefined;
 
@@ -1265,7 +1285,8 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
         } as AsyncIterable<Event>,
         emit(event: Event) {
           const waiter = waiters.shift();
-          if (waiter === undefined) throw new Error("The positioned opening has no pending next call");
+          if (waiter === undefined)
+            throw new Error("The positioned opening has no pending next call");
           waiter({ done: false, value: event });
         },
       };
@@ -1281,23 +1302,32 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       },
       readerLifetime: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        if (reservation === undefined || reservation.input !== _input || reservation.after !== after || reservation.seed !== seed)
+        if (
+          reservation === undefined ||
+          reservation.input !== _input ||
+          reservation.after !== after ||
+          reservation.seed !== seed
+        )
           throw new TypeError("The reader lifetime does not match its exact reservation");
         return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
       },
       validateReader: (input, reader, after, _checkpoint, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined &&
+        return (
+          reservation !== undefined &&
           reservation.input === input &&
           reservation.after === after &&
-          reservation.seed === seed;
+          reservation.seed === seed
+        );
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
-        return reservation !== undefined &&
+        return (
+          reservation !== undefined &&
           reservation.input === input &&
           reservation.after === after &&
-          reservation.seed === seed;
+          reservation.seed === seed
+        );
       },
       acknowledge: (_input, _reader, receipt) => acknowledgements.push({ receipt }),
       releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
@@ -1308,7 +1338,13 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       acknowledgements,
       reserve(input: string, after: number, seed: unknown) {
         const reader = Object.freeze({});
-        reservations.set(reader, { input, after, seed, controller: new AbortController(), expiresAt: providerClockNow() + 60_000 });
+        reservations.set(reader, {
+          input,
+          after,
+          seed,
+          controller: new AbortController(),
+          expiresAt: providerClockNow() + 60_000,
+        });
         return reader;
       },
       emitLive(event: Event) {
@@ -1350,7 +1386,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
   const secondPolicy = {
     kind: "reduce" as const,
     initial: 0,
-    step: (_sum: number, event: number) => event === 3 ? 1 : 2,
+    step: (_sum: number, event: number) => (event === 3 ? 1 : 2),
   };
   let targetFirstSteps = 0;
   let targetSecondSteps = 0;
@@ -1375,12 +1411,17 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
   const sourceSecond = project(sourceStore, secondPolicy);
   let capturePlan: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
   let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
-  let claim: {
-    readonly store: import("../../src/index.ts").StreamStore<number>;
-    readonly restoration: import("../../src/index.ts").PositionedStoreRestoration<number, readonly [number, number]>;
-    readonly retired: Promise<void>;
-    discard(): void;
-  } | undefined;
+  let claim:
+    | {
+        readonly store: import("../../src/index.ts").StreamStore<number>;
+        readonly restoration: import("../../src/index.ts").PositionedStoreRestoration<
+          number,
+          readonly [number, number]
+        >;
+        readonly retired: Promise<void>;
+        discard(): void;
+      }
+    | undefined;
   let reader: object | undefined;
   let capturePublished = false;
   let adoptionPublished = false;
@@ -1458,7 +1499,8 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       },
     ]);
     const projectionNodes = image.nodes.filter(
-      (node) => node.kind === "native" && node.positioned === "p0" && node.facet === "projection-value",
+      (node) =>
+        node.kind === "native" && node.positioned === "p0" && node.facet === "projection-value",
     );
     expect(projectionNodes).toHaveLength(2);
     expect(projectionNodes.map((node) => node.projection).sort()).toEqual([0, 1]);
@@ -1471,7 +1513,11 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
     await capturePlan.retired;
 
     expect(decodedSeeds.get("p0-seed")).toBe(seed);
-    expect(seed).toEqual({ boundary: { kind: "event", after: 5 }, base: { present: true, value: 3 }, values: [5, 1] });
+    expect(seed).toEqual({
+      boundary: { kind: "event", after: 5 },
+      base: { present: true, value: 3 },
+      values: [5, 1],
+    });
     const targetReader = providerB.reserve(input, 5, seed);
     reader = targetReader;
     const receiverClaim = preparePassiveTransferClaim(
@@ -1508,9 +1554,21 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       sources: [{ slot: image.stores[0]!.slot, claim: receiverClaim }],
       positioned: [{ slot: "p0", claim: receiverClaim, seed }],
       reactive: [
-        { slot: image.roots[0]!, target: firstRoot, construction: captureReactiveConstruction(firstRoot) },
-        { slot: image.roots[1]!, target: aliasRoot, construction: captureReactiveConstruction(aliasRoot) },
-        { slot: image.roots[2]!, target: secondRoot, construction: captureReactiveConstruction(secondRoot) },
+        {
+          slot: image.roots[0]!,
+          target: firstRoot,
+          construction: captureReactiveConstruction(firstRoot),
+        },
+        {
+          slot: image.roots[1]!,
+          target: aliasRoot,
+          construction: captureReactiveConstruction(aliasRoot),
+        },
+        {
+          slot: image.roots[2]!,
+          target: secondRoot,
+          construction: captureReactiveConstruction(secondRoot),
+        },
       ],
       codec,
       mappedStateWrites: [],
@@ -1566,11 +1624,25 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
     targetGraph.dispose();
     if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
       providerB.source.releaseReader(input, reader);
-    if (capturePlan !== undefined) await capturePlan.retired.then(() => undefined, () => undefined);
-    if (adoption !== undefined) await adoption.retired.then(() => undefined, () => undefined);
+    if (capturePlan !== undefined)
+      await capturePlan.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (adoption !== undefined)
+      await adoption.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (claim !== undefined) {
-      await claim.retired.then(() => undefined, () => undefined);
-      await claim.restoration.retired.then(() => undefined, () => undefined);
+      await claim.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+      await claim.restoration.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     }
   }
 });
@@ -1616,11 +1688,12 @@ it("joins staged observation metadata only through the exact pending lease", asy
     expect(oneSecond.status.get()).toBe("ready");
 
     const sourceLease = observeStore(sourceGraph, zeroWindow);
-    const sourceValue = computed(() =>
-      zeroWindow.status.get() === "stale" &&
-      oneSecond.status.get() === "ready" &&
-      sourceLease.active.get() &&
-      sourceLease.issue.get() === undefined,
+    const sourceValue = computed(
+      () =>
+        zeroWindow.status.get() === "stale" &&
+        oneSecond.status.get() === "ready" &&
+        sourceLease.active.get() &&
+        sourceLease.issue.get() === undefined,
     );
     expect(sourceValue.get()).toBe(true);
     capturePlan = prepareRequiredTransferCapture({
@@ -1665,11 +1738,12 @@ it("joins staged observation metadata only through the exact pending lease", asy
     expect(independentObservationFirst.lease).not.toBe(independentObservationSecond.lease);
     expect(independentObservationFirst.lease.active.get()).toBe(false);
     expect(independentObservationSecond.lease.active.get()).toBe(false);
-    const independentValue = computed(() =>
-      independentFirst.store.status.get() === "stale" &&
-      independentSecond.store.status.get() === "ready" &&
-      independentObservationFirst.lease.active.get() &&
-      independentObservationFirst.lease.issue.get() === undefined,
+    const independentValue = computed(
+      () =>
+        independentFirst.store.status.get() === "stale" &&
+        independentSecond.store.status.get() === "ready" &&
+        independentObservationFirst.lease.active.get() &&
+        independentObservationFirst.lease.issue.get() === undefined,
     );
     expect(() => {
       independentAdoption = prepareRequiredTransferAdoption(captured, {
@@ -1679,11 +1753,13 @@ it("joins staged observation metadata only through the exact pending lease", asy
           { slot: zeroCaller.slot, claim: independentFirst },
           { slot: oneSecondCaller.slot, claim: independentSecond },
         ],
-        reactive: [{
-          slot: captured.roots[0]!,
-          target: independentValue,
-          construction: captureReactiveConstruction(independentValue),
-        }],
+        reactive: [
+          {
+            slot: captured.roots[0]!,
+            target: independentValue,
+            construction: captureReactiveConstruction(independentValue),
+          },
+        ],
         codec: requiredTransferCodec,
         mappedStateWrites: [],
       });
@@ -1695,18 +1771,12 @@ it("joins staged observation metadata only through the exact pending lease", asy
     expect(independentObservationFirst.lease.active.get()).toBe(false);
     expect(independentObservationSecond.lease.active.get()).toBe(false);
 
-    const joinedFirst = preparePassiveTransferClaim(
-      joinedGraph,
-      joinedGraph.api.query,
-      "one",
-      { revalidateAfterMs: 0 },
-    );
-    const joinedSecond = preparePassiveTransferClaim(
-      joinedGraph,
-      joinedGraph.api.query,
-      "one",
-      { revalidateAfterMs: 1000 },
-    );
+    const joinedFirst = preparePassiveTransferClaim(joinedGraph, joinedGraph.api.query, "one", {
+      revalidateAfterMs: 0,
+    });
+    const joinedSecond = preparePassiveTransferClaim(joinedGraph, joinedGraph.api.query, "one", {
+      revalidateAfterMs: 1000,
+    });
     joinedClaims = [joinedFirst, joinedSecond];
     const joinedObservationFirst = joinedFirst.prepareObservation();
     const joinedObservationSecond = joinedSecond.prepareObservation(joinedObservationFirst.lease);
@@ -1718,10 +1788,12 @@ it("joins staged observation metadata only through the exact pending lease", asy
     let joinedRuns = 0;
     const joinedValue = computed(() => {
       joinedRuns += 1;
-      return joinedFirst.store.status.get() === "stale" &&
+      return (
+        joinedFirst.store.status.get() === "stale" &&
         joinedSecond.store.status.get() === "ready" &&
         joinedObservationFirst.lease.active.get() &&
-        joinedObservationFirst.lease.issue.get() === undefined;
+        joinedObservationFirst.lease.issue.get() === undefined
+      );
     });
     joinedAdoption = prepareRequiredTransferAdoption(captured, {
       graphs: [joinedGraph],
@@ -1730,11 +1802,13 @@ it("joins staged observation metadata only through the exact pending lease", asy
         { slot: zeroCaller.slot, claim: joinedFirst },
         { slot: oneSecondCaller.slot, claim: joinedSecond },
       ],
-      reactive: [{
-        slot: captured.roots[0]!,
-        target: joinedValue,
-        construction: captureReactiveConstruction(joinedValue),
-      }],
+      reactive: [
+        {
+          slot: captured.roots[0]!,
+          target: joinedValue,
+          construction: captureReactiveConstruction(joinedValue),
+        },
+      ],
       codec: requiredTransferCodec,
       mappedStateWrites: [],
     });
@@ -1752,19 +1826,43 @@ it("joins staged observation metadata only through the exact pending lease", asy
     expect(backend.calls).toHaveLength(2);
   } finally {
     if (!capturePublished) capturePlan?.discard();
-    if (capturePlan !== undefined) await capturePlan.retired.then(() => undefined, () => undefined);
+    if (capturePlan !== undefined)
+      await capturePlan.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     independentAdoption?.discard();
     for (const claim of independentClaims) claim.discard();
     if (independentClaims.length > 0)
-      await Promise.all(independentClaims.map((claim) => claim.retired.then(() => undefined, () => undefined)));
+      await Promise.all(
+        independentClaims.map((claim) =>
+          claim.retired.then(
+            () => undefined,
+            () => undefined,
+          ),
+        ),
+      );
     if (!joinedPublished) joinedAdoption?.discard();
     for (const claim of joinedClaims) claim.discard();
     if (joinedClaims.length > 0)
-      await Promise.all(joinedClaims.map((claim) => claim.retired.then(() => undefined, () => undefined)));
+      await Promise.all(
+        joinedClaims.map((claim) =>
+          claim.retired.then(
+            () => undefined,
+            () => undefined,
+          ),
+        ),
+      );
     if (independentAdoption !== undefined)
-      await independentAdoption.retired.then(() => undefined, () => undefined);
+      await independentAdoption.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (joinedAdoption !== undefined)
-      await joinedAdoption.retired.then(() => undefined, () => undefined);
+      await joinedAdoption.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (!sourceRequestResolved && backend.calls[0] !== undefined)
       backend.resolve(backend.calls[0], 4);
     if (!revalidationRequestResolved && backend.calls[1] !== undefined)
@@ -1809,10 +1907,11 @@ it("publishes a genuine passive observation lease with required adoption", async
     sourceRequestResolved = true;
     await sourceReady;
     const sourceLease = observeStore(sourceGraph, sourceStore);
-    const sourceValue = computed(() =>
-      sourceStore.status.get() === "ready" &&
-      sourceLease.active.get() &&
-      sourceLease.issue.get() === undefined,
+    const sourceValue = computed(
+      () =>
+        sourceStore.status.get() === "ready" &&
+        sourceLease.active.get() &&
+        sourceLease.issue.get() === undefined,
     );
     expect(sourceValue.get()).toBe(true);
     const sourceConstruction = captureReactiveConstruction(sourceValue);
@@ -1827,16 +1926,26 @@ it("publishes a genuine passive observation lease with required adoption", async
     expect(captured.stores).toHaveLength(1);
     expect(captured.callers).toHaveLength(1);
     expect(callerRow.store).toBe(storeRow.slot);
-    expect(captured.nodes).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: "native",
-        store: storeRow.slot,
-        caller: callerRow.slot,
-        facet: "query-status",
-      }),
-      expect.objectContaining({ kind: "native", store: storeRow.slot, facet: "observation-activity" }),
-      expect.objectContaining({ kind: "native", store: storeRow.slot, facet: "observation-issue" }),
-    ]));
+    expect(captured.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "native",
+          store: storeRow.slot,
+          caller: callerRow.slot,
+          facet: "query-status",
+        }),
+        expect.objectContaining({
+          kind: "native",
+          store: storeRow.slot,
+          facet: "observation-activity",
+        }),
+        expect.objectContaining({
+          kind: "native",
+          store: storeRow.slot,
+          facet: "observation-issue",
+        }),
+      ]),
+    );
     const captureCommit = capturePlan.seal();
     if (captureCommit === undefined) throw new Error("The stable observation capture did not seal");
     captureCommit.publish();
@@ -1864,9 +1973,11 @@ it("publishes a genuine passive observation lease with required adoption", async
     let targetRuns = 0;
     const targetValue = computed(() => {
       targetRuns += 1;
-      return claim.store.status.get() === "ready" &&
+      return (
+        claim.store.status.get() === "ready" &&
         preparedObservation.lease.active.get() &&
-        preparedObservation.lease.issue.get() === undefined;
+        preparedObservation.lease.issue.get() === undefined
+      );
     });
     const targetConstruction = captureReactiveConstruction(targetValue);
     const targetRoot = captured.roots[0]!;
@@ -1881,7 +1992,8 @@ it("publishes a genuine passive observation lease with required adoption", async
       mappedStateWrites: [],
     });
     const adoptionCommit = adoptionPlan.seal();
-    if (adoptionCommit === undefined) throw new Error("The stable observation adoption did not seal");
+    if (adoptionCommit === undefined)
+      throw new Error("The stable observation adoption did not seal");
     deliverAdoption = () => adoptionCommit.notifications.deliver();
     adoptionCommit.publish();
     adoptionPublished = true;
@@ -1893,16 +2005,20 @@ it("publishes a genuine passive observation lease with required adoption", async
     await preparedObservation.retired;
     expect(backend.calls).toHaveLength(1);
     expect(siblingObservation.lease.active.get()).toBe(false);
-    expect(() => prepareRequiredTransferAdoption(captured, {
-      graphs: [targetGraph],
-      sources: [
-        { slot: storeRow.slot, claim: siblingClaim },
-        ...captured.callers.map((caller) => ({ slot: caller.slot, claim: siblingClaim })),
-      ],
-      reactive: [{ slot: captured.roots[0]!, target: targetValue, construction: targetConstruction }],
-      codec: requiredTransferCodec,
-      mappedStateWrites: [],
-    })).toThrow(TypeError);
+    expect(() =>
+      prepareRequiredTransferAdoption(captured, {
+        graphs: [targetGraph],
+        sources: [
+          { slot: storeRow.slot, claim: siblingClaim },
+          ...captured.callers.map((caller) => ({ slot: caller.slot, claim: siblingClaim })),
+        ],
+        reactive: [
+          { slot: captured.roots[0]!, target: targetValue, construction: targetConstruction },
+        ],
+        codec: requiredTransferCodec,
+        mappedStateWrites: [],
+      }),
+    ).toThrow(TypeError);
     siblingObservation.discard();
     siblingDiscard = undefined;
     await siblingRetired;
@@ -1919,7 +2035,11 @@ it("publishes a genuine passive observation lease with required adoption", async
     await reuseRetired;
     expect(preparedObservation.lease.active.get()).toBe(true);
 
-    const abandonedClaim = preparePassiveTransferClaim(abandonedGraph, abandonedGraph.api.query, "one");
+    const abandonedClaim = preparePassiveTransferClaim(
+      abandonedGraph,
+      abandonedGraph.api.query,
+      "one",
+    );
     abandonedDiscard = () => abandonedClaim.discard();
     abandonedRetired = abandonedClaim.retired;
     const abandonedObservation = abandonedClaim.prepareObservation();
@@ -1928,22 +2048,27 @@ it("publishes a genuine passive observation lease with required adoption", async
     abandonedObservation.lease.dispose();
     expect(abandonedObservation.lease.publish(10)).toBe(false);
     expect(abandonedObservation.lease.active.get()).toBe(false);
-    const abandonedValue = computed(() =>
-      abandonedClaim.store.status.get() === "ready" &&
-      abandonedObservation.lease.active.get() &&
-      abandonedObservation.lease.issue.get() === undefined,
+    const abandonedValue = computed(
+      () =>
+        abandonedClaim.store.status.get() === "ready" &&
+        abandonedObservation.lease.active.get() &&
+        abandonedObservation.lease.issue.get() === undefined,
     );
     const abandonedConstruction = captureReactiveConstruction(abandonedValue);
-    expect(() => prepareRequiredTransferAdoption(captured, {
-      graphs: [abandonedGraph],
-      sources: [
-        { slot: storeRow.slot, claim: abandonedClaim },
-        ...captured.callers.map((caller) => ({ slot: caller.slot, claim: abandonedClaim })),
-      ],
-      reactive: [{ slot: captured.roots[0]!, target: abandonedValue, construction: abandonedConstruction }],
-      codec: requiredTransferCodec,
-      mappedStateWrites: [],
-    })).toThrow(TypeError);
+    expect(() =>
+      prepareRequiredTransferAdoption(captured, {
+        graphs: [abandonedGraph],
+        sources: [
+          { slot: storeRow.slot, claim: abandonedClaim },
+          ...captured.callers.map((caller) => ({ slot: caller.slot, claim: abandonedClaim })),
+        ],
+        reactive: [
+          { slot: captured.roots[0]!, target: abandonedValue, construction: abandonedConstruction },
+        ],
+        codec: requiredTransferCodec,
+        mappedStateWrites: [],
+      }),
+    ).toThrow(TypeError);
     abandonedObservation.discard();
     abandonedDiscard = undefined;
     await abandonedRetired;
@@ -1958,13 +2083,37 @@ it("publishes a genuine passive observation lease with required adoption", async
     siblingDiscard?.();
     reuseDiscard?.();
     abandonedDiscard?.();
-    if (claimRetired !== undefined) await claimRetired.then(() => undefined, () => undefined);
-    if (siblingRetired !== undefined) await siblingRetired.then(() => undefined, () => undefined);
-    if (reuseRetired !== undefined) await reuseRetired.then(() => undefined, () => undefined);
-    if (abandonedRetired !== undefined) await abandonedRetired.then(() => undefined, () => undefined);
+    if (claimRetired !== undefined)
+      await claimRetired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (siblingRetired !== undefined)
+      await siblingRetired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (reuseRetired !== undefined)
+      await reuseRetired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (abandonedRetired !== undefined)
+      await abandonedRetired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (!capturePublished) capturePlan?.discard();
-    if (capturePlan !== undefined) await capturePlan.retired.then(() => undefined, () => undefined);
-    if (adoptionPlan !== undefined) await adoptionPlan.retired.then(() => undefined, () => undefined);
+    if (capturePlan !== undefined)
+      await capturePlan.retired.then(
+        () => undefined,
+        () => undefined,
+      );
+    if (adoptionPlan !== undefined)
+      await adoptionPlan.retired.then(
+        () => undefined,
+        () => undefined,
+      );
     if (!sourceRequestResolved && backend.calls[0] !== undefined)
       backend.resolve(backend.calls[0], 4);
     sourceGraph.dispose();
@@ -1972,4 +2121,3 @@ it("publishes a genuine passive observation lease with required adoption", async
     abandonedGraph.dispose();
   }
 });
-

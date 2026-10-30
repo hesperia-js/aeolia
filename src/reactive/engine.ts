@@ -432,8 +432,12 @@ function adoptedBaselineCurrent(baseline: AdoptedBaseline): boolean {
   for (let index = 0; index < baseline.sources.length; index += 1) {
     const source = baseline.sources[index]!;
     if (source.semanticEpoch !== baseline.epochs[index]) return false;
-    if (source.kind === "computed" && source.adoptedBaseline !== undefined &&
-        !adoptedBaselineCurrent(source.adoptedBaseline)) return false;
+    if (
+      source.kind === "computed" &&
+      source.adoptedBaseline !== undefined &&
+      !adoptedBaselineCurrent(source.adoptedBaseline)
+    )
+      return false;
   }
   return baseline.semanticCurrent?.() ?? true;
 }
@@ -495,7 +499,8 @@ function flushLinkedEvaluationSeeds(): void {
     propagation.inProgress ||
     subscriptionDeliveryDepth > 0 ||
     nativeReadDepth > 0
-  ) return;
+  )
+    return;
   beginPropagation([]);
 }
 
@@ -633,7 +638,8 @@ function markFrom(
       current.kind === "computed" &&
       (current.adoptedBaseline !== undefined || current.linkedBaseline !== undefined) &&
       adoptedBaselineCurrent(current.adoptedBaseline ?? current.linkedBaseline!)
-    ) continue;
+    )
+      continue;
     const becameMarked = current.kind === "computed" && !current.marked;
     if (becameMarked) {
       current.marked = true;
@@ -701,7 +707,9 @@ function beginPropagation(
         const currentSeeds = new Set(propagation.pendingSeeds);
         propagation.pendingSeeds.clear();
         const { helperWatchers, canonicalWatchers, subscriptions } = markFrom(
-          currentSeeds, protectedTransfers, directAdoptions,
+          currentSeeds,
+          protectedTransfers,
+          directAdoptions,
         );
         protectedTransfers = undefined;
         directAdoptions = undefined;
@@ -1530,7 +1538,6 @@ export interface ReactiveGraphBinding {
   readonly reportFault?: FaultReporter;
 }
 
-
 const reactiveConstructionBrand = Symbol("Aeolia reactive construction");
 
 /** Native construction identity for a State or Computed, bound to its installed node. */
@@ -1678,7 +1685,6 @@ export function transferCapture(roots: readonly Readable<unknown>[]): ReactiveTr
   });
 }
 
-
 /** A mapped State write staged for the same publication as cache adoption. */
 export interface ReactiveTransferWrite {
   /** Exact native State to update. */
@@ -1774,7 +1780,11 @@ function prepareTransferLiveness(
 
   const effectiveSources = (node: ComputedNode<unknown>): readonly Node<unknown>[] =>
     nextSources.get(node) ?? node.dependencies;
-  const edgeDelta = (source: Node<unknown>, dependent: ComputedNode<unknown>, delta: number): void => {
+  const edgeDelta = (
+    source: Node<unknown>,
+    dependent: ComputedNode<unknown>,
+    delta: number,
+  ): void => {
     let next = edges.get(source);
     if (next === undefined) {
       next = new Map(source.dependents);
@@ -1875,8 +1885,12 @@ export function transferPrepare(
       return dependency;
     });
     return {
-      node, sources, value: adoption.value, error: adoption.error,
-      hasValue: adoption.hasValue, hasError: adoption.hasError,
+      node,
+      sources,
+      value: adoption.value,
+      error: adoption.error,
+      hasValue: adoption.hasValue,
+      hasError: adoption.hasError,
       semanticCurrent: adoption.semanticCurrent,
     };
   });
@@ -1989,7 +2003,10 @@ export function transferPrepare(
       throw new TypeError("Reactive transfer link has duplicate or self sources");
     for (const source of sources) rootNodes.push(source);
     const prepared: PreparedTransferLink = {
-      node, sources, tokens: new Map(), baseline: { sources: [], epochs: [] },
+      node,
+      sources,
+      tokens: new Map(),
+      baseline: { sources: [], epochs: [] },
       graphId: undefined,
     };
     preparedLinks.push(prepared);
@@ -2001,8 +2018,7 @@ export function transferPrepare(
     if (node.captureEpoch !== epoch)
       throw new TypeError("Reactive transfer changed during equality preparation");
   }
-  if (!transferQuiescent())
-    throw new TypeError("Reactive transfer changed during preparation");
+  if (!transferQuiescent()) throw new TypeError("Reactive transfer changed during preparation");
 
   const nextSources = new Map<ComputedNode<unknown>, readonly Node<unknown>[]>();
   for (const adoption of preparedAdoptions) nextSources.set(adoption.node, adoption.sources);
@@ -2031,8 +2047,7 @@ export function transferPrepare(
       const sourceGraphId = graphIdFor(source);
       if (sourceGraphId === undefined) continue;
       if (graphId === undefined) graphId = sourceGraphId;
-      else if (graphId !== sourceGraphId)
-        throw new Fault("cross-graph", [graphId, sourceGraphId]);
+      else if (graphId !== sourceGraphId) throw new Fault("cross-graph", [graphId, sourceGraphId]);
     }
     graphIds.set(node, graphId);
     return graphId;
@@ -2065,7 +2080,9 @@ export function transferPrepare(
       epochs.push(
         source.kind === "signal"
           ? (writeByNode.get(source)?.semanticEpoch ?? source.semanticEpoch)
-          : (nextSources.has(source) ? source.semanticEpoch + 1 : source.semanticEpoch),
+          : nextSources.has(source)
+            ? source.semanticEpoch + 1
+            : source.semanticEpoch,
       );
     if (prepared.baseline.semanticCurrent !== undefined && !prepared.baseline.semanticCurrent())
       throw new TypeError("Reactive transfer semantic source is stale");
@@ -2074,11 +2091,13 @@ export function transferPrepare(
   const liveness = prepareTransferLiveness(nextSources);
   for (const entry of liveness) rootNodes.push(entry.node);
   const witness = transferCapture(rootNodes.map((node) => node.api));
-  if (!witness.current())
-    throw new TypeError("Reactive transfer became stale during preparation");
+  if (!witness.current()) throw new TypeError("Reactive transfer became stale during preparation");
 
-  const changedStates = preparedWrites.filter((write) => write.changed).map((write) => write.node as Node<unknown>);
-  const changedAdoptions = preparedAdoptions.filter((adoption) => adoption.token !== adoption.node.token)
+  const changedStates = preparedWrites
+    .filter((write) => write.changed)
+    .map((write) => write.node as Node<unknown>);
+  const changedAdoptions = preparedAdoptions
+    .filter((adoption) => adoption.token !== adoption.node.token)
     .map((adoption) => adoption.node as Node<unknown>);
   const directAdoptions = new Set<Node<unknown>>(changedAdoptions);
   const protectedTransfers = new Set<Node<unknown>>([
@@ -2153,7 +2172,8 @@ export function transferPrepare(
       }
     },
     notify: (): void => {
-      if (!published || notified) throw new TypeError("Reactive transfer is not awaiting notification");
+      if (!published || notified)
+        throw new TypeError("Reactive transfer is not awaiting notification");
       notified = true;
       const errors: unknown[] = [];
       const deliverLiveness = (entry: PreparedTransferLiveness): void => {
