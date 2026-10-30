@@ -1373,9 +1373,9 @@ function publicPassiveTransferTypeSurface<Source extends NativeTransferSource>(
   graph: Graph,
   source: Source,
   input: unknown,
-  options: ExistingNativeValueOptions,
+  options: ExistingNativeValueOptions<Source>,
 ): NativeStoreFor<Source> {
-  const claim: PassiveTransferClaim<Source> = preparePassiveTransferClaim(
+  const claim: PassiveTransferClaim<Source> = preparePassiveTransferClaim<Source>(
     graph,
     source,
     input,
@@ -1394,6 +1394,7 @@ function publicRequiredTransferTypeSurface(
   target: QueryStore<unknown, unknown>,
   mutation: MutationTransferSource,
   carrier: object,
+  input: unknown,
   root: Readable<unknown>,
   construction: ReactiveConstruction<unknown>,
   codec: RequiredTransferCodec,

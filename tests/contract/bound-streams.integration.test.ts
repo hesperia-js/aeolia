@@ -18,10 +18,10 @@ import {
   capturePositionedProjection,
   preparePositionedRestore,
   isPositionedCheckpointCurrent,
+  type Projection,
+  type ReducePolicy,
   type PositionedRestoration,
   type PositionedStreamSource,
-  type PositionedStoreRestoration,
-  type StreamStore,
   type ClosedEncodedValue,
   type RequiredTransferCodec,
   defineContract,
@@ -1066,6 +1066,15 @@ it("keeps same-key restored readers isolated through dormant and active caller a
 
 it("binds positioned reader lifetime to native abort and physical restoration retirement", async () => {
   type Event = { readonly position: number; readonly value: number };
+  type PositionedClaim = ReturnType<
+    typeof preparePassiveTransferClaim<
+      Input,
+      number,
+      number,
+      object,
+      readonly [ReducePolicy<number, number>]
+    >
+  >;
   type Reservation = {
     readonly input: Input;
     readonly after: number;
@@ -1221,28 +1230,14 @@ it("binds positioned reader lifetime to native abort and physical restoration re
   const sourceStore = sourceBinding.member(sourceInput);
   let sourceProjection: Projection<number> | undefined;
   let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
-  let pendingGraph: ReturnType<typeof createGraph> | undefined;
+  let pendingGraph: typeof sourceGraph | undefined;
   let pendingContext: ReturnType<typeof createBindingContext> | undefined;
-  let pendingClaim:
-    | {
-        readonly store: StreamStore<number>;
-        readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
-        readonly retired: Promise<void>;
-        discard(): void;
-      }
-    | undefined;
+  let pendingClaim: PositionedClaim | undefined;
   let pendingAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
   let pendingReader: object | undefined;
-  let activeGraph: ReturnType<typeof createGraph> | undefined;
+  let activeGraph: typeof sourceGraph | undefined;
   let activeContext: ReturnType<typeof createBindingContext> | undefined;
-  let activeClaim:
-    | {
-        readonly store: StreamStore<number>;
-        readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
-        readonly retired: Promise<void>;
-        discard(): void;
-      }
-    | undefined;
+  let activeClaim: PositionedClaim | undefined;
   let activeAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
   let activeReader: object | undefined;
   let activePublished = false;

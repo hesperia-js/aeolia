@@ -808,7 +808,9 @@ describe("context-bound query entries", () => {
       const oneSecondWitness = capture.sources.find(
         (witness) => witness.slot === oneSecondCaller.slot,
       );
-      expect([zeroWindow, oneSecond]).toContain(physicalWitness?.store);
+      expect(
+        [zeroWindow, oneSecond].some((caller) => Object.is(caller, physicalWitness?.store)),
+      ).toBe(true);
       expect(zeroWitness?.store).toBe(zeroWindow);
       expect(oneSecondWitness?.store).toBe(oneSecond);
 

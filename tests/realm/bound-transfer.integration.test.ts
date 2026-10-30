@@ -10,6 +10,7 @@ import {
   createQuery,
   createStore,
   createStream,
+  createTransferScope,
   defineContract,
   Fault,
   observeStore,
@@ -17,8 +18,10 @@ import {
   preparePassiveTransferClaim,
   prepareTransferOperation,
   prepareTransferOperationRetirement,
+  profileEffect,
   project,
   snapshot,
+  storeKey,
   subscribe,
   type AdoptedEntryV2,
   type Store,
@@ -920,7 +923,7 @@ it("keeps a bound query claim dormant until ordinary post-discard acquisition", 
     });
     expect(world.queryKeys()).toBe(beforeKeys + 1);
     expect(world.fetches()).toBe(0);
-    expect(claim.store.key).toBe("passive-query");
+    expect(claim.store.key).toBe(storeKey("passive-query"));
     expect(claim.store.graph).toBe(world.graph.id);
     expect(() => claim.store.value.get()).toThrow(TypeError);
     expect(() => claim.store.status.peek()).toThrow(TypeError);
@@ -948,7 +951,7 @@ it("does not open a raw stream while preparing or discarding its passive claim",
     const claim = preparePassiveTransferClaim(world.graph, member, input);
     expect(world.streamKeys()).toBe(beforeKeys + 1);
     expect(world.opens()).toBe(0);
-    expect(claim.store.key).toBe("passive-stream");
+    expect(claim.store.key).toBe(storeKey("passive-stream"));
     expect(claim.store.graph).toBe(world.graph.id);
     expect(() => claim.store.value.peek()).toThrow(TypeError);
     expect(() => claim.store.status.get()).toThrow(TypeError);
@@ -989,6 +992,13 @@ it("joins a bound mutation to the exact native operation role until physical com
   });
   const input = { key: "one" };
   const context = createBindingContext(graph);
+  const queryBinding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+  const mutationEffect = profileEffect(mutation, 0, query, {
+    prepare: (phase) =>
+      phase.existing(phase.selectedInput).map((target) => phase.prepare(target)),
+    settle: (phase) =>
+      phase.existing(phase.selectedInput).map((target) => phase.selected(target, phase.selectedInput)),
+  });
   const mutationBinding = bindOperation(graph, mutation, {
     context,
     profile: {},
@@ -996,11 +1006,12 @@ it("joins a bound mutation to the exact native operation role until physical com
       runs += 1;
       await work;
     },
+    effects: [mutationEffect],
   });
   try {
-    const queryStore = graph.api.query(input);
+    const queryStore = queryBinding.member(input);
     await expect(queryStore.ready).resolves.toBe(1);
-    const scope = createTransferScope(graph, graph.api.query, queryStore);
+    const scope = createTransferScope(graph, queryBinding, queryStore);
     const pending = prepareTransferOperation(
       [scope],
       [
@@ -1019,7 +1030,7 @@ it("joins a bound mutation to the exact native operation role until physical com
 
     completion = mutationBinding.member(input);
     expect(runs).toBe(1);
-    expect(() => preparePassiveTransferClaim(graph, graph.api.query, input)).toThrow(TypeError);
+    expect(() => preparePassiveTransferClaim(graph, queryBinding, input)).toThrow(TypeError);
     expect(() => prepareTransferOperationRetirement(pending.operation)).toThrow(TypeError);
 
     resolveRun(undefined);
@@ -1033,7 +1044,9 @@ it("joins a bound mutation to the exact native operation role until physical com
     retirementCommit.notifications.deliver();
     await retirement.retired;
 
-    const claim = preparePassiveTransferClaim(graph, graph.api.query, input);
+    expect(queryStore.status.get()).toBe("stale");
+
+    const claim = preparePassiveTransferClaim(graph, queryBinding, input);
     claim.discard();
     await claim.retired;
   } finally {

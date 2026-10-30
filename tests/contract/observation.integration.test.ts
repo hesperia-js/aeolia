@@ -518,7 +518,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
     await adoption.retired;
 
     const browserIssue = Object.freeze({ kind: "browser" });
-    expect(targetLease.publish(browserIssue)).toBe(true);
+    expect(targetLease.reject(browserIssue)).toBe(true);
     expect(targetDerived.get()).toBe(false);
     expect(sourceLease.issue.get()).toBeUndefined();
 

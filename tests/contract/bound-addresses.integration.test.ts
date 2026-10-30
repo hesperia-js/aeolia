@@ -804,6 +804,7 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
 );
 
 it("keeps same-key positioned claims out of bound addresses until publication", async () => {
+  type Input = { readonly room: string };
   type Event = { readonly position: number; readonly value: number };
   type Reservation = {
     readonly input: Input;
@@ -962,6 +963,8 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     await landed;
     const checkpoint = capturePositionedStore(sourceStore, [sourceProjection] as const);
     expect(checkpoint.present).toBe(true);
+    if (!checkpoint.present)
+      throw new Error("The positioned source event is absent at the captured cut");
     expect(checkpoint.hasPosition).toBe(true);
     expect(checkpoint.position).toBe(5);
     expect(checkpoint.values).toStrictEqual([3]);

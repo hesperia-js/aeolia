@@ -1586,12 +1586,10 @@ describe("query progress", () => {
       stop = subscribe(targetRoot, (revision) => seen.push(revision));
       const revalidation = claim.store.revalidate();
       const ready = claim.store.ready;
-      await flush();
       expect(targetFetches).toBe(1);
       if (targetReport === undefined)
         throw new Error("The target query did not receive its progress reporter");
       targetReport("target-report");
-      await flush();
       expect(targetRoot.get()).toBe(1);
       expect(seen).toContain(1);
       targetWork.resolve(9);

@@ -886,7 +886,9 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     const receipt = positionedFoldReceipt(receiverClaim.restoration.projections[0]!);
     if (receipt === undefined) throw new Error("The real suffix did not produce a fold receipt");
     acknowledgePositionedFold(receiverClaim.restoration.projections[0]!, receipt);
-    expect(providerB.acknowledgements).toEqual([{ reader, receipt }]);
+    expect(providerB.acknowledgements).toHaveLength(1);
+    expect(providerB.acknowledgements[0]!.reader).toBe(reader);
+    expect(Object.is(providerB.acknowledgements[0]!.receipt, receipt)).toBe(true);
 
     receiverClaim.restoration.discard();
     await receiverClaim.restoration.retired;

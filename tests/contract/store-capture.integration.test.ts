@@ -11,6 +11,7 @@ import {
   observeStore,
   peekStore,
   preparePassiveTransferClaim,
+  storeKey,
   subscribe,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
@@ -366,7 +367,7 @@ it("keeps a declared Store passive until publication and leaves the graph reusab
   });
   try {
     const claim = preparePassiveTransferClaim(graph, graph.api.declared, undefined);
-    expect(claim.store.key).toBe("declared");
+    expect(claim.store.key).toBe(storeKey("declared"));
     expect(claim.store.graph).toBe(graph.id);
     expect(() => claim.store.value.peek()).toThrow(TypeError);
     expect(() => claim.store.available.get()).toThrow(TypeError);

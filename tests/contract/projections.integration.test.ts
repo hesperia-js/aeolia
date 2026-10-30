@@ -27,6 +27,7 @@ import {
   type AccumulatePolicy,
   type PositionedRestoration,
   type Projection,
+  type Readable,
   type StreamDefinition,
   type PositionedStreamSource,
   type PositionedStreamDefinition,
@@ -115,6 +116,14 @@ function waitForProjectionStatus(
     });
     if (done) stop();
   });
+}
+
+function until<T>(readable: Readable<T>, matches: (value: T) => boolean): Promise<void> {
+  const ready = Promise.withResolvers<void>();
+  const stop = subscribe(readable, (value) => {
+    if (matches(value)) ready.resolve();
+  });
+  return ready.promise.finally(stop);
 }
 
 type PositionedInput = { readonly room: string };
@@ -314,11 +323,13 @@ function positionedGraph<Value>(
   });
 }
 
+type NumberPositionedGraph = ReturnType<typeof positionedGraph<number>>;
+
 type AccumulationRestorePath = "same-runtime" | "fresh-target";
 
 interface AccumulationRestoreFixture {
   readonly provider: PositionedProvider;
-  readonly targetGraph: ReturnType<typeof positionedGraph>;
+  readonly targetGraph: NumberPositionedGraph;
   readonly input: PositionedInput;
   readonly reader: object;
   attempt(): PositionedRestoration<readonly number[]>;
@@ -334,19 +345,34 @@ async function createAccumulationRestoreFixture(
   const targetGraph = positionedGraph(stream, "positioned-" + path + "-target");
   const input = Object.freeze({ room: "one" });
   const policy: AccumulatePolicy = { kind: "accumulate", max: 1, onOverflow: "drop-oldest" };
-  let sourceGraph: ReturnType<typeof positionedGraph> | undefined;
+  let sourceGraph: NumberPositionedGraph | undefined;
   let source: Projection<readonly number[]> | undefined;
   let reader: object;
   let attempt: () => PositionedRestoration<readonly number[]>;
   if (path === "same-runtime") {
-    sourceGraph = positionedGraph(stream, "positioned-same-runtime-source");
-    source = projectPositioned(sourceGraph.api.events, input, policy);
+    const positionedSourceGraph = positionedGraph<number>(
+      stream,
+      "positioned-same-runtime-source",
+    );
+    sourceGraph = positionedSourceGraph;
+    const positionedSource = projectPositioned(
+      positionedSourceGraph.api.events,
+      input,
+      policy,
+    );
+    source = positionedSource;
     provider.emitLive(input, { position: 5, value: 1 });
     await flush();
-    const checkpoint = capturePositionedProjection<readonly number[], number>(source);
+    const checkpoint = capturePositionedProjection<readonly number[], number>(positionedSource);
     reader = provider.reserve(input, 5, checkpoint, seed);
     attempt = () =>
-      preparePositionedRestore(targetGraph.api.events, input, checkpoint, reader, { value: seed });
+      preparePositionedRestore(
+        targetGraph.api.events,
+        input,
+        checkpoint,
+        reader,
+        { value: seed },
+      );
   } else {
     reader = provider.reserve(input, 5, undefined, seed);
     attempt = () =>
@@ -1250,6 +1276,8 @@ describe("stream projections", () => {
         const sourceValue = scenario.event === undefined ? undefined : scenario.event;
         const checkpoint = capturePositionedStore(source, [sourceProjection] as const);
         expect(checkpoint.present).toBe(true);
+        if (!checkpoint.present)
+          throw new Error("The positioned Store checkpoint did not capture its completed event");
         expect(Object.hasOwn(checkpoint, "latest")).toBe(true);
         expect(checkpoint.latest).toBe(sourceValue);
         expect(checkpoint.hasPosition).toBe(true);
@@ -1437,9 +1465,16 @@ describe("stream projections", () => {
         expect(receiverClaim.store.available.get()).toBe(true);
         expect(receiverClaim.store.value.get()).toBe(2);
         const receipt = positionedFoldReceipt(targetProjection);
+        if (receipt === undefined)
+          throw new Error("The successful positioned fold did not produce a receipt");
         expect(receipt).toMatchObject({ position: 6 });
-        acknowledgePositionedFold(targetProjection, receipt!);
-        expect(provider.acknowledgements).toEqual([{ reader, receipt }]);
+        acknowledgePositionedFold(targetProjection, receipt);
+        expect(provider.acknowledgements).toHaveLength(1);
+        const acknowledgement = provider.acknowledgements[0];
+        if (acknowledgement === undefined)
+          throw new Error("The provider did not receive the positioned fold acknowledgement");
+        expect(acknowledgement.reader).toBe(reader);
+        expect(Object.is(acknowledgement.receipt, receipt)).toBe(true);
         receiverClaim.restoration.discard();
         await receiverClaim.restoration.retired;
         expect(provider.releaseCount(targetReader)).toBe(1);
@@ -1729,13 +1764,13 @@ describe("stream projections", () => {
         claimA === undefined &&
         targetProviderA.releaseCount(readerA) === 0
       )
-        targetProviderA.source.releaseReader(input, readerA);
+        targetProviderA.releaseReader(input, readerA);
       if (
         readerB !== undefined &&
         claimB === undefined &&
         targetProviderB.releaseCount(readerB) === 0
       )
-        targetProviderB.source.releaseReader(input, readerB);
+        targetProviderB.releaseReader(input, readerB);
       if (capture !== undefined)
         await capture.retired.then(
           () => undefined,

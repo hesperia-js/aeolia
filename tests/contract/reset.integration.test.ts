@@ -1128,7 +1128,7 @@ describe("Graph.reset", () => {
     const source = sourceGraph.api.events(input);
     const projection = project(source, policy);
     let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
-    let pendingGraph: ReturnType<typeof createGraph> | undefined;
+    let pendingGraph: typeof sourceGraph | undefined;
     let pendingClaim:
       | {
           readonly store: StreamStore<number>;
@@ -1140,7 +1140,7 @@ describe("Graph.reset", () => {
     let pendingAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
     let pendingReader: object | undefined;
     let pendingProvider: ReturnType<typeof makeProvider> | undefined;
-    let activeGraph: ReturnType<typeof createGraph> | undefined;
+    let activeGraph: typeof sourceGraph | undefined;
     let activeClaim:
       | {
           readonly store: StreamStore<number>;
