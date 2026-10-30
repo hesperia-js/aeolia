@@ -994,10 +994,11 @@ it("joins a bound mutation to the exact native operation role until physical com
   const context = createBindingContext(graph);
   const queryBinding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
   const mutationEffect = profileEffect(mutation, 0, query, {
-    prepare: (phase) =>
-      phase.existing(phase.selectedInput).map((target) => phase.prepare(target)),
+    prepare: (phase) => phase.existing(phase.selectedInput).map((target) => phase.prepare(target)),
     settle: (phase) =>
-      phase.existing(phase.selectedInput).map((target) => phase.selected(target, phase.selectedInput)),
+      phase
+        .existing(phase.selectedInput)
+        .map((target) => phase.selected(target, phase.selectedInput)),
   });
   const mutationBinding = bindOperation(graph, mutation, {
     context,

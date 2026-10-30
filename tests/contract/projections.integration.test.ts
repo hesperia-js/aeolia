@@ -350,29 +350,16 @@ async function createAccumulationRestoreFixture(
   let reader: object;
   let attempt: () => PositionedRestoration<readonly number[]>;
   if (path === "same-runtime") {
-    const positionedSourceGraph = positionedGraph<number>(
-      stream,
-      "positioned-same-runtime-source",
-    );
+    const positionedSourceGraph = positionedGraph<number>(stream, "positioned-same-runtime-source");
     sourceGraph = positionedSourceGraph;
-    const positionedSource = projectPositioned(
-      positionedSourceGraph.api.events,
-      input,
-      policy,
-    );
+    const positionedSource = projectPositioned(positionedSourceGraph.api.events, input, policy);
     source = positionedSource;
     provider.emitLive(input, { position: 5, value: 1 });
     await flush();
     const checkpoint = capturePositionedProjection<readonly number[], number>(positionedSource);
     reader = provider.reserve(input, 5, checkpoint, seed);
     attempt = () =>
-      preparePositionedRestore(
-        targetGraph.api.events,
-        input,
-        checkpoint,
-        reader,
-        { value: seed },
-      );
+      preparePositionedRestore(targetGraph.api.events, input, checkpoint, reader, { value: seed });
   } else {
     reader = provider.reserve(input, 5, undefined, seed);
     attempt = () =>
