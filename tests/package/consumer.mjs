@@ -1,5 +1,6 @@
 import {
   Fault,
+  Signal,
   adopt,
   captureReactiveConstruction,
   prepareRequiredTransferCapture,
@@ -9,6 +10,7 @@ import {
   bindStream as rootBindStream,
   inspectBoundAddress as rootInspectBoundAddress,
   createGraph,
+  createQuery as rootCreateQuery,
   createPositionedStream,
   project,
   projectPositioned,
@@ -26,6 +28,7 @@ import {
   signal,
   snapshot,
   subscribe,
+  withoutWrites,
 } from "aeolia";
 import {
   affects,
@@ -35,8 +38,10 @@ import {
   prepareTransferOperationRetirement,
   bindOperation,
   createBindingContext,
+  createGraph as contractCreateGraph,
   createMutation,
   createQuery,
+  defineContract as contractDefineContract,
   createStream,
   bindStream,
   inspectBoundAddress,
@@ -45,7 +50,12 @@ import {
   predictionFor,
   profileEffect,
 } from "aeolia/contract";
-import { computed, subscribe as subscribeSignal } from "aeolia/reactive";
+import {
+  Signal as ReactiveSignal,
+  computed,
+  signal as reactiveSignal,
+  subscribe as subscribeSignal,
+} from "aeolia/reactive";
 import { testBackend } from "aeolia/testing";
 
 function check(condition, message) {
@@ -347,7 +357,186 @@ async function verifyPositionedRequiredTransferConsumer() {
   }
 }
 
-export async function verifyConsumer() {
+const stateUpdateDiagnostic = "AEOLIA-DEV-STATE-UPDATE: update() expects next to be a function";
+
+function verifyPublicEntryIdentity() {
+  check(Signal === ReactiveSignal, "The root and reactive Signal namespaces differ");
+  check(Signal.State === ReactiveSignal.State, "The root and reactive State classes differ");
+  check(Signal.isState === ReactiveSignal.isState, "The root and reactive State guards differ");
+  check(Signal.isComputed === ReactiveSignal.isComputed, "The root and reactive Computed guards differ");
+  check(signal === reactiveSignal, "The root and reactive signal factories differ");
+  check(createGraph === contractCreateGraph, "The root and contract graph factories differ");
+  check(defineContract === contractDefineContract, "The root and contract declaration factories differ");
+  check(rootCreateQuery === createQuery, "The root and contract query factories differ");
+}
+
+function verifyStateUpdateConsumer(development) {
+  const updateSource = Function.prototype.toString.call(Signal.State.prototype.update);
+  check(!updateSource.includes("__AEOLIA_DEV__"), "The private development marker reached State.update");
+  if (development) {
+    check(
+      updateSource.includes(stateUpdateDiagnostic),
+      "The development State.update implementation was not selected",
+    );
+    check(updateSource.includes("typeof"), "The development updater predicate was not emitted");
+  } else {
+    check(
+      !updateSource.includes(stateUpdateDiagnostic),
+      "The default State.update implementation retained the diagnostic",
+    );
+    check(
+      !updateSource.includes("typeof"),
+      "The default State.update implementation retained the development predicate",
+    );
+  }
+
+  const foreignReceiverError = (() => {
+    try {
+      Signal.State.prototype.update.call({}, null);
+    } catch (error) {
+      return error;
+    }
+    return undefined;
+  })();
+  check(foreignReceiverError instanceof TypeError, "State.update accepted a foreign receiver");
+  check(
+    !foreignReceiverError.message.startsWith(stateUpdateDiagnostic),
+    "The development updater diagnostic replaced native receiver validation",
+  );
+
+  const computedReceiver = new Signal.Computed(() => 1);
+  const computedReceiverError = (() => {
+    try {
+      Signal.State.prototype.update.call(computedReceiver, null);
+    } catch (error) {
+      return error;
+    }
+    return undefined;
+  })();
+  check(computedReceiverError instanceof TypeError, "State.update accepted a Computed receiver");
+  check(
+    !computedReceiverError.message.startsWith(stateUpdateDiagnostic),
+    "The development updater diagnostic replaced native State-kind validation",
+  );
+
+  const state = new Signal.State(1);
+  let updaterCalls = 0;
+  state.update((current) => {
+    updaterCalls += 1;
+    check(current === 1, "State.update received the wrong current value");
+    return 2;
+  });
+  check(updaterCalls === 1 && state.get() === 2, "A valid updater did not run exactly once");
+
+  const updaterFailure = new Error("installed updater failure");
+  for (const thrownCause of [updaterFailure, undefined]) {
+    let throwingUpdaterCalls = 0;
+    let updaterThrew = false;
+    let caughtUpdaterFailure;
+    try {
+      state.update(() => {
+        throwingUpdaterCalls += 1;
+        throw thrownCause;
+      });
+    } catch (error) {
+      updaterThrew = true;
+      caughtUpdaterFailure = error;
+    }
+    check(updaterThrew, "State.update did not surface the updater exception");
+    check(throwingUpdaterCalls === 1, "A throwing updater did not run exactly once");
+    check(
+      Object.is(caughtUpdaterFailure, thrownCause),
+      "State.update changed the updater exception identity",
+    );
+    check(state.get() === 2, "A throwing updater changed the State value");
+  }
+
+  let invalidUpdaterError;
+  try {
+    state.update(null);
+  } catch (error) {
+    invalidUpdaterError = error;
+  }
+  check(invalidUpdaterError instanceof TypeError, "An invalid updater did not throw TypeError");
+  check(state.get() === 2, "An invalid updater changed the State value");
+  if (development)
+    check(
+      invalidUpdaterError.message === stateUpdateDiagnostic,
+      "Development used the wrong State.update diagnostic",
+    );
+  else
+    check(
+      !invalidUpdaterError.message.startsWith("AEOLIA-DEV-STATE-UPDATE:"),
+      "The default State.update path exposed the development diagnostic",
+    );
+
+  let readonlyUpdaterCalls = 0;
+  let readonlyError;
+  try {
+    withoutWrites(() =>
+      state.update((current) => {
+        readonlyUpdaterCalls += 1;
+        return current + 1;
+      }),
+    );
+  } catch (error) {
+    readonlyError = error;
+  }
+  check(
+    readonlyError instanceof Fault && readonlyError.kind === "write-forbidden",
+    "A read-only scope did not reject State.update first",
+  );
+  check(readonlyUpdaterCalls === 0 && state.get() === 2, "A read-only updater ran or changed State");
+
+  let readonlyInvalidError;
+  try {
+    withoutWrites(() => state.update(null));
+  } catch (error) {
+    readonlyInvalidError = error;
+  }
+  check(
+    readonlyInvalidError instanceof Fault && readonlyInvalidError.kind === "write-forbidden",
+    "The development updater diagnostic replaced read-only write refusal",
+  );
+  check(state.get() === 2, "A read-only malformed updater changed the State value");
+
+  let currentFunctionCalls = 0;
+  let nextFunctionCalls = 0;
+  const currentFunction = () => {
+    currentFunctionCalls += 1;
+    return "current";
+  };
+  const nextFunction = () => {
+    nextFunctionCalls += 1;
+    return "next";
+  };
+  const functionState = new Signal.State(currentFunction);
+  let functionStateUpdaterCalls = 0;
+  functionState.update((current) => {
+    functionStateUpdaterCalls += 1;
+    check(current === currentFunction, "State.update changed a function-valued T");
+    return nextFunction;
+  });
+  check(
+    functionStateUpdaterCalls === 1 && functionState.get() === nextFunction,
+    "State.update rejected a function-valued State value",
+  );
+  check(
+    currentFunctionCalls === 0 && nextFunctionCalls === 0,
+    "State.update invoked a function-valued state or result",
+  );
+}
+
+function verifyPublicGraphIdentity(graph) {
+  check(
+    Signal.isComputed(graph.resetVersion),
+    "The contract Graph used another reactive runtime instance",
+  );
+}
+
+export async function verifyConsumer(development = false) {
+  verifyPublicEntryIdentity();
+  verifyStateUpdateConsumer(development);
   await verifyRequiredTransferConsumer();
   await verifyTransferConsumer();
   await verifyBoundConsumer();
@@ -379,12 +568,13 @@ export async function verifyConsumer() {
     run: backend.perform("item.save"),
   });
   const unobservedFaults = [];
-  const graph = createGraph({
-    contract: defineContract({ namespace: "packed-consumer", operations: { item, save } }),
+  const graph = contractCreateGraph({
+    contract: contractDefineContract({ namespace: "packed-consumer", operations: { item, save } }),
     onUnobservedFault: (error) => {
       unobservedFaults.push(error);
     },
   });
+  verifyPublicGraphIdentity(graph);
   const pending = (name) => {
     const calls = backend.pending(name);
     check(calls.length === 1, `Expected one pending ${name} call, got ${calls.length}`);
@@ -392,7 +582,9 @@ export async function verifyConsumer() {
   };
   const store = graph.api.item("one");
   const observed = [];
+  const reactiveObserved = [];
   const stop = subscribe(store, (value) => observed.push(value));
+  const stopReactive = subscribeSignal(store, (value) => reactiveObserved.push(value));
   let retirementCall;
   let retirementCallResolved = false;
   try {
@@ -413,8 +605,9 @@ export async function verifyConsumer() {
     await resetting;
     check(store.value.get() === "new identity", "Reset did not refresh the preserved handle");
     check(
-      JSON.stringify(observed) === '["initial","updated","new identity"]',
-      "The consumer received the wrong query updates",
+      JSON.stringify(observed) === '["initial","updated","new identity"]' &&
+        JSON.stringify(reactiveObserved) === '["initial","updated","new identity"]',
+      "The consumer entry points received different query updates",
     );
 
     const refreshing = store.revalidate();
@@ -466,6 +659,7 @@ export async function verifyConsumer() {
     if (retirementCall !== undefined && !retirementCallResolved)
       backend.resolve(retirementCall, "late response");
     stop();
+    stopReactive();
     graph.dispose();
   }
 }

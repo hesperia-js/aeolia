@@ -39,21 +39,25 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "development": "./dist/development/index.js",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
     "./reactive": {
       "types": "./dist/reactive/index.d.ts",
+      "development": "./dist/development/reactive/index.js",
       "import": "./dist/reactive/index.js",
       "default": "./dist/reactive/index.js"
     },
     "./contract": {
       "types": "./dist/contract/index.d.ts",
+      "development": "./dist/development/contract/index.js",
       "import": "./dist/contract/index.js",
       "default": "./dist/contract/index.js"
     },
     "./testing": {
       "types": "./dist/testing.d.ts",
+      "development": "./dist/development/testing.js",
       "import": "./dist/testing.js",
       "default": "./dist/testing.js"
     }

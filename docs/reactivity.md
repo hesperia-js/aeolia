@@ -55,6 +55,13 @@ the `watched` and `unwatched` lifecycle callbacks must be functions, and
 callback. Invalid options or a non-function callback throw `TypeError` before
 the signal is added to the reactive graph.
 
+`State.update(next)` calls `next` once with the current value and stores its
+result. The result may be any value allowed by the State's type, including a
+function. Published packages include supplementary diagnostics under the
+`development` export condition. Enable that condition in your module resolver
+to get a descriptive `TypeError` for a non-function updater. The ordinary write
+policy, including `withoutWrites`, still takes precedence.
+
 Use `subscribe(readable, observer)` to receive values. It delivers the current
 value immediately, including `undefined`, and respects the source's equality
 policy (`Object.is` by default). A computed whose result remains equal does

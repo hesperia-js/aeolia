@@ -57,6 +57,33 @@ function isMissingFile(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
+type PackageExportEntry = {
+  readonly types: string;
+  readonly import: string;
+  readonly default: string;
+  readonly development: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPackageExportEntry(value: unknown): value is PackageExportEntry {
+  return (
+    isRecord(value) &&
+    typeof value.types === "string" &&
+    typeof value.import === "string" &&
+    typeof value.default === "string" &&
+    typeof value.development === "string"
+  );
+}
+
+function optionalRecord(value: unknown, field: string): Record<string, unknown> {
+  if (value === undefined || value === null) return {};
+  if (!isRecord(value)) throw new TypeError("Invalid package manifest field: " + field);
+  return value;
+}
+
 type InstalledPeerFact = {
   name: string;
   range: string;
@@ -146,7 +173,9 @@ try {
   );
   await run([process.execPath, "install", "--ignore-scripts", "--offline"], consumer);
   const installed = join(consumer, "node_modules", "aeolia");
-  const manifest = await Bun.file(join(installed, "package.json")).json();
+  const manifestValue: unknown = await Bun.file(join(installed, "package.json")).json();
+  if (!isRecord(manifestValue)) throw new TypeError("Installed package manifest is not an object");
+  const manifest = manifestValue;
   const installedManifestBytes = await readFile(join(installed, "package.json"));
   assert.equal(
     manifest.name,
@@ -174,18 +203,89 @@ try {
     left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
   );
 
-  const peerDependencies = manifest.peerDependencies ?? {};
-  const peerMetadata = manifest.peerDependenciesMeta ?? {};
+  const installedExports = manifest.exports;
+  if (!isRecord(installedExports))
+    throw new TypeError("Installed package exports are not an object");
+  const exportEntries = Object.entries(installedExports);
+  assert.ok(exportEntries.length > 0, "The installed archive has no public package exports");
+  assert.deepEqual(
+    exportEntries.map(([specifier]) => specifier).sort(),
+    Object.keys(sourceManifest.exports ?? {}).sort(),
+    "The installed archive changed the public export specifiers",
+  );
+  const profileRoutes = exportEntries.map(([specifier, rawEntry]) => {
+    if (!isPackageExportEntry(rawEntry))
+      throw new TypeError("Installed export is missing a required route: " + specifier);
+    const entry = rawEntry;
+    const sourceEntryValue: unknown = sourceManifest.exports?.[specifier];
+    if (!isPackageExportEntry(sourceEntryValue))
+      throw new TypeError("Source package export is missing a required route: " + specifier);
+    const sourceEntry = sourceEntryValue;
+    assert.equal(
+      entry.types,
+      sourceEntry.types,
+      "The development condition changed declarations: " + specifier,
+    );
+    assert.equal(
+      entry.import,
+      sourceEntry.import,
+      "The default import route changed: " + specifier,
+    );
+    assert.equal(entry.default, entry.import, "The default condition changed: " + specifier);
+    assert.equal(
+      entry.development,
+      entry.import.replace(/^\.\/dist\//, "./dist/development/"),
+      "The development condition did not select its configured profile directory: " + specifier,
+    );
+    for (const path of [entry.types, entry.import, entry.development])
+      assert.ok(
+        installedDist.some((file) => file.path === path.replace(/^\.\//, "")),
+        "The installed export target is missing from the archive: " + path,
+      );
+    return { specifier, types: entry.types, default: entry.import, development: entry.development };
+  });
+  const stateUpdateDiagnostic = "AEOLIA-DEV-STATE-UPDATE: update() expects next to be a function";
+  const offJavaScript = installedDist.filter(
+    (file) => file.path.startsWith("dist/") && !file.path.startsWith("dist/development/") && file.path.endsWith(".js"),
+  );
+  const developmentJavaScript = installedDist.filter(
+    (file) => file.path.startsWith("dist/development/") && file.path.endsWith(".js"),
+  );
+  assert.ok(offJavaScript.length > 0, "The default profile has no executable JavaScript");
+  assert.ok(developmentJavaScript.length > 0, "The development profile is missing from the installed archive");
+  // Source maps embed sourcesContent; inspect executable JavaScript bytes only.
+  const offJavaScriptText = await Promise.all(
+    offJavaScript.map(async (file) => (await readFile(join(installed, file.path))).toString("utf8")),
+  );
+  const developmentJavaScriptText = await Promise.all(
+    developmentJavaScript.map(async (file) => (await readFile(join(installed, file.path))).toString("utf8")),
+  );
+  assert.ok(
+    offJavaScriptText.every((text) => !text.includes("__AEOLIA_DEV__") && !text.includes(stateUpdateDiagnostic)),
+    "The default profile retained the private development marker or State.update diagnostic",
+  );
+  assert.ok(
+    developmentJavaScriptText.every((text) => !text.includes("__AEOLIA_DEV__")),
+    "The development profile retained the private build marker",
+  );
+  assert.ok(
+    developmentJavaScriptText.some((text) => text.includes(stateUpdateDiagnostic)),
+    "The development profile omitted the State.update diagnostic",
+  );
+
+  const peerDependencies = optionalRecord(manifest.peerDependencies, "peerDependencies");
+  const peerMetadata = optionalRecord(manifest.peerDependenciesMeta, "peerDependenciesMeta");
   const peerResolutions: InstalledPeerFact[] = [];
   for (const [name, range] of Object.entries(peerDependencies).sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0,
   )) {
+    const metadata = peerMetadata[name];
     peerResolutions.push(
       await installedPeerFact(
         installed,
         name,
         String(range),
-        peerMetadata[name]?.optional === true,
+        isRecord(metadata) && metadata.optional === true,
       ),
     );
   }
@@ -236,6 +336,7 @@ try {
           main: manifest.main ?? null,
           types: manifest.types ?? null,
           exports: manifest.exports ?? {},
+          profileRoutes,
           peerDependencies,
           peerDependenciesMeta: peerMetadata,
         },
@@ -270,17 +371,52 @@ try {
     [process.execPath, "x", "--no-install", "tsc", "--project", join(consumer, "tsconfig.json")],
     root,
   );
-  console.log("PASS packed consumer declarations (including expected type errors)");
+  await run(
+    [
+      process.execPath,
+      "x",
+      "--no-install",
+      "tsc",
+      "--project",
+      join(consumer, "tsconfig.json"),
+      "--customConditions",
+      "development",
+    ],
+    root,
+  );
+  console.log("PASS packed consumer declarations under default and development conditions");
 
   await writeFile(
     join(consumer, "run.mjs"),
     'import { verifyConsumer } from "./consumer.mjs";\nawait verifyConsumer();\nconsole.log("PASS consumer workflow");\n',
+  );
+  await writeFile(
+    join(consumer, "run-development.mjs"),
+    [
+      'import { verifyConsumer } from "./consumer.mjs";',
+      'await verifyConsumer(true);',
+      'console.log("PASS consumer workflow: development");',
+      "",
+    ].join("\n"),
   );
   for (const runtime of [process.execPath, "node"]) {
     const output = await run([runtime, "run.mjs"], consumer);
     assert.match(output, /PASS consumer workflow/);
     console.log(`PASS packed consumer workflow: ${runtime === process.execPath ? "Bun" : "Node"}`);
   }
+  const developmentOutput = await run(
+    ["node", "--conditions=development", "run-development.mjs"],
+    consumer,
+  );
+  assert.match(developmentOutput, /PASS consumer workflow: development/);
+  console.log("PASS packed consumer workflow: Node development condition");
+
+  const bunDevelopmentOutput = await run(
+    [process.execPath, "--conditions=development", "run-development.mjs"],
+    consumer,
+  );
+  assert.match(bunDevelopmentOutput, /PASS consumer workflow: development/);
+  console.log("PASS packed consumer workflow: Bun development condition");
 
   const error = await run(["node", "--enable-source-maps", "mapped-error.mjs"], consumer, 1);
   const sourceLines = (await readFile(join(root, "src/contract/api.ts"), "utf8")).split(/\r?\n/);
@@ -304,16 +440,50 @@ try {
     error.replaceAll("\\", "/").includes(`/src/contract/api.ts:${throwLine}:`),
     `Source map did not locate the original throw:\n${error}`,
   );
-  console.log("PASS packed source map: real exception maps to its original TypeScript line");
+  console.log("PASS packed source map: query error maps to its original TypeScript line");
 
-  const imports = Object.fromEntries(
-    Object.entries(manifest.exports as Record<string, { import: string }>).map(
-      ([subpath, entry]) => [
-        "aeolia" + subpath.slice(1),
-        "/package/" + entry.import.replace(/^\.\//, ""),
-      ],
-    ),
+  const stateUpdateError = await run(
+    ["node", "--conditions=development", "--enable-source-maps", "mapped-error.mjs", "state-update"],
+    consumer,
+    1,
   );
+  const stateUpdateSourceLines = (
+    await readFile(join(root, "src/reactive/classes.ts"), "utf8")
+  ).split(/\r?\n/);
+  const diagnosticLines = stateUpdateSourceLines.flatMap((line, index) =>
+    line.includes(stateUpdateDiagnostic) ? [index] : [],
+  );
+  assert.ok(
+    diagnosticLines.length === 1 && diagnosticLines[0] !== undefined,
+    "Locate the unique State.update diagnostic for the source-map check",
+  );
+  const stateUpdateThrowLine = diagnosticLines[0] + 1;
+  assert.ok(
+    stateUpdateError.includes("TypeError: " + stateUpdateDiagnostic),
+    "The installed development profile did not report the State.update diagnostic",
+  );
+  assert.ok(
+    stateUpdateError.replaceAll("\\", "/").includes(
+      "/src/reactive/classes.ts:" + stateUpdateThrowLine + ":",
+    ),
+    "The State.update diagnostic did not map to its original TypeScript throw line:\n" + stateUpdateError,
+  );
+  console.log("PASS packed development source map: State.update diagnostic maps to TypeScript");
+
+  const imports = {
+    default: Object.fromEntries(
+      profileRoutes.map((route) => [
+        "aeolia" + route.specifier.slice(1),
+        "/package/" + route.default.replace(/^\.\//, ""),
+      ]),
+    ),
+    development: Object.fromEntries(
+      profileRoutes.map((route) => [
+        "aeolia" + route.specifier.slice(1),
+        "/package/" + route.development.replace(/^\.\//, ""),
+      ]),
+    ),
+  };
   const files = new Map<string, string>([["/consumer.mjs", join(consumer, "consumer.mjs")]]);
   for await (const path of new Bun.Glob("dist/**/*").scan({ cwd: installed, onlyFiles: true }))
     files.set("/package/" + path.replaceAll("\\", "/"), join(installed, path));
@@ -322,11 +492,15 @@ try {
     port: 0,
     fetch(request) {
       const path = new URL(request.url).pathname;
-      if (path === "/")
-        return new Response(
-          `<!doctype html><script type="importmap">${JSON.stringify({ imports })}</script>`,
-          { headers: { "content-type": "text/html" } },
-        );
+      if (path === "/" || path === "/development") {
+        const selectedImports =
+          path === "/development" ? imports.development : imports.default;
+        const html =
+          "<!doctype html><script type=\"importmap\">" +
+          JSON.stringify({ imports: selectedImports }) +
+          "</script>";
+        return new Response(html, { headers: { "content-type": "text/html" } });
+      }
       const file = files.get(path);
       return file === undefined
         ? new Response("Not found", { status: 404 })
@@ -343,26 +517,43 @@ try {
   try {
     const browser = await chromium.launch();
     try {
-      const page = await browser.newPage();
-      const errors: string[] = [];
-      page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(server.url.href);
-      await page.evaluate(async () => {
-        const url = "/consumer.mjs";
-        let timer: ReturnType<typeof setTimeout>;
+      const runBrowserConsumer = async (path: string, development: boolean): Promise<void> => {
+        const page = await browser.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
         try {
-          await Promise.race([
-            import(url).then(({ verifyConsumer }) => verifyConsumer()),
-            new Promise((_, reject) => {
-              timer = setTimeout(() => reject(new Error("Consumer workflow timed out")), 30_000);
-            }),
-          ]);
+          await page.goto(new URL(path, server.url.href).href);
+          await page.evaluate(async (selectedDevelopment: boolean) => {
+            const url = "/consumer.mjs";
+            let timer: ReturnType<typeof setTimeout>;
+            try {
+              await Promise.race([
+                import(url).then(({ verifyConsumer }) => verifyConsumer(selectedDevelopment)),
+                new Promise((_, reject) => {
+                  timer = setTimeout(
+                    () => reject(new Error("Consumer workflow timed out")),
+                    30_000,
+                  );
+                }),
+              ]);
+            } finally {
+              clearTimeout(timer!);
+            }
+          }, development);
+          assert.deepEqual(errors, [], "Browser errors during the packed consumer workflow");
+          console.log(
+            "PASS packed consumer workflow: Chromium " +
+              browser.version() +
+              " (" +
+              (development ? "development" : "default") +
+              ")",
+          );
         } finally {
-          clearTimeout(timer!);
+          await page.close();
         }
-      });
-      assert.deepEqual(errors, [], "Browser errors during the packed consumer workflow");
-      console.log(`PASS packed consumer workflow: Chromium ${browser.version()}`);
+      };
+      await runBrowserConsumer("/", false);
+      await runBrowserConsumer("/development", true);
     } finally {
       await browser.close();
     }
