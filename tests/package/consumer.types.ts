@@ -269,12 +269,12 @@ const positionedGraph = createGraph({
 const neverPositionedDefinition = createPositionedStream<
   PositionedInput,
   never,
-  string,
+  `never-positioned/${string}`,
   number,
   PositionedReader
 >({
   name: "items.never-positioned",
-  key: (input) => input.id,
+  key: (input) => `never-positioned/${input.id}`,
   source: {
     open: async function* (
       _input: PositionedInput,
@@ -289,10 +289,58 @@ const neverPositionedDefinition = createPositionedStream<
 const neverPositionedGraph = createGraph({
   contract: defineContract({
     namespace: "never-positioned-types",
-    operations: { events: neverPositionedDefinition },
+    operations: { events: neverPositionedDefinition, store },
   }),
 });
-void neverPositionedGraph.api.events;
+const neverPositionedMember = neverPositionedGraph.api.events;
+const neverPositionedSource = neverPositionedMember({ id: "one" });
+const neverPositionedProjection = projectPositioned(
+  neverPositionedMember,
+  { id: "one" },
+  { kind: "accumulate", max: 2 },
+);
+const neverPositionedValues: readonly never[] = neverPositionedProjection.value.get();
+const neverPositionedRestore = preparePositionedSeedRestore(
+  neverPositionedMember,
+  { id: "one" },
+  { kind: "accumulate", max: 2 },
+  { after: 4, value: neverPositionedValues },
+  { token: "reader" },
+);
+const neverPositionedRestoredValues: readonly never[] =
+  neverPositionedRestore.projection.value.get();
+// @ts-expect-error The never-valued member retains its declared input.
+neverPositionedMember({ id: 1 });
+// @ts-expect-error The never-valued member cannot accept a stored event.
+neverPositionedSource.set(1);
+preparePositionedSeedRestore(
+  neverPositionedMember,
+  { id: "one" },
+  { kind: "accumulate", max: 2 },
+  // @ts-expect-error The never-valued member retains its numeric provider position.
+  { after: "wrong-position", value: neverPositionedValues },
+  { token: "reader" },
+);
+preparePositionedSeedRestore(
+  neverPositionedMember,
+  { id: "one" },
+  { kind: "accumulate", max: 2 },
+  { after: 4, value: neverPositionedValues },
+  // @ts-expect-error The never-valued member retains its provider Reader.
+  { token: 1 },
+);
+const neverPositionedAddressed = neverPositionedGraph.at("never-positioned/one");
+const neverPositionedKeyedValue: undefined = neverPositionedAddressed.value.get();
+// @ts-expect-error A matching positioned key cannot accept an event of any value.
+neverPositionedAddressed.set(1);
+neverPositionedGraph.at("outside-positioned-pattern").set(1);
+const neverPositionedCollision = createStore({ name: "never-positioned/taken", initial: 0 });
+// @ts-expect-error The never-valued positioned stream still reserves its key pattern.
+defineContract({
+  namespace: "never-positioned-collision",
+  operations: { events: neverPositionedDefinition, collision: neverPositionedCollision },
+});
+void [neverPositionedValues, neverPositionedRestoredValues, neverPositionedKeyedValue];
 const positionedMember: MemberOf<typeof positionedDefinition> = positionedGraph.api.positioned;
 const positionedReduce = projectPositioned(
   positionedMember,
