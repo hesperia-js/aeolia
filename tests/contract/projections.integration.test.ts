@@ -1561,7 +1561,6 @@ describe("stream projections", () => {
     let claimB: PositionedClaim | undefined;
     let readerA: object | undefined;
     let readerB: object | undefined;
-    let capturePublished = false;
     try {
       const landedA = until(sourceProjectionA.value, (value) => value === 2);
       const landedB = until(sourceProjectionB.value, (value) => value === 14);
@@ -1640,7 +1639,6 @@ describe("stream projections", () => {
       if (captureCommit === undefined)
         throw new Error("The two-reader source capture did not seal");
       captureCommit.publish();
-      capturePublished = true;
       captureCommit.notifications.deliver();
       await capture.retired;
 

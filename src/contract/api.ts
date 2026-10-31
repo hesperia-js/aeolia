@@ -19,7 +19,6 @@ import type {
   StreamDefinition,
   PositionedStreamDefinition,
   PositionedStoreRestoreSeed,
-  PositionedStreamEvent,
   PositionedStreamOpenOptions,
 } from "./types.ts";
 import { affectedBrand } from "./symbols.ts";
@@ -282,12 +281,11 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
         ? undefined
         : Reflect.apply(capturedSource.initialBoundary, capturedSource, [value, positionedOptions]);
     positionedInitialBoundaryWriterByOpenOptions.get(options)?.(initialBoundary);
-    type Event = PositionedStreamEvent<Position, Value>;
-    let sourceIterator: AsyncIterator<Event> | undefined;
+    let sourceIterator: object | undefined;
     let source:
       | {
-          readonly iterator: AsyncIterator<Event>;
-          readonly next: AsyncIterator<Event>["next"];
+          readonly iterator: object;
+          readonly next: Function;
         }
       | undefined;
     let sourceDone = false;
@@ -299,8 +297,8 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
     let returnForwarder: ((...args: unknown[]) => unknown) | undefined;
 
     const getSourceIterator = (): {
-      readonly iterator: AsyncIterator<Event>;
-      readonly next: AsyncIterator<Event>["next"];
+      readonly iterator: object;
+      readonly next: Function;
     } => {
       if (source === undefined) {
         const method = events[Symbol.asyncIterator];
@@ -310,7 +308,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
         if (iterator === null || (typeof iterator !== "object" && typeof iterator !== "function"))
           throw new TypeError("Positioned stream iterator must be an object.");
         sourceIterator = iterator;
-        const next = iterator.next;
+        const next: unknown = (iterator as { readonly next?: unknown }).next;
         if (typeof next !== "function")
           throw new TypeError("Positioned stream iterator must provide next().");
         source = { iterator, next };
@@ -334,14 +332,14 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
       const current = source;
       if (current === undefined)
         throw new TypeError("Positioned stream iterator is not initialized.");
-      const result = await Reflect.apply(current.next, current.iterator, []);
+      const result: unknown = await Reflect.apply(current.next, current.iterator, []);
       if (result === null || (typeof result !== "object" && typeof result !== "function"))
         throw new TypeError("Positioned stream iterator result must be an object.");
-      if (result.done) {
+      if ((result as { readonly done?: unknown }).done) {
         sourceDone = true;
         return { done: true, value: undefined };
       }
-      const event = result.value;
+      const event: unknown = (result as { readonly value?: unknown }).value;
       if (
         event === null ||
         typeof event !== "object" ||
@@ -366,7 +364,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
       if (current === undefined || sourceDone) return undefined;
       let close: unknown;
       try {
-        close = current.return;
+        close = (current as { readonly return?: unknown }).return;
       } catch (cause) {
         returnLookupFailure = { cause };
         throw cause;
