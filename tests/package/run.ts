@@ -246,22 +246,34 @@ try {
   });
   const stateUpdateDiagnostic = "AEOLIA-DEV-STATE-UPDATE: update() expects next to be a function";
   const offJavaScript = installedDist.filter(
-    (file) => file.path.startsWith("dist/") && !file.path.startsWith("dist/development/") && file.path.endsWith(".js"),
+    (file) =>
+      file.path.startsWith("dist/") &&
+      !file.path.startsWith("dist/development/") &&
+      file.path.endsWith(".js"),
   );
   const developmentJavaScript = installedDist.filter(
     (file) => file.path.startsWith("dist/development/") && file.path.endsWith(".js"),
   );
   assert.ok(offJavaScript.length > 0, "The default profile has no executable JavaScript");
-  assert.ok(developmentJavaScript.length > 0, "The development profile is missing from the installed archive");
+  assert.ok(
+    developmentJavaScript.length > 0,
+    "The development profile is missing from the installed archive",
+  );
   // Source maps embed sourcesContent; inspect executable JavaScript bytes only.
   const offJavaScriptText = await Promise.all(
-    offJavaScript.map(async (file) => (await readFile(join(installed, file.path))).toString("utf8")),
+    offJavaScript.map(async (file) =>
+      (await readFile(join(installed, file.path))).toString("utf8"),
+    ),
   );
   const developmentJavaScriptText = await Promise.all(
-    developmentJavaScript.map(async (file) => (await readFile(join(installed, file.path))).toString("utf8")),
+    developmentJavaScript.map(async (file) =>
+      (await readFile(join(installed, file.path))).toString("utf8"),
+    ),
   );
   assert.ok(
-    offJavaScriptText.every((text) => !text.includes("__AEOLIA_DEV__") && !text.includes(stateUpdateDiagnostic)),
+    offJavaScriptText.every(
+      (text) => !text.includes("__AEOLIA_DEV__") && !text.includes(stateUpdateDiagnostic),
+    ),
     "The default profile retained the private development marker or State.update diagnostic",
   );
   assert.ok(
@@ -394,7 +406,7 @@ try {
     join(consumer, "run-development.mjs"),
     [
       'import { verifyConsumer } from "./consumer.mjs";',
-      'await verifyConsumer(true);',
+      "await verifyConsumer(true);",
       'console.log("PASS consumer workflow: development");',
       "",
     ].join("\n"),
@@ -443,7 +455,13 @@ try {
   console.log("PASS packed source map: query error maps to its original TypeScript line");
 
   const stateUpdateError = await run(
-    ["node", "--conditions=development", "--enable-source-maps", "mapped-error.mjs", "state-update"],
+    [
+      "node",
+      "--conditions=development",
+      "--enable-source-maps",
+      "mapped-error.mjs",
+      "state-update",
+    ],
     consumer,
     1,
   );
@@ -463,10 +481,11 @@ try {
     "The installed development profile did not report the State.update diagnostic",
   );
   assert.ok(
-    stateUpdateError.replaceAll("\\", "/").includes(
-      "/src/reactive/classes.ts:" + stateUpdateThrowLine + ":",
-    ),
-    "The State.update diagnostic did not map to its original TypeScript throw line:\n" + stateUpdateError,
+    stateUpdateError
+      .replaceAll("\\", "/")
+      .includes("/src/reactive/classes.ts:" + stateUpdateThrowLine + ":"),
+    "The State.update diagnostic did not map to its original TypeScript throw line:\n" +
+      stateUpdateError,
   );
   console.log("PASS packed development source map: State.update diagnostic maps to TypeScript");
 
@@ -493,10 +512,9 @@ try {
     fetch(request) {
       const path = new URL(request.url).pathname;
       if (path === "/" || path === "/development") {
-        const selectedImports =
-          path === "/development" ? imports.development : imports.default;
+        const selectedImports = path === "/development" ? imports.development : imports.default;
         const html =
-          "<!doctype html><script type=\"importmap\">" +
+          '<!doctype html><script type="importmap">' +
           JSON.stringify({ imports: selectedImports }) +
           "</script>";
         return new Response(html, { headers: { "content-type": "text/html" } });

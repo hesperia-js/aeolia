@@ -363,16 +363,25 @@ function verifyPublicEntryIdentity() {
   check(Signal === ReactiveSignal, "The root and reactive Signal namespaces differ");
   check(Signal.State === ReactiveSignal.State, "The root and reactive State classes differ");
   check(Signal.isState === ReactiveSignal.isState, "The root and reactive State guards differ");
-  check(Signal.isComputed === ReactiveSignal.isComputed, "The root and reactive Computed guards differ");
+  check(
+    Signal.isComputed === ReactiveSignal.isComputed,
+    "The root and reactive Computed guards differ",
+  );
   check(signal === reactiveSignal, "The root and reactive signal factories differ");
   check(createGraph === contractCreateGraph, "The root and contract graph factories differ");
-  check(defineContract === contractDefineContract, "The root and contract declaration factories differ");
+  check(
+    defineContract === contractDefineContract,
+    "The root and contract declaration factories differ",
+  );
   check(rootCreateQuery === createQuery, "The root and contract query factories differ");
 }
 
 function verifyStateUpdateConsumer(development) {
   const updateSource = Function.prototype.toString.call(Signal.State.prototype.update);
-  check(!updateSource.includes("__AEOLIA_DEV__"), "The private development marker reached State.update");
+  check(
+    !updateSource.includes("__AEOLIA_DEV__"),
+    "The private development marker reached State.update",
+  );
   if (development) {
     check(
       updateSource.includes(stateUpdateDiagnostic),
@@ -486,7 +495,10 @@ function verifyStateUpdateConsumer(development) {
     readonlyError instanceof Fault && readonlyError.kind === "write-forbidden",
     "A read-only scope did not reject State.update first",
   );
-  check(readonlyUpdaterCalls === 0 && state.get() === 2, "A read-only updater ran or changed State");
+  check(
+    readonlyUpdaterCalls === 0 && state.get() === 2,
+    "A read-only updater ran or changed State",
+  );
 
   let readonlyInvalidError;
   try {
