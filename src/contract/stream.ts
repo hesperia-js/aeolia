@@ -645,6 +645,11 @@ function driveStreamSource<T>(
       return;
     }
     session.iterator = iterator;
+    if (controller.signal.aborted) {
+      closeOnAbort();
+      removeAbort();
+      return;
+    }
     const lifetime = session.positioned?.preparation?.lifetime;
     if (lifetime !== undefined && !lifetime.currentAt(readerLifetimeNow())) {
       const reason = new AbortError("Positioned Store reader lifetime expired");

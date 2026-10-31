@@ -1338,7 +1338,7 @@ describe("stream projections", () => {
         expect(seed.boundary).toEqual({ kind: "event", after: 5 });
         expect(seed.base.present).toBe(scenario.basePresent);
         expect(Object.hasOwn(seed.base, "value")).toBe(scenario.basePresent);
-        expect(seed.base.value).toBe(sourceValue);
+        if (scenario.basePresent) expect(seed.base.value).toBe(sourceValue);
         expect(seed.values).toStrictEqual([10 + (scenario.event ?? 0)]);
         expect(image.nodes).toEqual(
           expect.arrayContaining([

@@ -282,19 +282,130 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
         ? undefined
         : Reflect.apply(capturedSource.initialBoundary, capturedSource, [value, positionedOptions]);
     positionedInitialBoundaryWriterByOpenOptions.get(options)?.(initialBoundary);
-    return (async function* (): AsyncGenerator<Value> {
-      for await (const event of events as AsyncIterable<PositionedStreamEvent<Position, Value>>) {
+    type Event = PositionedStreamEvent<Position, Value>;
+    let sourceIterator: AsyncIterator<Event> | undefined;
+    let source:
+      | {
+          readonly iterator: AsyncIterator<Event>;
+          readonly next: AsyncIterator<Event>["next"];
+        }
+      | undefined;
+    let sourceDone = false;
+    let sourceFailure: { readonly cause: unknown } | undefined;
+    let sourceFailureDelivered = false;
+    let adapterClosed = false;
+    let returnRead = false;
+    let returnLookupFailure: { readonly cause: unknown } | undefined;
+    let returnForwarder: ((...args: unknown[]) => unknown) | undefined;
+
+    const getSourceIterator = (): {
+      readonly iterator: AsyncIterator<Event>;
+      readonly next: AsyncIterator<Event>["next"];
+    } => {
+      if (source === undefined) {
+        const method = events[Symbol.asyncIterator];
+        if (typeof method !== "function")
+          throw new TypeError("Positioned stream open must return an AsyncIterable.");
+        const iterator = Reflect.apply(method, events, []);
         if (
-          event === null ||
-          typeof event !== "object" ||
-          !("position" in event) ||
-          !("value" in event)
+          iterator === null ||
+          (typeof iterator !== "object" && typeof iterator !== "function")
         )
-          throw new TypeError("Positioned stream event requires a position and value.");
-        positionedPositionWriterByOpenOptions.get(options)?.(event.position);
-        yield event.value;
+          throw new TypeError("Positioned stream iterator must be an object.");
+        sourceIterator = iterator;
+        const next = iterator.next;
+        if (typeof next !== "function")
+          throw new TypeError("Positioned stream iterator must provide next().");
+        source = { iterator, next };
       }
-    })();
+      const current = source;
+      if (current === undefined)
+        throw new TypeError("Positioned stream iterator was not retained.");
+      return current;
+    };
+
+    const next = async (): Promise<IteratorResult<Value>> => {
+      if (adapterClosed || sourceDone) return { done: true, value: undefined };
+      if (sourceFailure !== undefined) {
+        if (sourceFailureDelivered) {
+          sourceDone = true;
+          return { done: true, value: undefined };
+        }
+        sourceFailureDelivered = true;
+        throw sourceFailure.cause;
+      }
+      const current = source;
+      if (current === undefined)
+        throw new TypeError("Positioned stream iterator is not initialized.");
+      const result = await Reflect.apply(current.next, current.iterator, []);
+      if (result === null || (typeof result !== "object" && typeof result !== "function"))
+        throw new TypeError("Positioned stream iterator result must be an object.");
+      if (result.done) {
+        sourceDone = true;
+        return { done: true, value: undefined };
+      }
+      const event = result.value;
+      if (
+        event === null ||
+        typeof event !== "object" ||
+        !("position" in event) ||
+        !("value" in event)
+      )
+        throw new TypeError("Positioned stream event requires a position and value.");
+      positionedPositionWriterByOpenOptions.get(options)?.(event.position);
+      const value = await event.value;
+      // Keep the existing AsyncIterable<Value> shape for async-yield thenable values.
+      return { done: false, value: value as Value };
+    };
+
+    const readSourceReturn = (): unknown => {
+      if (returnRead) {
+        if (returnLookupFailure !== undefined) throw returnLookupFailure.cause;
+        return returnForwarder;
+      }
+      returnRead = true;
+      adapterClosed = true;
+      const current = sourceIterator;
+      if (current === undefined || sourceDone) return undefined;
+      let close: unknown;
+      try {
+        close = current.return;
+      } catch (cause) {
+        returnLookupFailure = { cause };
+        throw cause;
+      }
+      if (close === undefined || close === null) return undefined;
+      if (typeof close !== "function") {
+        const cause = new TypeError("Positioned stream iterator return must be a function.");
+        returnLookupFailure = { cause };
+        throw cause;
+      }
+      const exactIterator = current;
+      returnForwarder = (...args: unknown[]): unknown =>
+        Reflect.apply(close, exactIterator, args);
+      return returnForwarder;
+    };
+
+    const iterator: AsyncIterator<Value> = { next };
+    // Native cleanup tracks the provider carrier and ignores its private close-result payload.
+    Object.defineProperty(iterator, "return", {
+      configurable: false,
+      enumerable: false,
+      get: readSourceReturn,
+    });
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<Value> {
+        // Native rechecks reader currentness after provider iterator acquisition.
+        if (source === undefined && sourceFailure === undefined) {
+          try {
+            getSourceIterator();
+          } catch (cause) {
+            sourceFailure = { cause };
+          }
+        }
+        return iterator;
+      },
+    };
   };
   const definition = Object.freeze({
     ...normalizedInput,

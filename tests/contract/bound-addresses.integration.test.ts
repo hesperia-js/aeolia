@@ -1308,6 +1308,8 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
       secondReader,
     );
     secondTransferred = true;
+    const firstSession = binding.session(first.source);
+    const secondSession = binding.session(second.source);
 
     expect(openings).toHaveLength(1);
     expect(first.source.identity).not.toBe(second.source.identity);
@@ -1341,6 +1343,7 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
     });
     second.discard();
     expect(releaseCount(secondReader)).toBe(1);
+    await Promise.all([firstSession.detached, secondSession.detached]);
     expect(inspectBoundAddress(binding, storeKey("one"))).toMatchObject({
       kind: "stable",
       state: "empty",

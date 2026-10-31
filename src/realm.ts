@@ -2617,6 +2617,74 @@ export function prepareRequiredTransferAdoption(
       });
     }
   }
+  // Pre-read child facades need their planned epoch so adopted parents remain current after publication.
+  const preparedObservationFacetTargets = new Set<Readable<unknown>>();
+  for (const row of image.nodes) {
+    if (
+      row.kind !== "native" ||
+      row.store === undefined ||
+      (row.facet !== "observation-activity" && row.facet !== "observation-issue")
+    )
+      continue;
+    const native =
+      row.caller === undefined
+        ? nativeBySlot.get(row.store)
+        : callerBySlot.get(row.caller);
+    if (native === undefined) throw new TypeError("Observation facet lacks its native claim");
+    const participant = observationByRuntime.get(native.runtime);
+    if (participant === undefined) continue;
+    const target = targets.get(row.slot)!;
+    if (participant.getFacet(row.facet) !== target)
+      throw new TypeError("Observation facet is not owned by its prepared participant");
+    if (preparedObservationFacetTargets.has(target)) continue;
+    const capture = reactiveInternal.transferCapture([target]);
+    guards.push(capture.current);
+    const cache = capture.nodes[0]!;
+    if (cache.kind !== "computed" || !cache.hasRun || cache.hasError || !cache.hasValue) continue;
+    const liveWrite = participant.writes.find((write) => write.target === participant.state.live);
+    const liveAfter =
+      liveWrite === undefined
+        ? reactiveInternal.signalValue(participant.state.live)
+        : liveWrite.value;
+    if (liveAfter !== true) continue;
+    let value: boolean | undefined;
+    let sources: readonly Readable<unknown>[];
+    if (row.facet === "observation-activity") {
+      const activityCell = participant.getFacet("observation-activity-cell");
+      if (activityCell === undefined)
+        throw new TypeError("Prepared observation activity lacks its exact cell");
+      if (reactiveInternal.transferConstruction(activityCell).kind !== "state")
+        throw new TypeError("Prepared observation activity cell is not a State");
+      const activityCellSignal = activityCell as WritableSignal<unknown>;
+      const activityWrite = participant.writes.find((write) => write.target === activityCellSignal);
+      const activityAfter =
+        activityWrite === undefined
+          ? reactiveInternal.signalValue(activityCellSignal)
+          : activityWrite.value;
+      if (activityAfter !== true) continue;
+      value = true;
+      sources = [participant.state.live, activityCellSignal];
+    } else {
+      const issueWrite = participant.writes.find((write) => write.target === participant.state.issue);
+      const issueAfter =
+        issueWrite === undefined
+          ? reactiveInternal.signalValue(participant.state.issue)
+          : issueWrite.value;
+      if (issueAfter !== undefined) continue;
+      value = undefined;
+      sources = [participant.state.live, participant.state.issue];
+    }
+    adoptions.push({
+      target: target as Computed<unknown>,
+      sources,
+      value,
+      error: undefined,
+      hasValue: true,
+      hasError: false,
+      semanticCurrent: () => participant.current(),
+    });
+    preparedObservationFacetTargets.add(target);
+  }
   for (const entry of mappedWrites) {
     requiredConstruction(entry.target, entry.construction);
     if (
@@ -2666,17 +2734,32 @@ export function prepareRequiredTransferAdoption(
               : row.facet === "projection-status"
                 ? "open"
                 : undefined;
-          if (!Object.is(valueFor(targets.get(dependency) as WritableSignal<unknown>), expected))
-            return false;
+          const target = targets.get(dependency) as WritableSignal<unknown>;
+          const actual = writeValues.has(target)
+            ? valueFor(target)
+            : reactiveInternal.signalValue(target);
+          if (!Object.is(actual, expected)) return false;
           for (let sourceIndex = 0; sourceIndex < row.sources.length; sourceIndex++)
             pending.push(row.sources[sourceIndex]!);
           continue;
         }
-        const runtime = nativeBySlot.get(row.store)!.runtime;
-        if (runtime.baseAvailable && !importedByRuntime.has(runtime)) return false;
-        const imported = importedByRuntime.get(runtime);
-        if (imported !== undefined && !Object.is(valueFor(runtime.committed), imported.value))
-          return false;
+        const observationFacet =
+          row.facet === "observation-activity" ||
+          row.facet === "observation-issue" ||
+          row.facet === "observation-activity-cell" ||
+          row.facet === "observation-issue-cell" ||
+          row.facet === "observation-live";
+        if (!observationFacet) {
+          const runtime = nativeBySlot.get(row.store)!.runtime;
+          if (runtime.baseAvailable && !importedByRuntime.has(runtime)) return false;
+          const imported = importedByRuntime.get(runtime);
+          if (imported !== undefined) {
+            const actual = writeValues.has(runtime.committed)
+              ? valueFor(runtime.committed)
+              : reactiveInternal.signalValue(runtime.committed);
+            if (!Object.is(actual, imported.value)) return false;
+          }
+        }
       }
       for (let sourceIndex = 0; sourceIndex < row.sources.length; sourceIndex += 1)
         pending.push(row.sources[sourceIndex]!);
