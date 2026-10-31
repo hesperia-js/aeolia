@@ -1317,15 +1317,21 @@ export function isOperationDefinition(value: unknown): value is OperationDefinit
   }
 }
 
-// Tree admission keeps comparator arguments opaque, including never-valued streams.
+// Tree admission keeps comparator and acquisition arguments opaque, including never-valued streams.
 type ContractStreamDefinition = Omit<StreamDefinition<any, any, any>, "equals"> & {
   readonly equals?: (a: never, b: never) => boolean;
 };
 type ContractPositionedStreamDefinition = Omit<
   PositionedStreamDefinition<any, any, any, any, any>,
-  "equals"
+  "equals" | "source"
 > & {
   readonly equals?: (a: never, b: never) => boolean;
+  readonly source: Omit<
+    Extract<OperationDefinition, { readonly kind: "positioned-stream" }>["source"],
+    "acquireReader"
+  > & {
+    readonly acquireReader?: (request: never) => Promise<{ readonly reader: unknown }>;
+  };
 };
 
 declare const positionedStreamMemberTypeBrand: unique symbol;
@@ -1425,13 +1431,8 @@ export type MemberOf<D> =
                 overrides?: MutationOptions,
               ) => Promise<R>
             : {})
-      : D extends PositionedStreamDefinition<infer I, infer T, any, any, any>
-        ? PositionedStreamMember<
-            I,
-            T,
-            D extends PositionedStreamDefinition<any, any, any, infer P, any> ? P : never,
-            D extends PositionedStreamDefinition<any, any, any, any, infer R> ? R : never
-          >
+      : D extends PositionedStreamDefinition<infer I, infer T, infer _K, infer P, infer R>
+        ? PositionedStreamMember<I, T, P, R>
         : D extends StreamDefinition<infer I, infer T, any>
           ? (input: I, options?: ValueOptions<T>) => StreamStore<T>
           : D extends StoreDefinition<infer T, any>
@@ -1448,7 +1449,7 @@ export type ContractApi<C extends Contract> =
 export type StorePatterns<D> =
   D extends QueryDefinition<any, any, infer K, any>
     ? K
-    : D extends PositionedStreamDefinition<any, any, infer K, any, any>
+    : D extends PositionedStreamDefinition<infer _I, infer _T, infer K, infer _P, infer _R>
       ? K
       : D extends StreamDefinition<any, infer _T, infer K>
         ? K
@@ -1511,7 +1512,7 @@ type KeyedStoreEntry<P extends string, V> = {
 export type KeyedStores<D> =
   D extends QueryDefinition<any, infer T, infer K, any>
     ? KeyedStoreEntry<K, T>
-    : D extends PositionedStreamDefinition<any, infer T, infer K, any, any>
+    : D extends PositionedStreamDefinition<infer _I, infer T, infer K, infer _P, infer _R>
       ? KeyedStoreEntry<K, T>
       : D extends StreamDefinition<any, infer T, infer K>
         ? KeyedStoreEntry<K, T>

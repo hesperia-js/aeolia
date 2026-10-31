@@ -218,8 +218,8 @@ const acquirePositioned: PositionedAcquisition = ({ input, checkpoint, signal })
 const synchronousPositionedAcquisition: PositionedAcquisition = () => ({
   reader: { token: "reserved" },
 });
-// @ts-expect-error a bare Reader Promise would permit Reader assimilation
 const barePositionedAcquisition: PositionedAcquisition = () =>
+  // @ts-expect-error a bare Reader Promise would permit Reader assimilation
   Promise.resolve({ token: "reserved" });
 type OpaquePositionedAcquisition = NonNullable<
   PositionedStreamSource<PositionedInput, number, number, unknown>["acquireReader"]

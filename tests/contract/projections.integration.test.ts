@@ -2261,7 +2261,7 @@ describe("positioned reader release retirement", () => {
             );
             if (mode === "reject-undefined") cleanup.reject(undefined);
             else cleanup.resolve();
-            const expected =
+            const expected: { ok: true } | { ok: false; cause: unknown } =
               mode === "reject-undefined" ? { ok: false, cause: undefined } : { ok: true };
             expect(await outcome).toEqual(expected);
             expect(await parentOutcome).toEqual(expected);
