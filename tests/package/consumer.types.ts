@@ -202,6 +202,31 @@ const positionedSource: PositionedStreamSource<PositionedInput, number, number, 
       expiresAt: Date.now() + 60_000,
     }),
   };
+
+type PositionedAcquisition = NonNullable<typeof positionedSource.acquireReader>;
+const acquirePositioned: PositionedAcquisition = ({ input, checkpoint, signal }) => {
+  const retainedInput: PositionedInput = input;
+  const retainedCheckpoint: PositionedStoreRestoreSeed<number, number, readonly unknown[]> = checkpoint;
+  const retainedSignal: AbortSignal = signal;
+  void retainedInput; void retainedCheckpoint; void retainedSignal;
+  return Promise.resolve({ reader: { token: "reserved" } });
+};
+// @ts-expect-error acquisition requires an original Promise carrying a Reader envelope
+const synchronousPositionedAcquisition: PositionedAcquisition = () => ({ reader: { token: "reserved" } });
+// @ts-expect-error a bare Reader Promise would permit Reader assimilation
+const barePositionedAcquisition: PositionedAcquisition = () => Promise.resolve({ token: "reserved" });
+type OpaquePositionedAcquisition = NonNullable<PositionedStreamSource<PositionedInput, number, number, unknown>["acquireReader"]>;
+const opaquePositionedAcquisition: OpaquePositionedAcquisition = () => Promise.resolve({ reader: Promise.resolve("opaque") });
+const undefinedPositionedAcquisition: OpaquePositionedAcquisition = () => Promise.resolve({ reader: undefined });
+const primitiveReleases: Array<PositionedStreamSource<PositionedInput, number, number, PositionedReader>["releaseReader"]> = [
+  () => undefined, () => null, () => false, () => 0, () => 0n, () => "", () => Symbol("released"),
+  () => Promise.resolve(),
+];
+const existingVoidRelease: () => void = () => undefined;
+const compatibleVoidRelease: PositionedStreamSource<PositionedInput, number, number, PositionedReader>["releaseReader"] = existingVoidRelease;
+void acquirePositioned; void synchronousPositionedAcquisition; void barePositionedAcquisition;
+void opaquePositionedAcquisition; void undefinedPositionedAcquisition; void primitiveReleases; void compatibleVoidRelease;
+
 const positionedDefinition = createPositionedStream({
   name: "items.positioned",
   key: (input: PositionedInput) => input.id,

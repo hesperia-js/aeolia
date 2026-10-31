@@ -1330,7 +1330,9 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
         );
       },
       acknowledge: (_input, _reader, receipt) => acknowledgements.push({ receipt }),
-      releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
+      releaseReader: (_input, reader) => {
+        releases.set(reader, (releases.get(reader) ?? 0) + 1);
+      },
     };
     return {
       source,

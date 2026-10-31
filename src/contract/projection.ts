@@ -74,6 +74,7 @@ import {
   normalizePhysicalPromise,
   observePhysicalWork,
   physicalCleanup,
+  physicalReaderRelease,
   recordCleanupFailure,
   prepareReaderRetirement,
   prepareReaderLifetime,
@@ -1015,14 +1016,19 @@ function writePositionedTuple<T, V>(
   }
   return committed;
 }
-function releasePositionedReader<T, V>(runtime: ProjectionRuntime<T, V>): void {
+function releasePositionedReader<T, V>(
+  runtime: ProjectionRuntime<T, V>,
+  source: ProjectionSource<T>,
+): void {
   const positioned = runtime.positioned;
   if (positioned === undefined || !positioned.readerPresent || positioned.readerReleased) return;
   noteTransferChange(runtime);
   noteTransferChange(positioned);
   positioned.readerReleased = true;
   try {
-    positioned.provider.releaseReader(positioned.input, positioned.reader);
+    physicalReaderRelease(source.retirement, () =>
+      positioned.provider.releaseReader(positioned.input, positioned.reader),
+    );
   } catch (error) {
     reportProjectionError(runtime, error);
   }
@@ -1099,7 +1105,7 @@ function finishPositioned<T, V>(
       reportProjectionError(runtime, error);
     }
   } finally {
-    if (positioned.storeGroup === undefined) releasePositionedReader(runtime);
+    if (positioned.storeGroup === undefined) releasePositionedReader(runtime, source);
     noteTransferChange(runtime);
     noteTransferChange(positioned);
     positioned.transitioning = false;

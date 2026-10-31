@@ -640,7 +640,9 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
         );
       },
       acknowledge: (_input, reader, receipt) => acknowledgements.push({ reader, receipt }),
-      releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
+      releaseReader: (_input, reader) => {
+        releases.set(reader, (releases.get(reader) ?? 0) + 1);
+      },
     };
     return {
       source,

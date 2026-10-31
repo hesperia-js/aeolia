@@ -972,6 +972,9 @@ async function verifyPositionedStoreConsumer() {
   let countA;
   let graphB;
   let restoration;
+  const releaseCleanup = Promise.withResolvers();
+  let releaseThenReads = 0;
+  Object.defineProperty(releaseCleanup.promise, "then", { get() { releaseThenReads++; throw new Error("Release must use native Promise observation"); } });
   let stopSourceB = () => {};
   try {
     sourceA = graphA.api.events(inputA);
@@ -1079,6 +1082,23 @@ async function verifyPositionedStoreConsumer() {
     );
 
     const providerB = new ConsumerPositionedSource();
+    let acquisitionCalls = 0;
+    let originalAcquisition;
+    let acquiredReader;
+    const effectiveSignal = new AbortController().signal;
+    providerB.acquireReader = function (request) {
+      check(this === providerB && request.input === inputB && request.checkpoint === seed && request.signal === effectiveSignal,
+        "The installed acquisition lost its source receiver, input, checkpoint or signal");
+      acquisitionCalls++;
+      acquiredReader = this.reserve(request.input, request.checkpoint.after, undefined, request.checkpoint);
+      originalAcquisition = Promise.resolve({ reader: acquiredReader });
+      return originalAcquisition;
+    };
+    const originalReleaseReader = providerB.releaseReader;
+    providerB.releaseReader = function (input, reader) {
+      originalReleaseReader.call(this, input, reader);
+      return releaseCleanup.promise;
+    };
     const definitionB = createPositionedStream({
       name: "positioned.store.consumer",
       key: (input) => input.id,
@@ -1091,7 +1111,15 @@ async function verifyPositionedStoreConsumer() {
       }),
     });
     const inputB = { id: "one" };
-    const readerB = providerB.reserve(inputB, seed.after, undefined, seed);
+    check(acquisitionCalls === 0 && providerB.opens.length === 0,
+      "Constructing the installed positioned declaration invoked acquisition or open");
+    const acquisition = definitionB.source.acquireReader({ input: inputB, checkpoint: seed, signal: effectiveSignal });
+    check(acquisition === originalAcquisition && acquisitionCalls === 1,
+      "The installed source replaced the original acquisition Promise or called it twice");
+    const envelope = await acquisition;
+    const readerB = Object.getOwnPropertyDescriptor(envelope, "reader")?.value;
+    check(readerB === acquiredReader && providerB.opens.length === 0,
+      "The installed acquisition lost its own-data Reader or opened before restoration");
     let totalStepsB = 0;
     let countStepsB = 0;
     let equalityCallsB = 0;
@@ -1215,10 +1243,19 @@ async function verifyPositionedStoreConsumer() {
       providerB.releaseCount(readerB) === 1,
       "The restored Store did not release its reader once",
     );
+    const resourceRetirement = restoration.retired;
+    const targetRetirement = graphB.retire();
+    await expectPending(resourceRetirement, "Installed reader resource retired before its original release cleanup");
+    await expectPending(targetRetirement, "Installed graph retired before its original reader release cleanup");
+    check(providerB.releaseCount(readerB) === 1 && releaseThenReads === 0,
+      "Installed release repeated the callback or consulted an authored then property");
+    releaseCleanup.resolve();
+    await Promise.all([resourceRetirement, targetRetirement]);
   } finally {
     stopSourceA();
     stopSourceB();
     restoration?.discard();
+    releaseCleanup.resolve();
     const sourceRetirement = graphA.retire();
     const targetRetirement = graphB?.retire();
     await Promise.all([

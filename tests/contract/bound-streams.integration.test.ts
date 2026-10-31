@@ -1175,7 +1175,9 @@ it("binds positioned reader lifetime to native abort and physical restoration re
         );
       },
       acknowledge: () => undefined,
-      releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
+      releaseReader: (_input, reader) => {
+        releases.set(reader, (releases.get(reader) ?? 0) + 1);
+      },
     };
     return {
       source,

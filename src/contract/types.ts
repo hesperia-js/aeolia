@@ -928,10 +928,10 @@ export type PositionedStoreProjectionValues<
  * Provider-backed source contract for a positioned stream.
  *
  * The returned iterable must emit strictly ordered positions after the supplied boundary.
- * Reader validation, currentness checks, acknowledgement, release, and optional
- * continuation-lifetime callbacks must be synchronous local operations on the same
- * provider opening that owns the reservation. They must not perform SQL or other
- * external publication.
+ * Reader validation, currentness checks, acknowledgement, and optional continuation-
+ * lifetime callbacks remain synchronous local operations on the provider opening that
+ * owns the reservation. They must not perform SQL or other external publication.
+ * Automatic reader acquisition is owned by this source.
  */
 export interface PositionedStreamSource<Input, Value, Position, Reader> {
   /** Opens a live iterable or a prepared reader after the supplied position. */
@@ -939,6 +939,18 @@ export interface PositionedStreamSource<Input, Value, Position, Reader> {
     input: Input,
     options: PositionedStreamOpenOptions<Position, Reader>,
   ) => AsyncIterable<PositionedStreamEvent<Position, Value>>;
+  /**
+   * Acquires a reader for automatic resumption from the existing decoded checkpoint.
+   * The request contains exactly the stream input, checkpoint, and effective acquisition
+   * signal. Return the original genuine Promise for an own-data, nonthenable envelope.
+   * The Reader stays opaque and is never awaited or assimilated. Rejection preserves the
+   * original cause, including undefined. The declaration factory does not call this hook.
+   */
+  readonly acquireReader?: (request: {
+    readonly input: Input;
+    readonly checkpoint: PositionedStoreRestoreSeed<Value, Position, readonly unknown[]>;
+    readonly signal: AbortSignal;
+  }) => Promise<{ readonly reader: Reader }>;
   /**
    * Reports a real exclusive starting boundary for this opening. Aeolia calls
    * this with the same input and options as open, after validating its iterable
@@ -981,8 +993,14 @@ export interface PositionedStreamSource<Input, Value, Position, Reader> {
     reader: Reader,
     receipt: PositionedFoldReceipt<Position>,
   ) => void;
-  /** Releases this provider reader once when its native owner is discarded or closed. */
-  readonly releaseReader: (input: Input, reader: Reader) => void;
+  /**
+   * Releases this provider reader once when its native owner is discarded or closed.
+   * Primitive returns, including undefined, are ignored. Object and function results
+   * are passed directly to the captured native Promise.prototype.then; arbitrary thenables
+   * are not assimilated. Promise rejection remains cleanup failure. If intrinsic observation
+   * fails, retirement remains incomplete.
+   */
+  readonly releaseReader: (input: Input, reader: Reader) => unknown;
 }
 
 /** Input accepted by createPositionedStream. */
@@ -1043,6 +1061,7 @@ export function isCreatePositionedStreamInput(
     typeof source.isReaderCurrent === "function" &&
     typeof source.acknowledge === "function" &&
     typeof source.releaseReader === "function" &&
+    (source.acquireReader === undefined || typeof source.acquireReader === "function") &&
     matchesOptions(value, valueSemanticsChecks)
   );
 }

@@ -874,7 +874,9 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
         );
       },
       acknowledge: () => undefined,
-      releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
+      releaseReader: (_input, reader) => {
+        releases.set(reader, (releases.get(reader) ?? 0) + 1);
+      },
     };
     return {
       source,

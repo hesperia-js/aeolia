@@ -1082,7 +1082,9 @@ describe("Graph.reset", () => {
           );
         },
         acknowledge: () => undefined,
-        releaseReader: (_input, reader) => releases.set(reader, (releases.get(reader) ?? 0) + 1),
+        releaseReader: (_input, reader) => {
+          releases.set(reader, (releases.get(reader) ?? 0) + 1);
+        },
       };
       return {
         source,

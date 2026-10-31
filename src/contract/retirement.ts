@@ -307,6 +307,38 @@ export function physicalCleanup(owner: RetirementOwner, action: () => void): voi
   }
 }
 
+/** @internal Track one positioned reader release without thenable assimilation. */
+export function physicalReaderRelease(owner: RetirementOwner, release: () => unknown): void {
+  const work = beginPhysicalWork(owner, "cleanup");
+  registerTransferWork(owner, work);
+  let original: unknown;
+  try {
+    original = release();
+  } catch (cause) {
+    recordCleanupFailure(work, cause);
+    finishPhysicalWork(work);
+    throw cause;
+  }
+  noteTransferChange(work);
+  work.original = original;
+  if ((typeof original !== "object" || original === null) && typeof original !== "function") {
+    finishPhysicalWork(work);
+    return;
+  }
+  try {
+    work.continuation = nativeApply(nativeThen, original, [
+      () => finishPhysicalWork(work),
+      (cause: unknown) => {
+        recordCleanupFailure(work, cause);
+        finishPhysicalWork(work);
+      },
+    ]);
+  } catch (cause) {
+    recordCleanupFailure(work, cause);
+    throw cause;
+  }
+}
+
 export function retireOwner(
   owner: RetirementOwner,
   dispose: (work: PhysicalWork) => void,

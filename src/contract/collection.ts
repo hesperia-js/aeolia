@@ -21,6 +21,7 @@ import {
   normalizePhysicalPromise,
   observePhysicalWork,
   physicalCleanup,
+  physicalReaderRelease,
   recordCleanupFailure,
   retireOwner,
 } from "./retirement.ts";
@@ -286,7 +287,7 @@ function closePositionedStoreSession<T>(runtime: StoreRuntime<T>, session: Strea
   try {
     if (reader !== undefined && reader.owned && !reader.released) {
       reader.released = true;
-      physicalCleanup(session.physical.owner, () =>
+      physicalReaderRelease(session.physical.owner, () =>
         positioned.provider.releaseReader(positioned.input, reader.reader),
       );
     }

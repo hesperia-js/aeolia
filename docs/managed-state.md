@@ -1019,6 +1019,58 @@ invalidation must be visible through the signal before the reservation becomes
 stale. A deadline does not renew or extend a reservation, and one reader's
 validation must not revoke another reader.
 
+### Acquire and release a reader
+
+A provider can supply an optional `acquireReader({ input, checkpoint, signal })`
+callback on the existing positioned source. The declaration captures it without
+invoking it. A framework performing automatic resumption calls it with the
+retained stream input, the same decoded `PositionedStoreRestoreSeed` object it
+will pass to restoration, and one effective acquisition signal. The hook adds
+no checkpoint representation, Store or replacement position.
+
+Return the original genuine Promise that completes the acquisition. Its
+fulfilled value must be a nonthenable envelope with an own data property
+`reader`. The Reader is opaque: it may be undefined, a Promise or a thenable.
+Transport it inside `{ reader }` and pass that exact Reader to restoration;
+returning or awaiting the Reader itself can assimilate it.
+
+Reject acquisition with the original cause when it fails, is unauthorized or
+cannot supply the requested continuation. There is no unavailable success
+branch or implicit live-open fallback. Ordinary live sources and callers that
+supply readers manually do not need this optional hook. A framework requiring
+automatic resumption must reject a missing hook before opening the source.
+
+Aborting acquisition revokes publication authority; it does not prove that the
+provider operation ended. The caller retains the original Promise and releases
+a late-delivered Reader once. The provider remains responsible for resources it
+has not returned when acquisition rejects. The framework cannot prove or join
+detached provider work that it never receives.
+
+`releaseReader(input, reader)` runs once after its native owner closes or is
+discarded. Primitive results, including null, are ignored. An object or
+function result is observed with the captured native Promise mechanism; a
+genuine returned cleanup Promise is retained and joined through the existing
+resource and graph/context retirement. Fulfillment values are ignored.
+Publication ends immediately while physical cleanup can remain pending.
+
+A synchronous throw or cleanup rejection retains its original cause, including
+undefined. Failed Promise observation also retains the original cause and
+leaves retirement incomplete: it cannot be treated as successful synchronous
+cleanup. Arbitrary thenables are not assimilated. Returning a Map, WeakMap or
+another incidental object therefore changes retirement behavior. Use a block
+for synchronous side effects:
+
+```ts
+declare const releases: WeakMap<object, number>;
+const releaseReader = (_input: unknown, reader: object): void => {
+  releases.set(reader, (releases.get(reader) ?? 0) + 1);
+};
+```
+
+This contract applies to reader release. Other callbacks that return void keep
+their own existing behavior. Claim registration completion remains distinct
+from the restoration resource's original `retired` Promise.
+
 ### Restore a shared Store session
 
 A graph member call for a positioned declaration returns a genuine `StreamStore<Event>`. Use

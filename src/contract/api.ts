@@ -18,6 +18,7 @@ import type {
   StoreDefinition,
   StreamDefinition,
   PositionedStreamDefinition,
+  PositionedStoreRestoreSeed,
   PositionedStreamEvent,
   PositionedStreamOpenOptions,
 } from "./types.ts";
@@ -166,9 +167,12 @@ export function createStream<I, T, K extends string>(
  * definition before exposing its raw member. Position metadata does not add a
  * store key or change the existing raw/bound namespace rules.
  *
- * Reader callbacks must validate and recheck the same provider reservation
- * synchronously without I/O. Values and positions are borrowed. Native
- * checkpoints do not clone payloads or prove that a reducer returned an
+ * Reader validation and currentness callbacks remain synchronous local checks. The
+ * optional acquireReader callback is captured once; the declaration factory validates
+ * but never invokes it. The wrapper forwards the same checkpoint request unchanged and
+ * returns the original Promise and Reader envelope unchanged when a resume lifecycle uses
+ * it. Values and positions are borrowed.
+ * Native checkpoints do not clone payloads or prove that a reducer returned an
  * immutable value.
  *
  * @param input - Name, key, ordered source, and existing store value options.
@@ -189,6 +193,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
   if (sourceInput === null || typeof sourceInput !== "object" || Array.isArray(sourceInput))
     throw new TypeError("Invalid positioned stream source.");
   const openSource = sourceInput.open;
+  const acquireSourceReader = sourceInput.acquireReader;
   const validateSourceReader = sourceInput.validateReader;
   const currentSourceReader = sourceInput.isReaderCurrent;
   const acknowledgeSourceReader = sourceInput.acknowledge;
@@ -199,6 +204,8 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
     throw new TypeError("Positioned stream initialBoundary must be a function.");
   if (readerLifetimeSource !== undefined && typeof readerLifetimeSource !== "function")
     throw new TypeError("Positioned stream readerLifetime must be a function.");
+  if (acquireSourceReader !== undefined && typeof acquireSourceReader !== "function")
+    throw new TypeError("Positioned stream acquireReader must be a function.");
   if (
     typeof openSource !== "function" ||
     typeof validateSourceReader !== "function" ||
@@ -210,6 +217,15 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
   const capturedSource = Object.freeze({
     open: (value: Input, options: PositionedStreamOpenOptions<Position, Reader>) =>
       Reflect.apply(openSource, sourceInput, [value, options]),
+    ...(typeof acquireSourceReader === "function"
+      ? {
+          acquireReader: (request: {
+            readonly input: Input;
+            readonly checkpoint: PositionedStoreRestoreSeed<Value, Position, readonly unknown[]>;
+            readonly signal: AbortSignal;
+          }) => Reflect.apply(acquireSourceReader, sourceInput, [request]),
+        }
+      : {}),
     validateReader: (
       value: Input,
       reader: Reader,
