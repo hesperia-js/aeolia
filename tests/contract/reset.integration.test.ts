@@ -1274,7 +1274,7 @@ describe("Graph.reset", () => {
         activeGraph,
         activeGraph.api.events,
         input,
-        undefined,
+        { initial: 3 },
         { policies: [policy] as const, seed, reader: activeReaderLocal },
       );
       activeClaim = activeClaimValue;

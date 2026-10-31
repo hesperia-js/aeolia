@@ -39,7 +39,7 @@ import { Fault } from "../fault.ts";
 import { isObject } from "../utils.ts";
 import { __internal as reactiveInternal, signal } from "../reactive.ts";
 import type { Readable } from "../reactive.ts";
-import { assertGraphOpen, assertStoreOpen } from "./faults.ts";
+import { assertGraphOpen, assertStoreOpen, reportContinuationError } from "./faults.ts";
 import {
   discardPositionedStoreSession,
   isLive,
@@ -1030,7 +1030,7 @@ function releasePositionedReader<T, V>(
       positioned.provider.releaseReader(positioned.input, positioned.reader),
     );
   } catch (error) {
-    reportProjectionError(runtime, error);
+    reportContinuationError(positioned.graphState, error);
   }
 }
 
@@ -2408,7 +2408,7 @@ function preparePositionedStoreGroup<Event>(
           });
     }
     const activate = (): StreamStore<Event> => {
-      if (phase !== "dormant" || !published || !preparation.published)
+      if (phase !== "dormant" || !published || !preparation.published || actualSession.ended)
         throw new TypeError("Positioned Store activation requires its published dormant group");
       if (!currentAt(readerLifetimeNow())) {
         discard();

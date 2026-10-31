@@ -1096,7 +1096,7 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     peer.discard();
     await Promise.all([peer.retired, peer.restoration.retired]);
     expect(providerB.releaseCount(peerReaderLocal)).toBe(1);
-    const afterPeerDiscard = inspectBoundAddress(targetBinding, key);
+    const afterPeerDiscard = inspectBoundAddress(targetBinding, key, { expected: occupied.stamp });
     if (afterPeerDiscard.kind !== "stable")
       throw new Error("Discarding the peer changed the published reader address");
     expect(afterPeerDiscard).toMatchObject({
@@ -1105,7 +1105,6 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
       present: true,
       basePresent: true,
     });
-    expect(afterPeerDiscard.stamp).toBe(occupied.stamp);
     expect(first.store.available.get()).toBe(true);
     expect(first.store.value.get()).toBe(3);
     expect(providerB.releaseCount(firstReaderLocal)).toBe(0);
