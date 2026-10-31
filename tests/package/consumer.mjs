@@ -974,7 +974,12 @@ async function verifyPositionedStoreConsumer() {
   let restoration;
   const releaseCleanup = Promise.withResolvers();
   let releaseThenReads = 0;
-  Object.defineProperty(releaseCleanup.promise, "then", { get() { releaseThenReads++; throw new Error("Release must use native Promise observation"); } });
+  Object.defineProperty(releaseCleanup.promise, "then", {
+    get() {
+      releaseThenReads++;
+      throw new Error("Release must use native Promise observation");
+    },
+  });
   let stopSourceB = () => {};
   try {
     sourceA = graphA.api.events(inputA);
@@ -1087,10 +1092,20 @@ async function verifyPositionedStoreConsumer() {
     let acquiredReader;
     const effectiveSignal = new AbortController().signal;
     providerB.acquireReader = function (request) {
-      check(this === providerB && request.input === inputB && request.checkpoint === seed && request.signal === effectiveSignal,
-        "The installed acquisition lost its source receiver, input, checkpoint or signal");
+      check(
+        this === providerB &&
+          request.input === inputB &&
+          request.checkpoint === seed &&
+          request.signal === effectiveSignal,
+        "The installed acquisition lost its source receiver, input, checkpoint or signal",
+      );
       acquisitionCalls++;
-      acquiredReader = this.reserve(request.input, request.checkpoint.after, undefined, request.checkpoint);
+      acquiredReader = this.reserve(
+        request.input,
+        request.checkpoint.after,
+        undefined,
+        request.checkpoint,
+      );
       originalAcquisition = Promise.resolve({ reader: acquiredReader });
       return originalAcquisition;
     };
@@ -1111,15 +1126,25 @@ async function verifyPositionedStoreConsumer() {
       }),
     });
     const inputB = { id: "one" };
-    check(acquisitionCalls === 0 && providerB.opens.length === 0,
-      "Constructing the installed positioned declaration invoked acquisition or open");
-    const acquisition = definitionB.source.acquireReader({ input: inputB, checkpoint: seed, signal: effectiveSignal });
-    check(acquisition === originalAcquisition && acquisitionCalls === 1,
-      "The installed source replaced the original acquisition Promise or called it twice");
+    check(
+      acquisitionCalls === 0 && providerB.opens.length === 0,
+      "Constructing the installed positioned declaration invoked acquisition or open",
+    );
+    const acquisition = definitionB.source.acquireReader({
+      input: inputB,
+      checkpoint: seed,
+      signal: effectiveSignal,
+    });
+    check(
+      acquisition === originalAcquisition && acquisitionCalls === 1,
+      "The installed source replaced the original acquisition Promise or called it twice",
+    );
     const envelope = await acquisition;
     const readerB = Object.getOwnPropertyDescriptor(envelope, "reader")?.value;
-    check(readerB === acquiredReader && providerB.opens.length === 0,
-      "The installed acquisition lost its own-data Reader or opened before restoration");
+    check(
+      readerB === acquiredReader && providerB.opens.length === 0,
+      "The installed acquisition lost its own-data Reader or opened before restoration",
+    );
     let totalStepsB = 0;
     let countStepsB = 0;
     let equalityCallsB = 0;
@@ -1245,10 +1270,18 @@ async function verifyPositionedStoreConsumer() {
     );
     const resourceRetirement = restoration.retired;
     const targetRetirement = graphB.retire();
-    await expectPending(resourceRetirement, "Installed reader resource retired before its original release cleanup");
-    await expectPending(targetRetirement, "Installed graph retired before its original reader release cleanup");
-    check(providerB.releaseCount(readerB) === 1 && releaseThenReads === 0,
-      "Installed release repeated the callback or consulted an authored then property");
+    await expectPending(
+      resourceRetirement,
+      "Installed reader resource retired before its original release cleanup",
+    );
+    await expectPending(
+      targetRetirement,
+      "Installed graph retired before its original reader release cleanup",
+    );
+    check(
+      providerB.releaseCount(readerB) === 1 && releaseThenReads === 0,
+      "Installed release repeated the callback or consulted an authored then property",
+    );
     releaseCleanup.resolve();
     await Promise.all([resourceRetirement, targetRetirement]);
   } finally {

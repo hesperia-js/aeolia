@@ -2102,7 +2102,6 @@ describe("stream projections", () => {
   });
 });
 
-
 describe("positioned reader release retirement", () => {
   const paths = ["raw", "store", "bound-store"] as const;
   type ReleasePath = (typeof paths)[number];
@@ -2120,56 +2119,120 @@ describe("positioned reader release retirement", () => {
     const stream = positionedDefinition(provider);
     const faults: unknown[] = [];
     const graph = createGraph({
-      contract: defineContract({ namespace: "reader-release-" + path, operations: { events: stream } }),
-      onUnobservedFault: (cause) => { faults.push(cause); },
+      contract: defineContract({
+        namespace: "reader-release-" + path,
+        operations: { events: stream },
+      }),
+      onUnobservedFault: (cause) => {
+        faults.push(cause);
+      },
     });
     const context = path === "bound-store" ? createBindingContext(graph) : undefined;
-    const member = context === undefined
-      ? graph.api.events
-      : bindStream(graph, stream, graph.api.events, { context });
-    retire = () => context === undefined ? graph.retire() : context.retire();
+    const member =
+      context === undefined
+        ? graph.api.events
+        : bindStream(graph, stream, graph.api.events, { context });
+    retire = () => (context === undefined ? graph.retire() : context.retire());
     const input = Object.freeze({ room: "one" });
-    const policy = { kind: "reduce" as const, initial: 0, step: (sum: number, value: number) => sum + value };
+    const policy = {
+      kind: "reduce" as const,
+      initial: 0,
+      step: (sum: number, value: number) => sum + value,
+    };
     const seed = { after: 5, latest: 2, values: [2] as const };
     const reader = provider.reserve(input, 5, undefined, path === "raw" ? 2 : seed);
-    const restoration = path === "raw"
-      ? preparePositionedSeedRestore(member, input, policy, { after: 5, value: 2 }, reader)
-      : preparePositionedStoreRestore(member, input, [policy] as const, seed, reader);
-    const projection = "projection" in restoration ? restoration.projection : restoration.projections[0];
-    const resourceOutcome = "retired" in restoration
-      ? restoration.retired.then(() => ({ ok: true as const }), (cause: unknown) => ({ ok: false as const, cause }))
-      : undefined;
-    return { provider, graph, faults, reader, restoration, projection, resourceOutcome, retire,
+    const restoration =
+      path === "raw"
+        ? preparePositionedSeedRestore(member, input, policy, { after: 5, value: 2 }, reader)
+        : preparePositionedStoreRestore(member, input, [policy] as const, seed, reader);
+    const projection =
+      "projection" in restoration ? restoration.projection : restoration.projections[0];
+    const resourceOutcome =
+      "retired" in restoration
+        ? restoration.retired.then(
+            () => ({ ok: true as const }),
+            (cause: unknown) => ({ ok: false as const, cause }),
+          )
+        : undefined;
+    return {
+      provider,
+      graph,
+      faults,
+      reader,
+      restoration,
+      projection,
+      resourceOutcome,
+      retire,
       reentrant: () => reentrant,
-      close: () => { context?.dispose(); graph.dispose(); },
+      close: () => {
+        context?.dispose();
+        graph.dispose();
+      },
     };
   }
 
   for (const path of paths) {
-    const modes = path === "bound-store"
-      ? ["promise", "reject-undefined"] as const
-      : ["promise", "reject-undefined", "sync-throw", "weakmap", "thenable", "function", "constructor-undefined"] as const;
+    const modes =
+      path === "bound-store"
+        ? (["promise", "reject-undefined"] as const)
+        : ([
+            "promise",
+            "reject-undefined",
+            "sync-throw",
+            "weakmap",
+            "thenable",
+            "function",
+            "constructor-undefined",
+          ] as const);
     for (const mode of modes) {
       it("retains the original " + mode + " release result for " + path, async () => {
         const cleanup = Promise.withResolvers<void>();
         const syncCause = Object.freeze({ cause: "release failed" });
         let thenReads = 0;
-        const thenable = Object.defineProperty({}, "then", { get() { thenReads++; throw new Error("must not assimilate"); } });
-        const callable = Object.defineProperty(() => undefined, "then", { get() { thenReads++; throw new Error("must not assimilate"); } });
+        const thenable = Object.defineProperty({}, "then", {
+          get() {
+            thenReads++;
+            throw new Error("must not assimilate");
+          },
+        });
+        const callable = Object.defineProperty(() => undefined, "then", {
+          get() {
+            thenReads++;
+            throw new Error("must not assimilate");
+          },
+        });
         if (mode === "constructor-undefined") {
-          Object.defineProperty(cleanup.promise, "constructor", { get() { throw undefined; } });
+          Object.defineProperty(cleanup.promise, "constructor", {
+            get() {
+              throw undefined;
+            },
+          });
         } else {
-          Object.defineProperty(cleanup.promise, "then", { get() { thenReads++; throw new Error("must use intrinsic observation"); } });
+          Object.defineProperty(cleanup.promise, "then", {
+            get() {
+              thenReads++;
+              throw new Error("must use intrinsic observation");
+            },
+          });
         }
-        const value = mode === "weakmap" ? new WeakMap()
-          : mode === "thenable" ? thenable : mode === "function" ? callable : cleanup.promise;
+        const value =
+          mode === "weakmap"
+            ? new WeakMap()
+            : mode === "thenable"
+              ? thenable
+              : mode === "function"
+                ? callable
+                : cleanup.promise;
         const current = fixture(path, () => {
           if (mode === "sync-throw") throw syncCause;
           return value;
         });
         try {
           const retirement = current.retire();
-          const outcome = retirement.then(() => ({ ok: true as const }), (cause: unknown) => ({ ok: false as const, cause }));
+          const outcome = retirement.then(
+            () => ({ ok: true as const }),
+            (cause: unknown) => ({ ok: false as const, cause }),
+          );
           expect(current.retire()).toBe(retirement);
           expect(current.reentrant()).toBe(retirement);
           expect(current.provider.releaseCount(current.reader)).toBe(1);
@@ -2194,13 +2257,18 @@ describe("positioned reader release retirement", () => {
             await expectPending(retirement);
             const parentRetirement = current.graph.retire();
             await expectPending(parentRetirement);
-            const parentOutcome = parentRetirement.then(() => ({ ok: true as const }), (cause: unknown) => ({ ok: false as const, cause }));
+            const parentOutcome = parentRetirement.then(
+              () => ({ ok: true as const }),
+              (cause: unknown) => ({ ok: false as const, cause }),
+            );
             if (mode === "reject-undefined") cleanup.reject(undefined);
             else cleanup.resolve();
-            const expected = mode === "reject-undefined" ? { ok: false, cause: undefined } : { ok: true };
+            const expected =
+              mode === "reject-undefined" ? { ok: false, cause: undefined } : { ok: true };
             expect(await outcome).toEqual(expected);
             expect(await parentOutcome).toEqual(expected);
-            if (current.resourceOutcome !== undefined) expect(await current.resourceOutcome).toEqual(expected);
+            if (current.resourceOutcome !== undefined)
+              expect(await current.resourceOutcome).toEqual(expected);
             expect(current.provider.releaseCount(current.reader)).toBe(1);
           } else {
             await expectPending(retirement);
@@ -2225,8 +2293,11 @@ describe("positioned reader release retirement", () => {
             await current.retire();
             expect(current.provider.releaseCount(current.reader)).toBe(1);
             expect(current.faults).toEqual([]);
-            if (current.resourceOutcome !== undefined) expect(await current.resourceOutcome).toEqual({ ok: true });
-          } finally { current.close(); }
+            if (current.resourceOutcome !== undefined)
+              expect(await current.resourceOutcome).toEqual({ ok: true });
+          } finally {
+            current.close();
+          }
         }
       });
     }

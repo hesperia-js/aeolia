@@ -313,7 +313,6 @@ test("store keys are branded at the boundary", () => {
   expect(() => storeKey("")).toThrow();
 });
 
-
 test("positioned declarations capture an optional acquisition without invoking it", async () => {
   type Source = PositionedStreamSource<{ readonly id: string }, number, number, unknown>;
   const controller = new AbortController();
@@ -321,7 +320,12 @@ test("positioned declarations capture an optional acquisition without invoking i
   const checkpoint = { after: 5, latest: 2, values: [2] as const };
   const request = { input, checkpoint, signal: controller.signal };
   let thenReads = 0;
-  const opaque = Object.defineProperty({}, "then", { get() { thenReads++; throw new Error("opaque Reader"); } });
+  const opaque = Object.defineProperty({}, "then", {
+    get() {
+      thenReads++;
+      throw new Error("opaque Reader");
+    },
+  });
   const readers: unknown[] = [undefined, Promise.resolve("opaque promise"), opaque];
   for (const reader of readers) {
     let captures = 0;
@@ -329,7 +333,9 @@ test("positioned declarations capture an optional acquisition without invoking i
     const result = { reader };
     const original = Promise.resolve(result);
     const source: Source = {
-      open: async function* () { yield { position: 6, value: 3 }; },
+      open: async function* () {
+        yield { position: 6, value: 3 };
+      },
       validateReader: () => true,
       isReaderCurrent: () => true,
       acknowledge: () => undefined,
@@ -344,13 +350,32 @@ test("positioned declarations capture an optional acquisition without invoking i
       expect(actual.signal).toBe(controller.signal);
       return original;
     };
-    Object.defineProperty(source, "acquireReader", { configurable: true, get() { captures++; return acquire; } });
-    const declaration = createPositionedStream({ name: "acquisition.events", key: (value: { readonly id: string }) => value.id, source });
-    const graph = createGraph({ contract: defineContract({ namespace: "acquisition-envelope", operations: { events: declaration } }) });
+    Object.defineProperty(source, "acquireReader", {
+      configurable: true,
+      get() {
+        captures++;
+        return acquire;
+      },
+    });
+    const declaration = createPositionedStream({
+      name: "acquisition.events",
+      key: (value: { readonly id: string }) => value.id,
+      source,
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "acquisition-envelope",
+        operations: { events: declaration },
+      }),
+    });
     try {
       expect(captures).toBe(1);
       expect(calls).toBe(0);
-      Object.defineProperty(source, "acquireReader", { value: () => { throw new Error("captured callback changed"); } });
+      Object.defineProperty(source, "acquireReader", {
+        value: () => {
+          throw new Error("captured callback changed");
+        },
+      });
       const captured = declaration.source.acquireReader;
       if (captured === undefined) throw new Error("The acquisition callback was not captured");
       const returned = captured(request);
@@ -361,21 +386,30 @@ test("positioned declarations capture an optional acquisition without invoking i
       expect(calls).toBe(1);
       expect(captures).toBe(1);
       expect(thenReads).toBe(0);
-    } finally { await graph.retire(); }
+    } finally {
+      await graph.retire();
+    }
   }
 });
 
 test("positioned declarations reject a malformed optional acquisition callback", () => {
   type Source = PositionedStreamSource<void, number, number, object>;
   const source: Source = {
-    open: async function* () { yield { position: 1, value: 1 }; },
-    validateReader: () => true, isReaderCurrent: () => true,
-    acknowledge: () => undefined, releaseReader: () => undefined,
+    open: async function* () {
+      yield { position: 1, value: 1 };
+    },
+    validateReader: () => true,
+    isReaderCurrent: () => true,
+    acknowledge: () => undefined,
+    releaseReader: () => undefined,
   };
   for (const acquireReader of [null, false, 1, {}]) {
-    expect(() => createPositionedStream({
-      name: "invalid-acquisition", key: () => "one",
-      source: { ...source, acquireReader } as unknown as Source,
-    })).toThrow(TypeError);
+    expect(() =>
+      createPositionedStream({
+        name: "invalid-acquisition",
+        key: () => "one",
+        source: { ...source, acquireReader } as unknown as Source,
+      }),
+    ).toThrow(TypeError);
   }
 });

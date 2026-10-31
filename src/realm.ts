@@ -2627,9 +2627,7 @@ export function prepareRequiredTransferAdoption(
     )
       continue;
     const native =
-      row.caller === undefined
-        ? nativeBySlot.get(row.store)
-        : callerBySlot.get(row.caller);
+      row.caller === undefined ? nativeBySlot.get(row.store) : callerBySlot.get(row.caller);
     if (native === undefined) throw new TypeError("Observation facet lacks its native claim");
     const participant = observationByRuntime.get(native.runtime);
     if (participant === undefined) continue;
@@ -2665,7 +2663,9 @@ export function prepareRequiredTransferAdoption(
       value = true;
       sources = [participant.state.live, activityCellSignal];
     } else {
-      const issueWrite = participant.writes.find((write) => write.target === participant.state.issue);
+      const issueWrite = participant.writes.find(
+        (write) => write.target === participant.state.issue,
+      );
       const issueAfter =
         issueWrite === undefined
           ? reactiveInternal.signalValue(participant.state.issue)

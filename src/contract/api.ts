@@ -307,10 +307,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
         if (typeof method !== "function")
           throw new TypeError("Positioned stream open must return an AsyncIterable.");
         const iterator = Reflect.apply(method, events, []);
-        if (
-          iterator === null ||
-          (typeof iterator !== "object" && typeof iterator !== "function")
-        )
+        if (iterator === null || (typeof iterator !== "object" && typeof iterator !== "function"))
           throw new TypeError("Positioned stream iterator must be an object.");
         sourceIterator = iterator;
         const next = iterator.next;
@@ -381,8 +378,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
         throw cause;
       }
       const exactIterator = current;
-      returnForwarder = (...args: unknown[]): unknown =>
-        Reflect.apply(close, exactIterator, args);
+      returnForwarder = (...args: unknown[]): unknown => Reflect.apply(close, exactIterator, args);
       return returnForwarder;
     };
 
