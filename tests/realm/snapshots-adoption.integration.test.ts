@@ -1667,6 +1667,9 @@ it("joins staged observation metadata only through the exact pending lease", asy
   let joinedAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
   let joinedClaims: ReturnType<typeof preparePassiveTransferClaim>[] = [];
   let joinedPublished = false;
+  let joinedNotifications: { readonly deliver: () => void } | undefined;
+  let bodyFailure: { readonly cause: unknown } | undefined;
+  let deliveryFailure: { readonly cause: unknown } | undefined;
   let sourceRequestResolved = false;
   let revalidationRequestResolved = false;
 
@@ -1816,17 +1819,30 @@ it("joins staged observation metadata only through the exact pending lease", asy
     });
     const joinedCommit = joinedAdoption.seal();
     if (joinedCommit === undefined) throw new Error("The exact-lease caller cohort did not seal");
+    joinedNotifications = joinedCommit.notifications;
     joinedCommit.publish();
     joinedPublished = true;
     expect(joinedObservationFirst.lease.active.get()).toBe(true);
     expect(joinedValue.get()).toBe(true);
     expect(joinedRuns).toBe(0);
+    joinedNotifications = undefined;
     joinedCommit.notifications.deliver();
     await Promise.all([joinedAdoption.retired, joinedFirst.retired, joinedSecond.retired]);
     joinedClaims = [];
     expect(joinedObservationSecond.lease.active.get()).toBe(true);
     expect(backend.calls).toHaveLength(2);
+  } catch (cause) {
+    bodyFailure = { cause };
   } finally {
+    if (joinedPublished && joinedNotifications !== undefined) {
+      const notifications = joinedNotifications;
+      joinedNotifications = undefined;
+      try {
+        notifications.deliver();
+      } catch (cause) {
+        deliveryFailure = { cause };
+      }
+    }
     if (!capturePublished) capturePlan?.discard();
     if (capturePlan !== undefined)
       await capturePlan.retired.then(
@@ -1873,6 +1889,15 @@ it("joins staged observation metadata only through the exact pending lease", asy
     independentGraph.dispose();
     joinedGraph.dispose();
   }
+  if (bodyFailure !== undefined) {
+    if (deliveryFailure !== undefined)
+      throw new AggregateError(
+        [bodyFailure.cause, deliveryFailure.cause],
+        "Required adoption body and notification cleanup failed",
+      );
+    throw bodyFailure.cause;
+  }
+  if (deliveryFailure !== undefined) throw deliveryFailure.cause;
 });
 
 it("publishes a genuine passive observation lease with required adoption", async () => {
