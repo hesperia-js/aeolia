@@ -316,17 +316,17 @@ neverPositionedSource.set(1);
 preparePositionedSeedRestore(
   neverPositionedMember,
   { id: "one" },
-  { kind: "accumulate", max: 2 },
   // @ts-expect-error The never-valued member retains its numeric provider position.
+  { kind: "accumulate", max: 2 },
   { after: "wrong-position", value: neverPositionedValues },
   { token: "reader" },
 );
 preparePositionedSeedRestore(
   neverPositionedMember,
   { id: "one" },
+  // @ts-expect-error The never-valued member retains its provider Reader.
   { kind: "accumulate", max: 2 },
   { after: 4, value: neverPositionedValues },
-  // @ts-expect-error The never-valued member retains its provider Reader.
   { token: 1 },
 );
 const neverPositionedAddressed = neverPositionedGraph.at("never-positioned/one");
