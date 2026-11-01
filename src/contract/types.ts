@@ -901,6 +901,13 @@ export interface PositionedStoreRestoration<Event, Values extends readonly unkno
   discard(): void;
 }
 
+type PositionedStorePolicyValue<Event, Policy> =
+  Policy extends import("./projection.ts").AccumulatePolicy
+    ? readonly Event[]
+    : Policy extends import("./projection.ts").ReducePolicy<Event, infer Value>
+      ? Value
+      : never;
+
 /** @internal Tuple value relation used by the public Store restoration signature. */
 export type PositionedStorePolicyValues<
   Event,
@@ -908,11 +915,7 @@ export type PositionedStorePolicyValues<
 > = {
   readonly [
     Index in keyof Policies
-  ]: Policies[Index] extends import("./projection.ts").AccumulatePolicy
-    ? readonly Event[]
-    : Policies[Index] extends import("./projection.ts").ReducePolicy<Event, infer Value>
-      ? Value
-      : never;
+  ]: PositionedStorePolicyValue<Event, Policies[Index]>;
 };
 
 /** @internal Tuple value relation used by non-pulling Store capture. */

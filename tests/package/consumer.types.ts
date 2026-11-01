@@ -38,6 +38,7 @@ import {
   subscribe,
   projectPositioned,
   project,
+  type ProjectionPolicy,
   capturePositionedProjection,
   capturePositionedStore,
   isPositionedStoreCheckpointCurrent,
@@ -883,6 +884,35 @@ function typecheckOnly(): void {
     { token: "reader" },
   );
 
+  const positionedStoreDynamicPolicies: ProjectionPolicy<unknown, unknown>[] = [
+    {
+      kind: "reduce" as const,
+      initial: undefined,
+      step: (previous: unknown, event: unknown): unknown => [previous, event],
+    },
+    positionedStoreAccumulatePolicy,
+  ];
+  const positionedStoreDynamicSeed: PositionedStoreRestoreSeed<
+    number,
+    number,
+    readonly unknown[]
+  > = {
+    after: 4,
+    latest: 5,
+    values: [undefined, [1, 2]],
+  };
+  const inferredDynamicPositionedStoreRestoration = preparePositionedStoreRestore(
+    positionedMember,
+    { id: "fresh-dynamic-store" },
+    positionedStoreDynamicPolicies,
+    positionedStoreDynamicSeed,
+    { token: "reader" },
+  );
+  const dynamicPositionedStoreRestorationType: PositionedStoreRestoration<
+    number,
+    readonly unknown[]
+  > = inferredDynamicPositionedStoreRestoration;
+
   const progressStatus: QueryProgressStatus = progressStore.progress.get().status;
   const progressSnapshot: QueryProgressSnapshot<Progress> = progressStore.progress.get();
   const progressObservation: QueryProgressObservation<Progress> =
@@ -924,6 +954,7 @@ function typecheckOnly(): void {
     restoredAccumulatedEvents,
     contractRestorationType,
     positionedStoreWithOptionsType,
+    dynamicPositionedStoreRestorationType,
     positionedRestoredSource,
     positionedRestoredTotal,
     positionedRestoredCount,
