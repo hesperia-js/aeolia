@@ -892,15 +892,12 @@ function typecheckOnly(): void {
     },
     positionedStoreAccumulatePolicy,
   ];
-  const positionedStoreDynamicSeed: PositionedStoreRestoreSeed<
-    number,
-    number,
-    readonly unknown[]
-  > = {
-    after: 4,
-    latest: 5,
-    values: [undefined, [1, 2]],
-  };
+  const positionedStoreDynamicSeed: PositionedStoreRestoreSeed<number, number, readonly unknown[]> =
+    {
+      after: 4,
+      latest: 5,
+      values: [undefined, [1, 2]],
+    };
   const inferredDynamicPositionedStoreRestoration = preparePositionedStoreRestore(
     positionedMember,
     { id: "fresh-dynamic-store" },

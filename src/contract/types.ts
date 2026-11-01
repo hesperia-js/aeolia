@@ -913,9 +913,7 @@ export type PositionedStorePolicyValues<
   Event,
   Policies extends readonly import("./projection.ts").ProjectionPolicy<Event, any>[],
 > = {
-  readonly [
-    Index in keyof Policies
-  ]: PositionedStorePolicyValue<Event, Policies[Index]>;
+  readonly [Index in keyof Policies]: PositionedStorePolicyValue<Event, Policies[Index]>;
 };
 
 /** @internal Tuple value relation used by non-pulling Store capture. */
