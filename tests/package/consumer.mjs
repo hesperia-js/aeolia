@@ -604,7 +604,7 @@ export async function verifyConsumer(development = false) {
   const observed = [];
   const reactiveObserved = [];
   const stop = subscribe(store, (value) => observed.push(value));
-  const stopReactive = subscribeSignal(store, (value) => reactiveObserved.push(value));
+  const stopReactive = subscribeSignal(store.value, (value) => reactiveObserved.push(value));
   let retirementCall;
   let retirementCallResolved = false;
   try {
@@ -625,9 +625,17 @@ export async function verifyConsumer(development = false) {
     await resetting;
     check(store.value.get() === "new identity", "Reset did not refresh the preserved handle");
     check(
-      JSON.stringify(observed) === '["initial","updated","new identity"]' &&
-        JSON.stringify(reactiveObserved) === '["initial","updated","new identity"]',
-      "The consumer entry points received different query updates",
+      JSON.stringify(observed) === '["initial","updated","new identity"]',
+      "The root Store consumer did not receive the expected query updates",
+    );
+    check(
+      reactiveObserved.length === 5 &&
+        reactiveObserved[0] === undefined &&
+        reactiveObserved[1] === "initial" &&
+        reactiveObserved[2] === "updated" &&
+        reactiveObserved[3] === undefined &&
+        reactiveObserved[4] === "new identity",
+      "The reactive Readable consumer did not receive the expected raw query updates",
     );
 
     const refreshing = store.revalidate();
