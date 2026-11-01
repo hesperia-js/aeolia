@@ -668,10 +668,19 @@ export async function verifyConsumer(development = false) {
     );
     const [disposalFault] = unobservedFaults;
     check(
-      disposalFault instanceof Fault &&
-        disposalFault.kind === "disposed" &&
-        disposalFault.involved.length === 1 &&
-        disposalFault.involved[0] === "items/one",
+      disposalFault instanceof AggregateError &&
+        Array.isArray(disposalFault.errors) &&
+        disposalFault.errors.length === 2 &&
+        Object.prototype.hasOwnProperty.call(disposalFault.errors, 0) &&
+        Object.prototype.hasOwnProperty.call(disposalFault.errors, 1) &&
+        disposalFault.errors[0] instanceof Fault &&
+        disposalFault.errors[0].kind === "disposed" &&
+        disposalFault.errors[0].involved.length === 1 &&
+        disposalFault.errors[0].involved[0] === "items/one" &&
+        disposalFault.errors[1] instanceof Fault &&
+        disposalFault.errors[1].kind === "disposed" &&
+        disposalFault.errors[1].involved.length === 1 &&
+        disposalFault.errors[1].involved[0] === "items/one",
       "Disposal reported an unexpected fault",
     );
     check(
