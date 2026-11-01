@@ -1045,6 +1045,70 @@ describe("stream projections", () => {
     }
   });
 
+  it("fails default-overflow positioned accumulation without advancing its cursor", async () => {
+    const provider = new PositionedProvider();
+    const stream = positionedDefinition(provider);
+    const graph = positionedGraph(stream, "positioned-accumulation-overflow");
+    const input = Object.freeze({ room: "one" });
+    const projection = projectPositioned(graph.api.events, input, {
+      kind: "accumulate" as const,
+      max: 1,
+    });
+    const firstLanding = Promise.withResolvers<void>();
+    const overflowFailure = Promise.withResolvers<void>();
+    let stopValue: () => void = () => undefined;
+    let stopStatus: () => void = () => undefined;
+    try {
+      stopValue = subscribe(projection.value, (value) => {
+        if (value.length !== 1 || value[0] !== 2) return;
+        stopValue();
+        stopValue = () => undefined;
+        firstLanding.resolve();
+      });
+      stopStatus = subscribe(projection.status, (status) => {
+        if (status !== "failed") return;
+        stopStatus();
+        stopStatus = () => undefined;
+        overflowFailure.resolve();
+      });
+      provider.emitLive(input, { position: 5, value: 2 });
+      await firstLanding.promise;
+      const beforeOverflow = capturePositionedProjection(projection);
+      expect(beforeOverflow).toMatchObject({
+        value: [2],
+        hasPosition: true,
+        position: 5,
+        revision: 1,
+        resumable: true,
+      });
+      expect(isPositionedCheckpointCurrent(beforeOverflow)).toBe(true);
+      provider.emitLive(input, { position: 6, value: 3 });
+      await overflowFailure.promise;
+      expect(projection.status.get()).toBe("failed");
+      expect(projection.error.get()).toBeInstanceOf(Error);
+      expect((projection.error.get() as Error).message).toBe(
+        "Aeolia projection accumulation exceeded max",
+      );
+      expect(projection.value.get()).toEqual([2]);
+      const afterOverflow = capturePositionedProjection(projection);
+      expect(afterOverflow).toMatchObject({
+        value: [2],
+        status: "failed",
+        hasPosition: true,
+        position: 5,
+        revision: 1,
+        resumable: false,
+      });
+      expect(isPositionedCheckpointCurrent(beforeOverflow)).toBe(false);
+      expect(provider.opens).toHaveLength(1);
+    } finally {
+      stopValue();
+      stopStatus();
+      projection.close();
+      await graph.retire();
+    }
+  });
+
   it("keeps positioned folds landed across observer failure and equal-value delivery", async () => {
     const provider = new PositionedProvider();
     const stream = positionedDefinition(provider);

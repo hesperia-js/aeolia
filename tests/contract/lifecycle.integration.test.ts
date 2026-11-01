@@ -11,6 +11,8 @@ import {
   createTransferScope,
   prepareTransferOperation,
   prepareTransferOperationRetirement,
+  preparePassiveTransferClaim,
+  prepareTransferScopeSuccessors,
   defineContract,
   project,
   subscribe,
@@ -1632,4 +1634,417 @@ it("keeps overlapping mutation coverage until both original carriers retire", as
   } finally {
     graph.dispose();
   }
+});
+
+it("retains predecessor and successor address coverage for the same original operation until explicit retirement", async () => {
+  type QueryInput = { readonly key: string };
+  type MutationInput = { readonly request: string };
+  type CommitPort = {
+    readonly publish: () => void;
+    readonly notifications: { readonly deliver: () => void };
+  };
+  type PublicationPort = {
+    readonly retired: Promise<void>;
+    readonly seal: () => CommitPort | undefined;
+    readonly discard: () => void;
+  };
+  type HeldPublication = {
+    readonly publication: PublicationPort;
+    phase: "pending" | "sealed" | "published" | "discarded";
+    commit: CommitPort | undefined;
+    sealAttempted: boolean;
+    deliveryAttempted: boolean;
+    joined: boolean;
+  };
+  type PassiveClaim = ReturnType<typeof preparePassiveTransferClaim>;
+  type HeldClaim = {
+    readonly claim: PassiveClaim;
+    discarded: boolean;
+    joined: boolean;
+  };
+  type RefusalCheck =
+    | { readonly failed: false }
+    | { readonly failed: true; readonly error: unknown };
+
+  const backend = testBackend();
+  const queryName = "transfer-successor.query";
+  const mutationName = "transfer-successor.mutate";
+  const respondQuery = backend.respond<QueryInput, number>(queryName);
+  let queryFetchCalls = 0;
+  const fetchQuery = (
+    input: QueryInput,
+    options: Parameters<typeof respondQuery>[1],
+  ): Promise<number> => {
+    queryFetchCalls += 1;
+    return respondQuery(input, options);
+  };
+  const performMutation = backend.perform<MutationInput, void>(mutationName);
+  let mutationDispatches = 0;
+  const runMutation = (
+    input: MutationInput,
+    options: Parameters<typeof performMutation>[1],
+  ): Promise<void> => {
+    mutationDispatches += 1;
+    return performMutation(input, options);
+  };
+  const query = createQuery({
+    name: queryName,
+    key: (input: QueryInput) => input.key,
+    fetch: fetchQuery,
+  });
+  const mutation = createMutation({
+    name: mutationName,
+    run: runMutation,
+    affects: [],
+  });
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "transfer-successor",
+      operations: { query, mutation },
+    }),
+  });
+
+  const publications: HeldPublication[] = [];
+  const claims: HeldClaim[] = [];
+  const cleanupFailures: unknown[] = [];
+  let contextAForCleanup: { readonly retire: () => Promise<void> } | undefined;
+  let contextBForCleanup: { readonly retire: () => Promise<void> } | undefined;
+  let queryCallRecord: (typeof backend.calls)[number] | undefined;
+  let mutationCallRecord: (typeof backend.calls)[number] | undefined;
+  let predecessorReady: Promise<unknown> | undefined;
+  let predecessorReadyJoined = false;
+  let mutationResult: Promise<unknown> | undefined;
+  let mutationResultJoined = false;
+  let operationHandle: ReturnType<typeof prepareTransferOperation>["operation"] | undefined;
+  let operationPublication: HeldPublication | undefined;
+  let retirementPublication: HeldPublication | undefined;
+  let bodyFailed = false;
+  let bodyFailure: unknown;
+
+  const retainClaim = (claim: PassiveClaim): HeldClaim => {
+    const held = { claim, discarded: false, joined: false };
+    claims.push(held);
+    return held;
+  };
+  const discardClaim = (held: HeldClaim): void => {
+    if (held.discarded) return;
+    held.discarded = true;
+    held.claim.discard();
+  };
+  const joinClaim = async (held: HeldClaim): Promise<void> => {
+    try {
+      await held.claim.retired;
+    } finally {
+      held.joined = true;
+    }
+  };
+  const discardAndJoinClaim = async (held: HeldClaim): Promise<void> => {
+    discardClaim(held);
+    await joinClaim(held);
+  };
+  const retainPublication = (publication: PublicationPort): HeldPublication => {
+    const held: HeldPublication = {
+      publication,
+      phase: "pending",
+      commit: undefined,
+      sealAttempted: false,
+      deliveryAttempted: false,
+      joined: false,
+    };
+    publications.push(held);
+    return held;
+  };
+  const sealPublishAndDeliver = (held: HeldPublication): void => {
+    held.sealAttempted = true;
+    const commit = held.publication.seal();
+    if (commit === undefined) throw new Error("The transfer publication did not seal");
+    held.commit = commit;
+    held.phase = "sealed";
+    commit.publish();
+    held.phase = "published";
+    held.deliveryAttempted = true;
+    commit.notifications.deliver();
+  };
+  const deliverPublished = (held: HeldPublication): void => {
+    if (held.phase !== "published" || held.commit === undefined || held.deliveryAttempted) return;
+    held.deliveryAttempted = true;
+    held.commit.notifications.deliver();
+  };
+  const discardPending = (held: HeldPublication): void => {
+    if (held.phase !== "pending") return;
+    held.phase = "discarded";
+    held.publication.discard();
+  };
+  const joinPublication = async (held: HeldPublication): Promise<void> => {
+    try {
+      await held.publication.retired;
+    } finally {
+      held.joined = true;
+    }
+  };
+  const joinPredecessorReady = async (): Promise<void> => {
+    if (predecessorReady === undefined || predecessorReadyJoined) return;
+    try {
+      await predecessorReady;
+    } finally {
+      predecessorReadyJoined = true;
+    }
+  };
+  const joinMutationResult = async (): Promise<void> => {
+    if (mutationResult === undefined || mutationResultJoined) return;
+    try {
+      await mutationResult;
+    } finally {
+      mutationResultJoined = true;
+    }
+  };
+  const cleanupAttempt = async (action: () => void | Promise<void>): Promise<void> => {
+    try {
+      await action();
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+  };
+
+  try {
+    try {
+      const profile = {};
+      const input = Object.freeze({ key: "transfer-successor/one" });
+      const contextA = createBindingContext(graph);
+      const contextB = createBindingContext(graph);
+      contextAForCleanup = contextA;
+      contextBForCleanup = contextB;
+      const bindingA = bindOperation(graph, query, {
+        context: contextA,
+        profile,
+        fetch: fetchQuery,
+      });
+      const bindingB = bindOperation(graph, query, {
+        context: contextB,
+        profile,
+        fetch: fetchQuery,
+      });
+
+      const predecessorStore = bindingA.member(input);
+      const queryCall = backend.pending(queryName)[0];
+      if (queryCall === undefined)
+        throw new Error("The predecessor query did not reach the controlled backend");
+      queryCallRecord = queryCall;
+      predecessorReady = predecessorStore.ready;
+      if (!queryCall.settled) backend.resolve(queryCall, 1);
+      await joinPredecessorReady();
+      expect(queryCall.settled).toBe(true);
+      expect(queryFetchCalls).toBe(1);
+      expect(backend.calls).toHaveLength(1);
+
+      const controlA = retainClaim(preparePassiveTransferClaim(graph, bindingA, input));
+      const controlB = retainClaim(preparePassiveTransferClaim(graph, bindingB, input));
+      expect(controlA.claim.store.key).toBe(controlB.claim.store.key);
+      expect(controlA.claim.store.identity).not.toBe(controlB.claim.store.identity);
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(0);
+      await discardAndJoinClaim(controlA);
+      await discardAndJoinClaim(controlB);
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(0);
+      expect(backend.calls).toHaveLength(1);
+
+      const predecessorScope = createTransferScope(graph, bindingA, predecessorStore);
+      const carrier = Object.freeze({ request: "external-query-refresh" });
+      const operationPublicationValue = prepareTransferOperation(
+        [predecessorScope],
+        [{ role: "raw", source: graph.api.mutation, input: carrier }],
+      );
+      const operation = operationPublicationValue.operation;
+      operationHandle = operation;
+      const operationPublicationHeld = retainPublication(operationPublicationValue);
+      operationPublication = operationPublicationHeld;
+      sealPublishAndDeliver(operationPublicationHeld);
+      await joinPublication(operationPublicationHeld);
+
+      mutationResult = graph.api.mutation(carrier);
+      const mutationCall = backend.pending(mutationName)[0];
+      if (mutationCall === undefined)
+        throw new Error("The original mutation did not reach the controlled backend");
+      const originalMutationCall = mutationCall;
+      mutationCallRecord = originalMutationCall;
+      expect(originalMutationCall.input).toBe(carrier);
+      expect(originalMutationCall.settled).toBe(false);
+      expect(mutationDispatches).toBe(1);
+      expect(backend.calls).toHaveLength(2);
+      let unexpectedRetirement: ReturnType<typeof prepareTransferOperationRetirement> | undefined;
+      try {
+        expect(() => {
+          unexpectedRetirement = prepareTransferOperationRetirement(operation);
+        }).toThrow(TypeError);
+      } finally {
+        if (unexpectedRetirement !== undefined) retainPublication(unexpectedRetirement);
+      }
+
+      const successorPublicationValue = prepareTransferScopeSuccessors([
+        {
+          operation,
+          predecessor: predecessorScope,
+          graph,
+          source: bindingB,
+          input,
+        },
+      ]);
+      const successorPublication = retainPublication(successorPublicationValue);
+      sealPublishAndDeliver(successorPublication);
+      await joinPublication(successorPublication);
+      expect(successorPublicationValue.scopes).toHaveLength(1);
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(1);
+      expect(backend.calls).toHaveLength(2);
+
+      if (!originalMutationCall.settled) backend.resolve(originalMutationCall, undefined);
+      await joinMutationResult();
+      expect(originalMutationCall.settled).toBe(true);
+      const retirementValue = prepareTransferOperationRetirement(operation);
+      const retirementHeld = retainPublication(retirementValue);
+      retirementPublication = retirementHeld;
+
+      const expectClaimRefused = (source: typeof bindingA): RefusalCheck => {
+        let unexpectedClaim: PassiveClaim | undefined;
+        try {
+          expect(() => {
+            unexpectedClaim = preparePassiveTransferClaim(graph, source, input);
+          }).toThrow(TypeError);
+          return { failed: false };
+        } catch (error) {
+          return { failed: true, error };
+        } finally {
+          if (unexpectedClaim !== undefined) retainClaim(unexpectedClaim);
+        }
+      };
+      const predecessorRefusal = expectClaimRefused(bindingA);
+      const successorRefusal = expectClaimRefused(bindingB);
+      const refusalFailures: unknown[] = [];
+      if (predecessorRefusal.failed) refusalFailures.push(predecessorRefusal.error);
+      if (successorRefusal.failed) refusalFailures.push(successorRefusal.error);
+      if (refusalFailures.length === 1) throw refusalFailures[0];
+      if (refusalFailures.length > 1)
+        throw new AggregateError(
+          refusalFailures,
+          "Both covered addresses must refuse passive claims",
+        );
+
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(1);
+      expect(backend.calls).toHaveLength(2);
+
+      sealPublishAndDeliver(retirementHeld);
+      await joinPublication(retirementHeld);
+
+      const releasedA = retainClaim(preparePassiveTransferClaim(graph, bindingA, input));
+      const releasedB = retainClaim(preparePassiveTransferClaim(graph, bindingB, input));
+      expect(releasedA.claim.store.key).toBe(releasedB.claim.store.key);
+      expect(releasedA.claim.store.identity).not.toBe(releasedB.claim.store.identity);
+      await discardAndJoinClaim(releasedA);
+      await discardAndJoinClaim(releasedB);
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(1);
+      expect(backend.calls).toHaveLength(2);
+    } catch (error) {
+      bodyFailed = true;
+      bodyFailure = error;
+    }
+  } finally {
+    if (queryCallRecord === undefined)
+      queryCallRecord = backend.calls.find((call) => call.name === queryName);
+    if (mutationCallRecord === undefined)
+      mutationCallRecord = backend.calls.find((call) => call.name === mutationName);
+    const queryCallRecords = new Set(backend.calls.filter((call) => call.name === queryName));
+    const mutationCallRecords = new Set(backend.calls.filter((call) => call.name === mutationName));
+    if (queryCallRecord !== undefined) queryCallRecords.add(queryCallRecord);
+    if (mutationCallRecord !== undefined) mutationCallRecords.add(mutationCallRecord);
+    for (const call of queryCallRecords)
+      if (!call.settled) await cleanupAttempt(() => backend.resolve(call, 1));
+    for (const call of mutationCallRecords)
+      if (!call.settled) await cleanupAttempt(() => backend.resolve(call, undefined));
+    if (predecessorReady !== undefined && !predecessorReadyJoined) {
+      if (queryCallRecord !== undefined) await cleanupAttempt(joinPredecessorReady);
+      else
+        cleanupFailures.push(
+          new Error("The predecessor ready promise has no controlled CallRecord to settle"),
+        );
+    }
+    if (mutationResult !== undefined && !mutationResultJoined) {
+      if (mutationCallRecord !== undefined) await cleanupAttempt(joinMutationResult);
+      else
+        cleanupFailures.push(
+          new Error("The original mutation result has no controlled CallRecord to settle"),
+        );
+    }
+
+    for (const claim of claims) {
+      if (!claim.discarded) await cleanupAttempt(() => discardClaim(claim));
+    }
+    for (const claim of claims) {
+      if (!claim.joined) await cleanupAttempt(() => joinClaim(claim));
+    }
+
+    if (
+      operationPublication?.phase === "published" &&
+      operationHandle !== undefined &&
+      retirementPublication === undefined
+    ) {
+      await cleanupAttempt(() => {
+        retirementPublication = retainPublication(
+          prepareTransferOperationRetirement(operationHandle!),
+        );
+      });
+    }
+    if (
+      retirementPublication !== undefined &&
+      retirementPublication.phase === "pending" &&
+      !retirementPublication.sealAttempted &&
+      operationPublication?.phase === "published"
+    )
+      await cleanupAttempt(() => sealPublishAndDeliver(retirementPublication!));
+
+    for (const publication of publications) {
+      if (publication.phase === "pending") await cleanupAttempt(() => discardPending(publication));
+    }
+    for (const publication of publications) {
+      if (publication.phase === "published" && !publication.deliveryAttempted)
+        await cleanupAttempt(() => deliverPublished(publication));
+      if (publication.phase === "sealed")
+        cleanupFailures.push(
+          new Error("A sealed transfer publication could not be publicly completed"),
+        );
+    }
+    for (const publication of publications) {
+      if (
+        !publication.joined &&
+        (publication.phase === "published" || publication.phase === "discarded")
+      )
+        await cleanupAttempt(() => joinPublication(publication));
+    }
+
+    const ownerRetirements: Promise<void>[] = [];
+    const startRetirement = (owner: { readonly retire: () => Promise<void> } | undefined): void => {
+      if (owner === undefined) return;
+      try {
+        ownerRetirements.push(owner.retire());
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    };
+    startRetirement(contextAForCleanup);
+    startRetirement(contextBForCleanup);
+    startRetirement(graph);
+    for (const retirement of ownerRetirements) await cleanupAttempt(async () => retirement);
+  }
+  if (bodyFailed) {
+    if (cleanupFailures.length === 0) throw bodyFailure;
+    throw new AggregateError(
+      [bodyFailure, ...cleanupFailures],
+      "Successor coverage test and cleanup failed",
+    );
+  }
+  if (cleanupFailures.length === 1) throw cleanupFailures[0];
+  if (cleanupFailures.length > 1)
+    throw new AggregateError(cleanupFailures, "Successor coverage cleanup failed");
 });
