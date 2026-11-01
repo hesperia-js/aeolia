@@ -132,6 +132,7 @@ async function verifyPositionedRequiredTransferConsumer() {
   let claim;
   let adoption;
   let published = false;
+  let capturePublished = false;
   let reader;
   try {
     const sourceA = graphA.api.events(inputA);
@@ -247,6 +248,12 @@ async function verifyPositionedRequiredTransferConsumer() {
       "The cached fold did not retain its native projection tuple mapping",
     );
 
+    const captureCommit = capture.seal();
+    if (captureCommit === undefined) throw new Error("The genuine initial capture did not seal");
+    captureCommit.publish();
+    capturePublished = true;
+    captureCommit.notifications.deliver();
+
     reader = providerB.reserve(inputB, 5, undefined, decodedSeed);
     claim = preparePassiveTransferClaim(graphB, graphB.api.events, inputB, undefined, {
       policies: [policy],
@@ -345,6 +352,7 @@ async function verifyPositionedRequiredTransferConsumer() {
       adoption?.discard();
       claim?.discard();
     } else claim?.restoration.discard();
+    if (!capturePublished) capture?.discard();
     projectionA?.close();
     graphA.dispose();
     graphB.dispose();
