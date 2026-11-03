@@ -649,7 +649,10 @@ test("capture notices track equal events and prediction retirement without sourc
     const predictionFailure = new Error("prediction rejected without a source event");
     const predictionRetired = waitForCaptureChange(captureChanges, predictionNotice.revision);
     backend.reject(pendingAction, predictionFailure);
-    await Promise.all([expect(mutationResult).rejects.toBe(predictionFailure), predictionRetired]);
+    const [, predictionRetiredNotice] = await Promise.all([
+      expect(mutationResult).rejects.toBe(predictionFailure),
+      predictionRetired,
+    ]);
 
     expect(source.value.get()).toBe(5);
     expect(projection.value.get()).toBe(10);
@@ -663,7 +666,7 @@ test("capture notices track equal events and prediction retirement without sourc
     expect(isPositionedStoreCheckpointCurrent(retiredWithoutEvent)).toBe(true);
     expect(isPositionedStoreCheckpointCurrent(predicted)).toBe(false);
 
-    const secondPredictionChange = waitForCaptureChange(captureChanges, predictionRetired.revision);
+    const secondPredictionChange = waitForCaptureChange(captureChanges, predictionRetiredNotice.revision);
     const secondMutation = graph.api.mutation(input);
     const secondPredictionNotice = await secondPredictionChange;
     expect(source.value.get()).toBe(5);

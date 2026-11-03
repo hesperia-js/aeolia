@@ -857,8 +857,11 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       secondCaptureNotices.push(notice),
     );
     expect(firstCaptureNotices).toHaveLength(1);
-    expect(firstCaptureNotices[0]?.kind).toBe("changed");
-    expect(secondCaptureNotices).toStrictEqual([firstCaptureNotices[0]]);
+    const firstCaptureNotice = firstCaptureNotices[0];
+    if (firstCaptureNotice === undefined)
+      throw new Error("The first capture notice is missing");
+    expect(firstCaptureNotice.kind).toBe("changed");
+    expect(secondCaptureNotices).toStrictEqual([firstCaptureNotice]);
     stopFirstCapture();
     expect(secondCaptureNotices).toHaveLength(1);
     stopSecondCapture();
@@ -1088,20 +1091,21 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     let expiringAdoptionPublished = false;
     let stopExpiration: (() => void) | undefined;
     try {
-      expiringClaim = preparePassiveTransferClaim(
+      const expiringTransferClaim = preparePassiveTransferClaim(
         expiringGraph,
         expiringGraph.api.events,
         undefined,
         undefined,
         { policies: [policy] as const, seed, reader: expiringReader },
       );
+      expiringClaim = expiringTransferClaim;
       const expiringTargetValue = computed(() =>
-        expiringClaim!.restoration.projections[0]!.value.get(),
+        expiringTransferClaim.restoration.projections[0]!.value.get(),
       );
       expiringAdoption = prepareRequiredTransferAdoption(capture!.image, {
         graphs: [expiringGraph],
-        sources: [{ slot: "s0", claim: expiringClaim }],
-        positioned: [{ slot: "p0", claim: expiringClaim, seed }],
+        sources: [{ slot: "s0", claim: expiringTransferClaim }],
+        positioned: [{ slot: "p0", claim: expiringTransferClaim, seed }],
         reactive: [
           {
             slot: capture!.image.roots[0]!,
@@ -1118,11 +1122,11 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       expiringCommit.publish();
       expiringAdoptionPublished = true;
       expiringCommit.notifications.deliver();
-      await Promise.all([expiringAdoption.retired, expiringClaim.retired]);
+      await Promise.all([expiringAdoption.retired, expiringTransferClaim.retired]);
 
-      expiringClaim.restoration.activate();
-      const expiringCheckpoint = capturePositionedStore(expiringClaim.store, [
-        expiringClaim.restoration.projections[0]!,
+      expiringTransferClaim.restoration.activate();
+      const expiringCheckpoint = capturePositionedStore(expiringTransferClaim.store, [
+        expiringTransferClaim.restoration.projections[0]!,
       ] as const);
       expect(expiringCheckpoint.present).toBe(false);
       expect(expiringCheckpoint.resumable).toBe(true);
