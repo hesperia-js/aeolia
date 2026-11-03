@@ -717,7 +717,10 @@ test("capture notices track equal events and prediction retirement without sourc
     stopCaptureChanges?.();
     stopCaptureChanges = undefined;
     const terminalState = observePositionedStoreCaptureState(reconciled);
-    const invalidated = waitForCaptureNotice(terminalState, (notice) => notice.kind === "invalidated");
+    const invalidated = waitForCaptureNotice(
+      terminalState,
+      (notice) => notice.kind === "invalidated",
+    );
     projection.close();
     expect(await invalidated).toStrictEqual({ kind: "invalidated" });
     expect(source.status.get()).toBe("live");
@@ -728,7 +731,6 @@ test("capture notices track equal events and prediction retirement without sourc
     graph.dispose();
   }
 });
-
 
 test("an empty store rejects a non-callable observer at registration", () => {
   const { graph } = fixture();

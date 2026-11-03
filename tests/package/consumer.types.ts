@@ -126,9 +126,7 @@ import {
   type StreamSnapshotAddressV2,
   withoutWrites,
 } from "aeolia";
-import {
-  observePositionedStoreCaptureState as observeContractPositionedStoreCaptureState,
-} from "aeolia/contract";
+import { observePositionedStoreCaptureState as observeContractPositionedStoreCaptureState } from "aeolia/contract";
 import type {
   BindingContext as ContractBindingContext,
   Graph as ContractGraph,
@@ -706,23 +704,24 @@ function typecheckOnly(): void {
     observePositionedStoreCaptureState(positionedStoreCheckpoint);
   const contractPositionedStoreCaptureNotices: Readable<ContractPositionedStoreCaptureNotice> =
     observeContractPositionedStoreCaptureState(positionedStoreCheckpoint);
-  const positionedStoreCaptureNoticeObserver: (notice: PositionedStoreCaptureNotice) => void =
-    (notice) => {
-      if (notice.kind === "changed") {
-        const revision: object = notice.revision;
-        // @ts-expect-error A native revision token is opaque and cannot be used as an event position.
-        const eventPosition: number = notice.revision;
-        void [revision, eventPosition];
-      } else if (notice.kind === "failed") {
-        const cause: unknown = notice.cause;
-        // @ts-expect-error An unknown failure cause must be narrowed before its fields are read.
-        const failureMessage: string = notice.cause.message;
-        void [cause, failureMessage];
-      } else {
-        const terminalKind: "closed" | "invalidated" = notice.kind;
-        void terminalKind;
-      }
-    };
+  const positionedStoreCaptureNoticeObserver: (notice: PositionedStoreCaptureNotice) => void = (
+    notice,
+  ) => {
+    if (notice.kind === "changed") {
+      const revision: object = notice.revision;
+      // @ts-expect-error A native revision token is opaque and cannot be used as an event position.
+      const eventPosition: number = notice.revision;
+      void [revision, eventPosition];
+    } else if (notice.kind === "failed") {
+      const cause: unknown = notice.cause;
+      // @ts-expect-error An unknown failure cause must be narrowed before its fields are read.
+      const failureMessage: string = notice.cause.message;
+      void [cause, failureMessage];
+    } else {
+      const terminalKind: "closed" | "invalidated" = notice.kind;
+      void terminalKind;
+    }
+  };
   const unsubscribePositionedStoreCapture: Unsubscribe = subscribe(
     positionedStoreCaptureNotices,
     positionedStoreCaptureNoticeObserver,

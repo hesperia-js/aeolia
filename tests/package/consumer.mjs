@@ -102,9 +102,7 @@ function waitForPositionedCaptureNotice(readable, matches) {
     if (notice.kind !== "changed") {
       settled = true;
       stop();
-      const error = new Error(
-        "Unexpected positioned capture-state terminal: " + notice.kind,
-      );
+      const error = new Error("Unexpected positioned capture-state terminal: " + notice.kind);
       if (notice.kind === "failed") error.cause = notice.cause;
       rejectNotice(error);
     }
@@ -387,8 +385,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     );
     changeWait = waitForPositionedCaptureNotice(
       captureState,
-      (notice) =>
-        notice.kind === "changed" && notice.revision !== initialCaptureNotice.revision,
+      (notice) => notice.kind === "changed" && notice.revision !== initialCaptureNotice.revision,
     );
 
     const folded = waitForPositionedValue(
@@ -404,9 +401,7 @@ async function verifyPositionedRequiredTransferConsumer() {
         suffixNotice.revision !== initialCaptureNotice.revision &&
         captureNotices.some(
           (notice, index) =>
-            index > 0 &&
-            notice.kind === "changed" &&
-            notice.revision === suffixNotice.revision,
+            index > 0 && notice.kind === "changed" && notice.revision === suffixNotice.revision,
         ),
       "The real suffix did not publish a fresh opaque capture revision",
     );

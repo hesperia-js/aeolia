@@ -616,7 +616,10 @@ it("captures a nonresumable empty cut while the actual first next is pending", a
     },
   });
   const graph = createGraph({
-    contract: defineContract({ namespace: "pending-first-next-capture", operations: { events: stream } }),
+    contract: defineContract({
+      namespace: "pending-first-next-capture",
+      operations: { events: stream },
+    }),
   });
   const source = graph.api.events();
   const projection = project(source, {
@@ -847,8 +850,12 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     const initialCaptureState = observePositionedStoreCaptureState(checkpoint);
     const firstCaptureNotices: PositionedStoreCaptureNotice[] = [];
     const secondCaptureNotices: PositionedStoreCaptureNotice[] = [];
-    const stopFirstCapture = subscribe(initialCaptureState, (notice) => firstCaptureNotices.push(notice));
-    const stopSecondCapture = subscribe(initialCaptureState, (notice) => secondCaptureNotices.push(notice));
+    const stopFirstCapture = subscribe(initialCaptureState, (notice) =>
+      firstCaptureNotices.push(notice),
+    );
+    const stopSecondCapture = subscribe(initialCaptureState, (notice) =>
+      secondCaptureNotices.push(notice),
+    );
     expect(firstCaptureNotices).toHaveLength(1);
     expect(firstCaptureNotices[0]?.kind).toBe("changed");
     expect(secondCaptureNotices).toStrictEqual([firstCaptureNotices[0]]);
@@ -988,10 +995,9 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     expect(providerB.trace.indexOf("boundary")).toBeLessThan(providerB.trace.indexOf("pull"));
     expect(providerB.acknowledgements).toHaveLength(0);
 
-    const deadlineCheckpoint = capturePositionedStore(
-      receiverClaim.store,
-      [receiverClaim.restoration.projections[0]!] as const,
-    );
+    const deadlineCheckpoint = capturePositionedStore(receiverClaim.store, [
+      receiverClaim.restoration.projections[0]!,
+    ] as const);
     const cancelledDeadline = observePositionedStoreCaptureState(deadlineCheckpoint);
     const timersBefore = jest.getTimerCount();
     const stopDeadline = subscribe(cancelledDeadline, () => undefined);
@@ -1015,10 +1021,9 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     expect(providerB.acknowledgements[0]!.reader).toBe(reader);
     expect(Object.is(providerB.acknowledgements[0]!.receipt, receipt)).toBe(true);
 
-    const targetCheckpoint = capturePositionedStore(
-      receiverClaim.store,
-      [receiverClaim.restoration.projections[0]!] as const,
-    );
+    const targetCheckpoint = capturePositionedStore(receiverClaim.store, [
+      receiverClaim.restoration.projections[0]!,
+    ] as const);
     const targetCaptureState = observePositionedStoreCaptureState(targetCheckpoint);
     const firstTargetNotices: PositionedStoreCaptureNotice[] = [];
     let insideSeedWrite = false;
@@ -1090,8 +1095,8 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
         undefined,
         { policies: [policy] as const, seed, reader: expiringReader },
       );
-      const expiringTargetValue = computed(
-        () => expiringClaim!.restoration.projections[0]!.value.get(),
+      const expiringTargetValue = computed(() =>
+        expiringClaim!.restoration.projections[0]!.value.get(),
       );
       expiringAdoption = prepareRequiredTransferAdoption(capture!.image, {
         graphs: [expiringGraph],
@@ -1116,10 +1121,9 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       await Promise.all([expiringAdoption.retired, expiringClaim.retired]);
 
       expiringClaim.restoration.activate();
-      const expiringCheckpoint = capturePositionedStore(
-        expiringClaim.store,
-        [expiringClaim.restoration.projections[0]!] as const,
-      );
+      const expiringCheckpoint = capturePositionedStore(expiringClaim.store, [
+        expiringClaim.restoration.projections[0]!,
+      ] as const);
       expect(expiringCheckpoint.present).toBe(false);
       expect(expiringCheckpoint.resumable).toBe(true);
       const expiringState = observePositionedStoreCaptureState(expiringCheckpoint);

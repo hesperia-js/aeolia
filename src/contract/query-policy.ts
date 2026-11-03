@@ -24,7 +24,10 @@ export function observePositionedTransferChanges(
     }
     listeners.add(notify);
   }
-  return stopPositionedCaptureChanges([...unique].map((target) => new WeakRef(target)), notify);
+  return stopPositionedCaptureChanges(
+    [...unique].map((target) => new WeakRef(target)),
+    notify,
+  );
 }
 function stopPositionedCaptureChanges(
   targets: readonly WeakRef<object>[],

@@ -2024,7 +2024,9 @@ interface PositionedCaptureObservation {
   }[];
 }
 
-function createPositionedCaptureState(refs: PositionedCaptureObservation): Readable<PositionedStoreCaptureNotice> {
+function createPositionedCaptureState(
+  refs: PositionedCaptureObservation,
+): Readable<PositionedStoreCaptureNotice> {
   let active = false;
   let generation = 0;
   let queued = false;
@@ -2038,7 +2040,12 @@ function createPositionedCaptureState(refs: PositionedCaptureObservation): Reada
     const runtime = refs.runtime.deref();
     const session = refs.session.deref();
     const group = refs.group.deref();
-    if (source === undefined || runtime === undefined || session === undefined || group === undefined)
+    if (
+      source === undefined ||
+      runtime === undefined ||
+      session === undefined ||
+      group === undefined
+    )
       return (terminal = { kind: "invalidated" });
     if (group.captureTerminal !== undefined) return (terminal = group.captureTerminal);
     try {
@@ -2049,12 +2056,19 @@ function createPositionedCaptureState(refs: PositionedCaptureObservation): Reada
     const graphState = runtime.graph.__runtime;
     const lifetime = group.preparation?.lifetime;
     if (
-      runtimeByStore.get(source) !== runtime || group.runtime !== runtime ||
-      runtime.stream !== session || session.ended || session.positioned !== group ||
-      group.phase === "closed" || graphState.disposed || runtime.disposed ||
-      runtime.binding?.context.disposed === true || graphState.resetEpoch !== refs.graphEpoch ||
+      runtimeByStore.get(source) !== runtime ||
+      group.runtime !== runtime ||
+      runtime.stream !== session ||
+      session.ended ||
+      session.positioned !== group ||
+      group.phase === "closed" ||
+      graphState.disposed ||
+      runtime.disposed ||
+      runtime.binding?.context.disposed === true ||
+      graphState.resetEpoch !== refs.graphEpoch ||
       (lifetime !== undefined && !lifetime.currentAt(readerLifetimeNow()))
-    ) return (terminal = { kind: "invalidated" });
+    )
+      return (terminal = { kind: "invalidated" });
     for (const item of refs.projections) {
       const handle = item.handle.deref();
       const projection = item.runtime.deref();
@@ -2063,17 +2077,21 @@ function createPositionedCaptureState(refs: PositionedCaptureObservation): Reada
         return (terminal = { kind: "invalidated" });
       const positioned = projection.positioned;
       if (participant.failed)
-        return (terminal = participant.failure === undefined
-          ? { kind: "invalidated" }
-          : { kind: "failed", cause: participant.failure.cause });
+        return (terminal =
+          participant.failure === undefined
+            ? { kind: "invalidated" }
+            : { kind: "failed", cause: participant.failure.cause });
       if (positioned?.tuple.status === "failed")
         return (terminal = { kind: "failed", cause: positioned.tuple.error });
       if (
         positionedProjectionByHandle.get(handle) !== projection ||
-        positioned === undefined || positioned.storeGroup !== group ||
+        positioned === undefined ||
+        positioned.storeGroup !== group ||
         positioned.storeParticipant !== participant ||
-        !group.participants.has(participant) || positioned.tuple.status === "closed"
-      ) return (terminal = { kind: "invalidated" });
+        !group.participants.has(participant) ||
+        positioned.tuple.status === "closed"
+      )
+        return (terminal = { kind: "invalidated" });
     }
     return changed();
   };
@@ -2132,12 +2150,15 @@ function createPositionedCaptureState(refs: PositionedCaptureObservation): Reada
       schedule();
       return;
     }
-    timer = setTimeout(() => {
-      timer = undefined;
-      if (!active || terminal !== undefined) return;
-      if (readerLifetimeNow() < expiresAt) scheduleDeadline();
-      else schedule();
-    }, Math.min(Math.ceil(delay), 2_147_483_647));
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        if (!active || terminal !== undefined) return;
+        if (readerLifetimeNow() < expiresAt) scheduleDeadline();
+        else schedule();
+      },
+      Math.min(Math.ceil(delay), 2_147_483_647),
+    );
   };
   const cell = signal<PositionedStoreCaptureNotice>(changed(), {
     [Signal.subtle.watched]() {
