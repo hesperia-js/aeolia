@@ -17,6 +17,7 @@ import {
   capturePositionedProjection,
   capturePositionedStore,
   isPositionedStoreCheckpointCurrent,
+  observePositionedStoreCaptureState as rootObservePositionedStoreCaptureState,
   preparePositionedStoreRestore,
   preparePositionedSeedRestore,
   positionedFoldReceipt,
@@ -46,6 +47,7 @@ import {
   bindStream,
   inspectBoundAddress,
   observeQueryProgress,
+  observePositionedStoreCaptureState,
   storeKey,
   predictionFor,
   profileEffect,
@@ -78,6 +80,39 @@ async function expectPending(promise, message) {
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+function waitForPositionedCaptureNotice(readable, matches) {
+  let stop = () => {};
+  let settled = false;
+  let resolveNotice;
+  let rejectNotice;
+  const promise = new Promise((resolve, reject) => {
+    resolveNotice = resolve;
+    rejectNotice = reject;
+  });
+  const unsubscribe = subscribe(readable, (notice) => {
+    if (settled) return;
+    if (matches(notice)) {
+      settled = true;
+      stop();
+      resolveNotice(notice);
+      return;
+    }
+    if (notice.kind !== "changed") {
+      settled = true;
+      stop();
+      const error = new Error(
+        "Unexpected positioned capture-state terminal: " + notice.kind,
+      );
+      if (notice.kind === "failed") error.cause = notice.cause;
+      rejectNotice(error);
+    }
+  });
+  stop = unsubscribe;
+  if (settled) stop();
+  promise.catch(() => {});
+  return { promise, stop: () => stop() };
 }
 
 async function verifyPositionedRequiredTransferConsumer() {
@@ -134,6 +169,11 @@ async function verifyPositionedRequiredTransferConsumer() {
   let published = false;
   let capturePublished = false;
   let reader;
+  let stopCaptureState = () => {};
+  let stopTerminalCaptureState = () => {};
+  let stopStickyTerminal = () => {};
+  let changeWait;
+  let terminalWait;
   try {
     const sourceA = graphA.api.events(inputA);
     projectionA = project(sourceA, sourcePolicy);
@@ -323,12 +363,53 @@ async function verifyPositionedRequiredTransferConsumer() {
       "Opening the initial boundary acknowledged a fold",
     );
 
+    const initialCheckpoint = capturePositionedStore(claim.store, [
+      claim.restoration.projections[0],
+    ]);
+    check(
+      !initialCheckpoint.present &&
+        !initialCheckpoint.hasPosition &&
+        initialCheckpoint.values[0] === 10 &&
+        initialCheckpoint.resumable &&
+        isPositionedStoreCheckpointCurrent(initialCheckpoint),
+      "The restored reader did not produce an authentic current initial cut",
+    );
+    const captureState = rootObservePositionedStoreCaptureState(initialCheckpoint);
+    const captureNotices = [];
+    stopCaptureState = subscribe(captureState, (notice) => captureNotices.push(notice));
+    const initialCaptureNotice = captureNotices[0];
+    check(
+      captureNotices.length === 1 &&
+        initialCaptureNotice?.kind === "changed" &&
+        initialCaptureNotice.revision !== null &&
+        typeof initialCaptureNotice.revision === "object",
+      "The actual capture-state Readable did not synchronously seed its authentic cut",
+    );
+    changeWait = waitForPositionedCaptureNotice(
+      captureState,
+      (notice) =>
+        notice.kind === "changed" && notice.revision !== initialCaptureNotice.revision,
+    );
+
     const folded = waitForPositionedValue(
       claim.restoration.projections[0],
       (value) => value === 12,
     );
     providerB.emitReader(reader, { position: 6, value: 2 });
-    await folded;
+    const [suffixNotice] = await Promise.all([changeWait.promise, folded]);
+    check(
+      suffixNotice.kind === "changed" &&
+        suffixNotice.revision !== null &&
+        typeof suffixNotice.revision === "object" &&
+        suffixNotice.revision !== initialCaptureNotice.revision &&
+        captureNotices.some(
+          (notice, index) =>
+            index > 0 &&
+            notice.kind === "changed" &&
+            notice.revision === suffixNotice.revision,
+        ),
+      "The real suffix did not publish a fresh opaque capture revision",
+    );
     check(targetSteps === 1, "The first suffix event did not fold exactly once");
     check(
       claim.store.available.get() && claim.store.value.get() === 2,
@@ -344,10 +425,70 @@ async function verifyPositionedRequiredTransferConsumer() {
       providerB.acknowledgements.length === 1 && providerB.acknowledgements[0].receipt === receipt,
       "The first suffix fold did not acknowledge its exact native receipt",
     );
+    const suffixCheckpoint = capturePositionedStore(claim.store, [
+      claim.restoration.projections[0],
+    ]);
+    check(
+      suffixCheckpoint.present &&
+        suffixCheckpoint.latest === 2 &&
+        suffixCheckpoint.position === 6 &&
+        suffixCheckpoint.values[0] === 12 &&
+        suffixCheckpoint.resumable &&
+        isPositionedStoreCheckpointCurrent(suffixCheckpoint) &&
+        !isPositionedStoreCheckpointCurrent(initialCheckpoint),
+      "A fresh authenticated suffix cut did not replace the earlier current cut",
+    );
+
+    const captureNoticesAtStop = captureNotices.length;
+    stopCaptureState();
+    stopCaptureState = () => {};
+    changeWait.stop();
+    check(
+      providerB.opens.length === 1 && providerB.releaseCount(reader) === 0,
+      "Stopping capture observation retired the real restored reader",
+    );
+
+    const terminalState = observePositionedStoreCaptureState(suffixCheckpoint);
+    const terminalNotices = [];
+    stopTerminalCaptureState = subscribe(terminalState, (notice) => terminalNotices.push(notice));
+    check(
+      terminalNotices.length === 1 && terminalNotices[0]?.kind === "changed",
+      "The contract capture-state observer did not synchronously seed its authentic cut",
+    );
+    terminalWait = waitForPositionedCaptureNotice(
+      terminalState,
+      (notice) => notice.kind === "closed",
+    );
     claim.restoration.discard();
-    await claim.restoration.retired;
+    const [terminalNotice] = await Promise.all([terminalWait.promise, claim.restoration.retired]);
+    check(
+      terminalNotice.kind === "closed" &&
+        terminalNotices.length === 2 &&
+        terminalNotices[1] === terminalNotice &&
+        !isPositionedStoreCheckpointCurrent(suffixCheckpoint),
+      "The actual reader discard did not retire its capture state with a sticky terminal",
+    );
+    check(
+      captureNotices.length === captureNoticesAtStop,
+      "An unsubscribed capture-state observer received the later terminal",
+    );
+    stopTerminalCaptureState();
+    stopTerminalCaptureState = () => {};
+    const stickyNotices = [];
+    stopStickyTerminal = subscribe(terminalState, (notice) => stickyNotices.push(notice));
+    check(
+      stickyNotices.length === 1 && stickyNotices[0] === terminalNotice,
+      "A later subscriber did not receive the sticky terminal notice",
+    );
+    stopStickyTerminal();
+    stopStickyTerminal = () => {};
     check(providerB.releaseCount(reader) === 1, "The restoration did not release its reader once");
   } finally {
+    stopCaptureState();
+    changeWait?.stop();
+    stopTerminalCaptureState();
+    terminalWait?.stop();
+    stopStickyTerminal();
     if (!published) {
       adoption?.discard();
       claim?.discard();
@@ -377,6 +518,10 @@ function verifyPublicEntryIdentity() {
   );
   check(signal === reactiveSignal, "The root and reactive signal factories differ");
   check(createGraph === contractCreateGraph, "The root and contract graph factories differ");
+  check(
+    rootObservePositionedStoreCaptureState === observePositionedStoreCaptureState,
+    "The root and contract positioned capture-state observers differ",
+  );
   check(
     defineContract === contractDefineContract,
     "The root and contract declaration factories differ",

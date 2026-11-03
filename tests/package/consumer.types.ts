@@ -49,6 +49,7 @@ import {
   acknowledgePositionedFold,
   observeQueryProgress,
   observeStore,
+  observePositionedStoreCaptureState,
   peekStore,
   type ObservationLease,
   type ValueRevision,
@@ -78,6 +79,7 @@ import {
   type PositionedProjectionCheckpoint,
   type PositionedFoldReceipt,
   type PositionedRestoreSeed,
+  type PositionedStoreCaptureNotice,
   type PositionedStoreCheckpoint,
   type PositionedStoreRestoreSeed,
   type PositionedStoreRestoration,
@@ -86,6 +88,7 @@ import {
   type Readable,
   type StoreIdentity,
   type TypedTarget,
+  type Unsubscribe,
   snapshot,
   type AdoptionReport,
   type AdoptionReportV2,
@@ -123,10 +126,14 @@ import {
   type StreamSnapshotAddressV2,
   withoutWrites,
 } from "aeolia";
+import {
+  observePositionedStoreCaptureState as observeContractPositionedStoreCaptureState,
+} from "aeolia/contract";
 import type {
   BindingContext as ContractBindingContext,
   Graph as ContractGraph,
   QueryAcquisition as ContractQueryAcquisition,
+  PositionedStoreCaptureNotice as ContractPositionedStoreCaptureNotice,
   PositionedStoreCheckpoint as ContractPositionedStoreCheckpoint,
   PositionedStoreRestoreSeed as ContractPositionedStoreRestoreSeed,
   PositionedStoreRestoration as ContractPositionedStoreRestoration,
@@ -674,6 +681,66 @@ function typecheckOnly(): void {
     positionedStoreSource,
     positionedStoreViews,
   );
+
+  type PositionedStoreCaptureFailureCause = Extract<
+    PositionedStoreCaptureNotice,
+    { readonly kind: "failed" }
+  >["cause"];
+  type PositionedStoreCaptureChangedRevision = Extract<
+    PositionedStoreCaptureNotice,
+    { readonly kind: "changed" }
+  >["revision"];
+  const positionedStoreCaptureFailureCauseIsUnknown: Equal<
+    PositionedStoreCaptureFailureCause,
+    unknown
+  > = true;
+  const positionedStoreCaptureChangedRevisionIsObject: Equal<
+    PositionedStoreCaptureChangedRevision,
+    object
+  > = true;
+  const positionedStoreCaptureNoticeSubpathsMatch: Equal<
+    PositionedStoreCaptureNotice,
+    ContractPositionedStoreCaptureNotice
+  > = true;
+  const positionedStoreCaptureNotices: Readable<PositionedStoreCaptureNotice> =
+    observePositionedStoreCaptureState(positionedStoreCheckpoint);
+  const contractPositionedStoreCaptureNotices: Readable<ContractPositionedStoreCaptureNotice> =
+    observeContractPositionedStoreCaptureState(positionedStoreCheckpoint);
+  const positionedStoreCaptureNoticeObserver: (notice: PositionedStoreCaptureNotice) => void =
+    (notice) => {
+      if (notice.kind === "changed") {
+        const revision: object = notice.revision;
+        // @ts-expect-error A native revision token is opaque and cannot be used as an event position.
+        const eventPosition: number = notice.revision;
+        void [revision, eventPosition];
+      } else if (notice.kind === "failed") {
+        const cause: unknown = notice.cause;
+        // @ts-expect-error An unknown failure cause must be narrowed before its fields are read.
+        const failureMessage: string = notice.cause.message;
+        void [cause, failureMessage];
+      } else {
+        const terminalKind: "closed" | "invalidated" = notice.kind;
+        void terminalKind;
+      }
+    };
+  const unsubscribePositionedStoreCapture: Unsubscribe = subscribe(
+    positionedStoreCaptureNotices,
+    positionedStoreCaptureNoticeObserver,
+  );
+  const unsubscribeContractPositionedStoreCapture: Unsubscribe = subscribe(
+    contractPositionedStoreCaptureNotices,
+    positionedStoreCaptureNoticeObserver,
+  );
+  // @ts-expect-error An ordinary Store does not carry a native positioned capture checkpoint.
+  observePositionedStoreCaptureState(declared);
+  void [
+    positionedStoreCaptureFailureCauseIsUnknown,
+    positionedStoreCaptureChangedRevisionIsObject,
+    positionedStoreCaptureNoticeSubpathsMatch,
+    unsubscribePositionedStoreCapture,
+    unsubscribeContractPositionedStoreCapture,
+  ];
+
   type PositionedStoreValues = readonly [{ total: number }, number];
   type CapturedPositionedStoreValues =
     typeof positionedStoreCheckpoint extends PositionedStoreCheckpoint<number, infer Values>
