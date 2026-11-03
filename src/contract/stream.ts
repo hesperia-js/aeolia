@@ -218,6 +218,7 @@ export async function consumeStream<T>(
           };
         } else positioned.diverged = true;
         positioned.dispatch = undefined;
+        noteTransferChange(positioned);
       }
     }
   } catch (error) {

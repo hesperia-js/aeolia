@@ -8,6 +8,49 @@ interface Epoch {
   value: object;
 }
 const epochs = new WeakMap<object, Epoch>();
+const positionedCaptureListeners = new WeakMap<object, Set<() => void>>();
+
+/** @internal Attach only the targets of an authentic positioned Store capture. */
+export function observePositionedTransferChanges(
+  targets: readonly object[],
+  notify: () => void,
+): () => void {
+  const unique = new Set(targets);
+  for (const target of unique) {
+    let listeners = positionedCaptureListeners.get(target);
+    if (listeners === undefined) {
+      listeners = new Set();
+      positionedCaptureListeners.set(target, listeners);
+    }
+    listeners.add(notify);
+  }
+  return stopPositionedCaptureChanges([...unique].map((target) => new WeakRef(target)), notify);
+}
+function stopPositionedCaptureChanges(
+  targets: readonly WeakRef<object>[],
+  notify: () => void,
+): () => void {
+  return () => {
+    for (const reference of targets) {
+      const target = reference.deref();
+      if (target === undefined) continue;
+      const listeners = positionedCaptureListeners.get(target);
+      listeners?.delete(notify);
+      if (listeners?.size === 0) positionedCaptureListeners.delete(target);
+    }
+  };
+}
+function notifyPositionedCaptureChange(target: object): void {
+  const listeners = positionedCaptureListeners.get(target);
+  if (listeners === undefined) return;
+  for (const notify of listeners) {
+    try {
+      notify();
+    } catch {
+      // Observer scheduling cannot change the producer's result.
+    }
+  }
+}
 function epoch(target: object): Epoch {
   let record = epochs.get(target);
   if (record === undefined) {
@@ -19,6 +62,7 @@ function epoch(target: object): Epoch {
 /** @internal Records an actual native transition, including equality-preserving transitions. */
 export function noteTransferChange(target: object): void {
   epoch(target).value = {};
+  notifyPositionedCaptureChange(target);
 }
 /** @internal Preallocates a native epoch replacement for a fixed publication tail. */
 export function prepareTransferChange(target: object): {
@@ -34,6 +78,7 @@ export function prepareTransferChange(target: object): {
     afterCurrent: () => record.value === after,
     publish: () => {
       record.value = after;
+      notifyPositionedCaptureChange(target);
     },
   };
 }

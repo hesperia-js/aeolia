@@ -11,6 +11,7 @@ export {
   project,
   projectPositioned,
   capturePositionedStore,
+  observePositionedStoreCaptureState,
   isPositionedStoreCheckpointCurrent,
   preparePositionedStoreRestore,
   capturePositionedProjection,
@@ -106,6 +107,7 @@ export { subscribe } from "./subscribe.ts";
 export type {
   AccumulatePolicy,
   PositionedRestoration,
+  PositionedStoreCaptureNotice,
   PositionedStreamAccess,
   Projection,
   ProjectionPolicy,

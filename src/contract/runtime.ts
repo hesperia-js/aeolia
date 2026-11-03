@@ -141,6 +141,7 @@ export interface PositionedStoreParticipant {
   anchor?: object;
   event?: PositionedStoreEvent;
   failed: boolean;
+  failure?: { readonly cause: unknown };
 }
 
 export interface PositionedStoreReaderLease {
@@ -179,6 +180,7 @@ export interface PositionedStoreSessionState<T> {
   readonly member: object;
   readonly binding?: StreamBindingRuntime;
   phase: "dormant" | "active" | "closed";
+  captureTerminal?: { readonly kind: "closed" } | { readonly kind: "failed"; readonly cause: unknown };
   nextOrdinal: number;
   /** Incoming provider boundary while next() is pending; never a completed capture cut. */
   pendingPosition?: unknown;

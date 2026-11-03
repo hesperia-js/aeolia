@@ -769,6 +769,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   );
   const mutationControllers = [...context.mutationControllers];
   const positionedProjections = [...(context.positionedProjections ?? [])];
+  noteTransferChange(context);
   context.positionedProjections?.clear();
   context.disposed = true;
   closePendingPositionedStores(context);
@@ -784,6 +785,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   state.bindingContexts.delete(context);
   for (const runtime of stores) {
     retireQueryProgress(runtime as StoreRuntime<unknown>);
+    if (!runtime.disposed) noteTransferChange(runtime);
     runtime.disposed = true;
     runtime.incarnation = undefined;
     state.stores.delete(runtime.identity);
@@ -910,6 +912,7 @@ function disposeGraph<C extends Contract>(
   try {
     if (progress === undefined) {
       progress = createGraphDisposalProgress(state);
+      noteTransferChange(state);
       state.disposal = progress;
       state.disposed = true;
       closePendingPositionedStores(state);
@@ -1130,6 +1133,7 @@ function disposeGraphContents<C extends Contract>(
         }
         store.stream = undefined;
         retireQueryProgress(runtime as StoreRuntime<unknown>);
+        if (!runtime.disposed) noteTransferChange(runtime);
         runtime.disposed = true;
         runtime.incarnation = undefined;
         runtime.collectionIndex = -1;

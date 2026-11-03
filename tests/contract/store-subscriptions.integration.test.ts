@@ -10,11 +10,14 @@ import {
   createPositionedStream,
   capturePositionedStore,
   isPositionedStoreCheckpointCurrent,
+  observePositionedStoreCaptureState,
   preparePositionedStoreRestore,
   positionedFoldReceipt,
   project,
   snapshot,
   subscribe,
+  type PositionedStoreCaptureNotice,
+  type Readable,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
@@ -34,6 +37,32 @@ function fixture(idleMs?: number) {
     idleMs,
   });
   return { backend, stream, graph };
+}
+
+function waitForCaptureNotice(
+  readable: Readable<PositionedStoreCaptureNotice>,
+  matches: (notice: PositionedStoreCaptureNotice) => boolean,
+): Promise<PositionedStoreCaptureNotice> {
+  let stop: (() => void) | undefined;
+  const pending = new Promise<PositionedStoreCaptureNotice>((resolve) => {
+    stop = subscribe(readable, (notice) => {
+      if (matches(notice)) resolve(notice);
+    });
+  });
+  return pending.finally(() => stop?.());
+}
+
+function waitForCaptureChange(
+  readable: Readable<PositionedStoreCaptureNotice>,
+  afterRevision: object,
+): Promise<Extract<PositionedStoreCaptureNotice, { readonly kind: "changed" }>> {
+  return waitForCaptureNotice(
+    readable,
+    (notice) => notice.kind !== "changed" || notice.revision !== afterRevision,
+  ).then((notice) => {
+    if (notice.kind !== "changed") throw new Error("The positioned capture became terminal");
+    return notice;
+  });
 }
 
 test("store subscription skips absence but delivers a real undefined and retained values", async () => {
@@ -469,7 +498,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
   }
 });
 
-test("a live equal-value prediction cannot taint the next positioned Store cut", async () => {
+test("capture notices track equal events and prediction retirement without source events", async () => {
   type Input = { readonly room: string };
   type Event = { position: number; value: number };
   const backend = testBackend();
@@ -543,6 +572,9 @@ test("a live equal-value prediction cannot taint the next positioned Store cut",
     initial: 0,
     step: (sum: number, event: number) => sum + event,
   });
+  const sourceValues: number[] = [];
+  const stopSource = subscribe(source, (value) => sourceValues.push(value));
+  let stopCaptureChanges: (() => void) | undefined;
 
   try {
     const folded = new Promise<void>((resolve) => {
@@ -564,70 +596,139 @@ test("a live equal-value prediction cannot taint the next positioned Store cut",
     expect(original.resumable).toBe(true);
     expect(isPositionedStoreCheckpointCurrent(original)).toBe(true);
     expect(source.value.get()).toBe(5);
+    expect(sourceValues).toStrictEqual([5]);
 
-    const mutationResult = graph.api.mutation(input);
-    expect(source.value.get()).toBe(5);
-    expect(projection.value.get()).toBe(5);
-    expect(isPositionedStoreCheckpointCurrent(original)).toBe(false);
-    const predicted = capturePositionedStore(source, [projection] as const);
-    if (!predicted.present)
-      throw new Error("The real source Event is missing from the prediction cut");
-    expect(predicted.latest).toBe(5);
-    expect(predicted.values).toStrictEqual([5]);
-    expect(predicted.resumable).toBe(false);
+    const captureChanges = observePositionedStoreCaptureState(original);
+    const captureNotices: PositionedStoreCaptureNotice[] = [];
+    stopCaptureChanges = subscribe(captureChanges, (notice) => captureNotices.push(notice));
+    const initialNotice = captureNotices[0];
+    if (initialNotice?.kind !== "changed")
+      throw new Error("The authentic capture did not produce its synchronous changed seed");
 
+    const equalEventChange = waitForCaptureChange(captureChanges, initialNotice.revision);
     const secondFold = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
       stop = subscribe(projection.value, (value) => {
-        if (value !== 7) return;
+        if (value !== 10) return;
         stop();
         resolve();
       });
     });
-    liveEmitter({ position: 6, value: 2 });
+    liveEmitter({ position: 6, value: 5 });
+    const equalNotice = await equalEventChange;
     await secondFold;
     expect(source.value.get()).toBe(5);
-    expect(projection.value.get()).toBe(7);
-    const liveOverlay = capturePositionedStore(source, [projection] as const);
-    if (!liveOverlay.present) throw new Error("The second real source Event is missing");
-    expect(liveOverlay.latest).toBe(2);
-    expect(liveOverlay.values).toStrictEqual([7]);
-    expect(liveOverlay.resumable).toBe(false);
+    expect(sourceValues).toStrictEqual([5]);
+    expect(projection.value.get()).toBe(10);
+    const equalEventCut = capturePositionedStore(source, [projection] as const);
+    if (!equalEventCut.present) throw new Error("The equal real source Event is missing");
+    expect(equalEventCut.latest).toBe(5);
+    expect(equalEventCut.position).toBe(6);
+    expect(equalEventCut.values).toStrictEqual([10]);
+    expect(equalEventCut.resumable).toBe(true);
+    expect(isPositionedStoreCheckpointCurrent(equalEventCut)).toBe(true);
+    expect(isPositionedStoreCheckpointCurrent(original)).toBe(false);
+
+    const predictionChange = waitForCaptureChange(captureChanges, equalNotice.revision);
+    const mutationResult = graph.api.mutation(input);
+    expect(source.value.get()).toBe(5);
+    expect(projection.value.get()).toBe(10);
+    expect(sourceValues).toStrictEqual([5]);
+    const predictionNotice = await predictionChange;
+    expect(isPositionedStoreCheckpointCurrent(equalEventCut)).toBe(false);
+    const predicted = capturePositionedStore(source, [projection] as const);
+    if (!predicted.present)
+      throw new Error("The real source Event is missing from the prediction cut");
+    expect(predicted.latest).toBe(5);
+    expect(predicted.position).toBe(6);
+    expect(predicted.values).toStrictEqual([10]);
+    expect(predicted.resumable).toBe(false);
 
     const pendingAction = backend.pending("equal-prediction")[0];
     if (pendingAction === undefined) throw new Error("The real mutation callback is not pending");
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const settlement = await Promise.race([
-      mutationResult.then(
-        () => "settled" as const,
-        () => "settled" as const,
-      ),
-      new Promise<"pending">((resolve) => {
-        timer = setTimeout(() => resolve("pending"), 0);
-      }),
-    ]);
-    if (timer !== undefined) clearTimeout(timer);
-    expect(settlement).toBe("pending");
+    const predictionFailure = new Error("prediction rejected without a source event");
+    const predictionRetired = waitForCaptureChange(captureChanges, predictionNotice.revision);
+    backend.reject(pendingAction, predictionFailure);
+    await Promise.all([expect(mutationResult).rejects.toBe(predictionFailure), predictionRetired]);
 
-    const failure = new Error("mutation rejected");
-    backend.reject(pendingAction, failure);
-    await expect(mutationResult).rejects.toBe(failure);
+    expect(source.value.get()).toBe(5);
+    expect(projection.value.get()).toBe(10);
+    expect(sourceValues).toStrictEqual([5]);
+    const retiredWithoutEvent = capturePositionedStore(source, [projection] as const);
+    if (!retiredWithoutEvent.present) throw new Error("The retained source Event is missing");
+    expect(retiredWithoutEvent.latest).toBe(5);
+    expect(retiredWithoutEvent.position).toBe(6);
+    expect(retiredWithoutEvent.values).toStrictEqual([10]);
+    expect(retiredWithoutEvent.resumable).toBe(true);
+    expect(isPositionedStoreCheckpointCurrent(retiredWithoutEvent)).toBe(true);
+    expect(isPositionedStoreCheckpointCurrent(predicted)).toBe(false);
+
+    const secondPredictionChange = waitForCaptureChange(captureChanges, predictionRetired.revision);
+    const secondMutation = graph.api.mutation(input);
+    const secondPredictionNotice = await secondPredictionChange;
+    expect(source.value.get()).toBe(5);
+    expect(projection.value.get()).toBe(10);
+    const secondPendingAction = backend.pending("equal-prediction")[0];
+    if (secondPendingAction === undefined)
+      throw new Error("The second mutation callback is not pending");
+
+    const eventChange = waitForCaptureChange(captureChanges, secondPredictionNotice.revision);
+    const thirdFold = new Promise<void>((resolve) => {
+      let stop = (): void => undefined;
+      stop = subscribe(projection.value, (value) => {
+        if (value !== 12) return;
+        stop();
+        resolve();
+      });
+    });
+    liveEmitter({ position: 7, value: 2 });
+    const eventNotice = await eventChange;
+    await thirdFold;
+    expect(source.value.get()).toBe(5);
+    expect(sourceValues).toStrictEqual([5]);
+    expect(projection.value.get()).toBe(12);
+    const liveOverlay = capturePositionedStore(source, [projection] as const);
+    if (!liveOverlay.present) throw new Error("The second real source Event is missing");
+    expect(liveOverlay.latest).toBe(2);
+    expect(liveOverlay.position).toBe(7);
+    expect(liveOverlay.values).toStrictEqual([12]);
+    expect(liveOverlay.resumable).toBe(false);
+
+    const livePredictionRetired = waitForCaptureChange(captureChanges, eventNotice.revision);
+    const eventFailure = new Error("event overlay rejected");
+    backend.reject(secondPendingAction, eventFailure);
+    await Promise.all([expect(secondMutation).rejects.toBe(eventFailure), livePredictionRetired]);
 
     expect(source.value.get()).toBe(2);
-    expect(projection.value.get()).toBe(7);
+    expect(sourceValues).toStrictEqual([5, 2]);
+    expect(projection.value.get()).toBe(12);
     const reconciled = capturePositionedStore(source, [projection] as const);
     if (!reconciled.present) throw new Error("The reconciled source Event is missing");
     expect(reconciled.latest).toBe(2);
-    expect(reconciled.values).toStrictEqual([7]);
+    expect(reconciled.position).toBe(7);
+    expect(reconciled.values).toStrictEqual([12]);
     expect(reconciled.resumable).toBe(true);
     expect(isPositionedStoreCheckpointCurrent(reconciled)).toBe(true);
     expect(isPositionedStoreCheckpointCurrent(liveOverlay)).toBe(false);
     expect(isPositionedStoreCheckpointCurrent(original)).toBe(false);
+    expect(isPositionedStoreCheckpointCurrent(equalEventCut)).toBe(false);
+    expect(isPositionedStoreCheckpointCurrent(retiredWithoutEvent)).toBe(false);
+
+    stopCaptureChanges?.();
+    stopCaptureChanges = undefined;
+    const terminalState = observePositionedStoreCaptureState(reconciled);
+    const invalidated = waitForCaptureNotice(terminalState, (notice) => notice.kind === "invalidated");
+    projection.close();
+    expect(await invalidated).toStrictEqual({ kind: "invalidated" });
+    expect(source.status.get()).toBe("live");
   } finally {
+    stopCaptureChanges?.();
+    stopSource();
     projection.close();
     graph.dispose();
   }
 });
+
 
 test("an empty store rejects a non-callable observer at registration", () => {
   const { graph } = fixture();
