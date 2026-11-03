@@ -666,7 +666,10 @@ test("capture notices track equal events and prediction retirement without sourc
     expect(isPositionedStoreCheckpointCurrent(retiredWithoutEvent)).toBe(true);
     expect(isPositionedStoreCheckpointCurrent(predicted)).toBe(false);
 
-    const secondPredictionChange = waitForCaptureChange(captureChanges, predictionRetiredNotice.revision);
+    const secondPredictionChange = waitForCaptureChange(
+      captureChanges,
+      predictionRetiredNotice.revision,
+    );
     const secondMutation = graph.api.mutation(input);
     const secondPredictionNotice = await secondPredictionChange;
     expect(source.value.get()).toBe(5);

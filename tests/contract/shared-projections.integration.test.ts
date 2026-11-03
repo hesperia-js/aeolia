@@ -858,8 +858,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     );
     expect(firstCaptureNotices).toHaveLength(1);
     const firstCaptureNotice = firstCaptureNotices[0];
-    if (firstCaptureNotice === undefined)
-      throw new Error("The first capture notice is missing");
+    if (firstCaptureNotice === undefined) throw new Error("The first capture notice is missing");
     expect(firstCaptureNotice.kind).toBe("changed");
     expect(secondCaptureNotices).toStrictEqual([firstCaptureNotice]);
     stopFirstCapture();
