@@ -825,6 +825,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
   let reader: object | undefined;
   let capturePublished = false;
   let adoptionPublished = false;
+  let switchedToRealTimers = false;
 
   try {
     const source = sourceGraph.api.events(undefined);
@@ -1063,6 +1064,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
 
     stopSecondTarget();
     jest.useRealTimers();
+    switchedToRealTimers = true;
 
     const expiringProvider = makeProvider(2_000);
     const expiringDefinition = createPositionedStream<void, number, string, number, object>({
@@ -1171,35 +1173,39 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     await receiverClaim.restoration.retired;
     expect(providerB.releaseCount(targetReader)).toBe(1);
   } finally {
-    if (!capturePublished) capture?.discard();
-    if (!adoptionPublished) {
-      adoption?.discard();
-      claim?.discard();
-    } else claim?.restoration.discard();
-    sourceProjection?.close();
-    sourceGraph.dispose();
-    targetGraph.dispose();
-    if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
-      providerB.source.releaseReader(undefined, reader);
-    if (capture !== undefined)
-      await capture.retired.then(
-        () => undefined,
-        () => undefined,
-      );
-    if (adoption !== undefined)
-      await adoption.retired.then(
-        () => undefined,
-        () => undefined,
-      );
-    if (claim !== undefined) {
-      await claim.retired.then(
-        () => undefined,
-        () => undefined,
-      );
-      await claim.restoration.retired.then(
-        () => undefined,
-        () => undefined,
-      );
+    try {
+      if (!capturePublished) capture?.discard();
+      if (!adoptionPublished) {
+        adoption?.discard();
+        claim?.discard();
+      } else claim?.restoration.discard();
+      sourceProjection?.close();
+      sourceGraph.dispose();
+      targetGraph.dispose();
+      if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
+        providerB.source.releaseReader(undefined, reader);
+      if (capture !== undefined)
+        await capture.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      if (adoption !== undefined)
+        await adoption.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      if (claim !== undefined) {
+        await claim.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+        await claim.restoration.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      }
+    } finally {
+      if (switchedToRealTimers) jest.useFakeTimers();
     }
   }
 });
