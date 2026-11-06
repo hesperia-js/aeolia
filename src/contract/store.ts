@@ -184,6 +184,7 @@ export function makeStore<T>(
     requests: new Set(),
     livenessStops: [],
     readStops: [],
+    streamToken: undefined,
     ...(definition?.initial === undefined ? {} : { initial: definition.initial }),
     equals: definition?.equals ?? Object.is,
     snapshot: definition?.snapshot ?? false,

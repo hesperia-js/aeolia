@@ -35,6 +35,65 @@ async function nextTurn(): Promise<void> {
 }
 
 describe("Graph.reset", () => {
+  it("rejects a reset cancelled in its first refresh, stops dispatch, and preserves reentrant raw work", async () => {
+    const reason = new Error("cancel running reset");
+    const requests: Array<{
+      input: string;
+      signal: AbortSignal;
+      result: ReturnType<typeof Promise.withResolvers<number>>;
+    }> = [];
+    let startSuccessor = (): void => undefined;
+    const query = createQuery({
+      name: "cancel-reset.query",
+      key: (input: string) => `cancel-reset/${input}`,
+      fetch: (input, options) => {
+        const result = Promise.withResolvers<number>();
+        requests.push({ input, signal: options.abortSignal, result });
+        if (input === "first") {
+          options.abortSignal.addEventListener("abort", () => startSuccessor(), { once: true });
+          graph.cancelPending(reason);
+        }
+        return result.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cancel-reset", operations: { query } }),
+    });
+    const first = graph.api.query("first", { initial: 1 });
+    const second = graph.api.query("second", { initial: 2 });
+    const stopFirst = subscribe(first.status, () => undefined);
+    const stopSecond = subscribe(second.status, () => undefined);
+    let successor: typeof first | undefined;
+    startSuccessor = () => {
+      successor = graph.api.query("successor");
+    };
+    try {
+      const reset = graph.reset();
+      await expect(reset).rejects.toBe(reason);
+      expect(requests.map((request) => request.input)).toEqual(["first", "successor"]);
+      expect(requests[0]!.signal.reason).toBe(reason);
+      expect(requests[1]!.signal.aborted).toBe(false);
+      await expect(first.ready).rejects.toBe(reason);
+      expect(graph.resetVersion.get()).toBe(1);
+      expect(first.value.get()).toBeUndefined();
+      expect(second.value.get()).toBeUndefined();
+      expect(second.status.get()).toBe("empty");
+      expect(successor).toBeDefined();
+      const ready = successor!.ready;
+      requests[1]!.result.resolve(3);
+      await ready;
+      expect(successor!.value.get()).toBe(3);
+      requests[0]!.result.resolve(99);
+      await requests[0]!.result.promise;
+      expect(first.value.get()).toBeUndefined();
+      expect(successor!.value.get()).toBe(3);
+    } finally {
+      stopFirst();
+      stopSecond();
+      graph.dispose();
+    }
+  });
+
   it("preserves graph and store handles, restores declarations, and accepts fresh undefined data", async () => {
     const backend = testBackend();
     const query = createQuery({
@@ -759,6 +818,9 @@ describe("Graph.reset", () => {
     const reset = graph.reset();
     expect(sessions).toHaveLength(2);
     expect(sessions[0]!.abortSignal.aborted).toBe(true);
+    expect(sessions[0]!.abortSignal.reason).toMatchObject({
+      message: "A graph reset canceled work from the previous state.",
+    });
     expect(store.value.get()).toBeUndefined();
     await expect(reset).resolves.toBeUndefined();
 
