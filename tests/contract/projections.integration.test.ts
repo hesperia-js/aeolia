@@ -4,6 +4,7 @@ import {
   createGraph,
   defineContract,
   createStream,
+  createQuery,
   project,
   subscribe,
   type Graph,
@@ -62,6 +63,120 @@ function waitForProjectionStatus(
 }
 
 describe("stream projections", () => {
+  for (const restartFrom of ["query abort", "old iterator cleanup"] as const) {
+    it(`preserves a replacement projection generation created during ${restartFrom}`, async () => {
+      const sources: Array<{
+        signal: AbortSignal;
+        read: ReturnType<typeof Promise.withResolvers<IteratorResult<number>>>;
+        returns: number;
+        nextCalls: number;
+      }> = [];
+      let nestedReset: Promise<void> | undefined;
+      let reenter = false;
+      const stream = createStream({
+        name: "projection-cancel-generation",
+        key: () => "projection-cancel-generation/one",
+        open: (_input: void, options): AsyncIterable<number> => {
+          const source = {
+            signal: options.abortSignal,
+            read: Promise.withResolvers<IteratorResult<number>>(),
+            returns: 0,
+            nextCalls: 0,
+          };
+          sources.push(source);
+          return {
+            [Symbol.asyncIterator]() {
+              return {
+                next: () => {
+                  source.nextCalls += 1;
+                  if (source.nextCalls > 1)
+                    source.read = Promise.withResolvers<IteratorResult<number>>();
+                  return source.read.promise;
+                },
+                return: () => {
+                  source.returns += 1;
+                  if (reenter && restartFrom === "old iterator cleanup") {
+                    reenter = false;
+                    nestedReset = graph.reset();
+                  }
+                  return Promise.resolve({ done: true as const, value: undefined });
+                },
+              };
+            },
+          };
+        },
+      });
+      const query = createQuery({
+        name: "projection-cancel-query",
+        key: () => "projection-cancel-query/one",
+        fetch: (_input: void, options) => {
+          options.abortSignal.addEventListener(
+            "abort",
+            () => {
+              if (!reenter || restartFrom !== "query abort") return;
+              reenter = false;
+              nestedReset = graph.reset();
+            },
+            { once: true },
+          );
+          return new Promise<number>(() => undefined);
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({
+          namespace: "projection-cancel-generation",
+          operations: { stream, query },
+        }),
+      });
+      if (restartFrom === "query abort") graph.api.query();
+      const projection = project(graph, stream, undefined, { kind: "accumulate", max: 4 });
+      try {
+        reenter = true;
+        if (restartFrom === "query abort") {
+          graph.cancelPending(new Error("cancel entry cohort"));
+        } else {
+          const superseded = graph.reset();
+          await expect(superseded).rejects.toMatchObject({ name: "AbortError" });
+        }
+        expect(nestedReset).toBeDefined();
+        await nestedReset;
+        expect(sources).toHaveLength(2);
+        expect(sources[0]!.signal.aborted).toBe(true);
+        expect(sources[0]!.returns).toBe(1);
+        expect(sources[1]!.signal.aborted).toBe(false);
+        expect(sources[1]!.returns).toBe(0);
+        expect(projection.status.get()).toBe("open");
+
+        const oldRead = sources[0]!.read;
+        oldRead.resolve({ done: false, value: 99 });
+        await oldRead.promise;
+        expect(projection.value.get()).toEqual([]);
+        const received = Promise.withResolvers<void>();
+        const stop = subscribe(projection.value, (items) => {
+          if (items.length === 1 && items[0] === 7) received.resolve();
+        });
+        try {
+          sources[1]!.read.resolve({ done: false, value: 7 });
+          await received.promise;
+        } finally {
+          stop();
+        }
+        expect(projection.value.get()).toEqual([7]);
+        expect(sources[1]!.nextCalls).toBe(2);
+        const reason = new Error("cancel replacement through its retained registration");
+        graph.cancelPending(reason);
+        expect(sources[1]!.signal.reason).toBe(reason);
+        expect(sources[1]!.returns).toBe(1);
+        expect(projection.status.get()).toBe("closed");
+        expect(projection.value.get()).toEqual([7]);
+        expect(projection.error.get()).toBeUndefined();
+      } finally {
+        graph.dispose();
+      }
+      expect(sources.map((source) => source.returns)).toEqual([1, 1]);
+    });
+  }
+
   it("opens independently, passes the required key, accumulates, and drops oldest", async () => {
     const backend = testBackend();
     const stream = numberStream(backend, "projection");

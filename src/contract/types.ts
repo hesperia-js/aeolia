@@ -1082,6 +1082,24 @@ export interface Graph<C extends Contract = Contract> {
   reset(): Promise<void>;
 
   /**
+   * Cancels the requests, stream sessions, projection source generations and
+   * reset operation present at entry, retaining stores and readable values.
+   *
+   * Uses `reason`, or a new `AbortError` when it is undefined. Cancellation
+   * does not reset or dispose the graph, roll back mutations, or prevent new
+   * work, including work started by abort listeners or existing timers.
+   * Iterator cleanup remains best-effort and unawaited. Synchronous failures
+   * that escape cleanup are collected in an `AggregateError` after all captured
+   * work has been attempted. Calling this on a disposed graph does nothing.
+   *
+   * @param reason - Abort reason shared by the captured work. An undefined
+   * value selects a new cancellation `AbortError`.
+   * @throws AggregateError containing synchronous failures that escape the
+   * captured cancellation and cleanup actions.
+   */
+  cancelPending(reason?: unknown): void;
+
+  /**
    * Permanently disposes the graph.
    *
    * Disposal aborts active requests, mutation callbacks, stream sessions, and

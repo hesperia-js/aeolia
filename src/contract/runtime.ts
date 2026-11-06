@@ -51,6 +51,7 @@ export interface QueryRequest {
   outcome: Promise<QueryOutcome>;
   resolveOutcome: (outcome: QueryOutcome) => void;
   outcomeReported: boolean;
+  readonly callerAbortSignal?: AbortSignal;
   removeCallerAbort: () => void;
   removeRequestAbort?: () => void;
   settled: boolean;
@@ -61,10 +62,13 @@ export type QueryOutcome = { readonly ok: true } | { readonly ok: false; readonl
 
 export interface StreamSession<T> {
   readonly controller: AbortController;
+  readonly token: object;
   /** Reset identity under which this session was opened. */
   readonly resetEpoch: number;
   readonly listeners: Set<(event: StreamEvent<T>) => void>;
   iterator?: AsyncIterator<T>;
+  removeCallerAbort?: () => void;
+  removeControllerAbort?: () => void;
   /** Start of the current uninterrupted interval without live readables. */
   unobservedSince?: number;
   ended: boolean;
@@ -85,6 +89,7 @@ export interface GraphResetOperation {
 }
 
 export interface GraphProjection {
+  readonly captureCancellation: () => ((reason: unknown) => void) | undefined;
   readonly reset: () => (() => void) | undefined;
   readonly restart: () => void;
   readonly dispose: () => void;
@@ -123,6 +128,7 @@ export interface StoreRuntime<T> {
   refreshOnActivation: boolean;
   activeRequest?: QueryRequest;
   stream?: StreamSession<T>;
+  streamToken?: object;
   timer?: TimerHandle;
   initial?: T;
   equals: (a: T, b: T) => boolean;

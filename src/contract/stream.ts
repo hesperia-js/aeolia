@@ -12,7 +12,10 @@ import { writeAllStatuses } from "./status.ts";
 import { publishStreamEvent } from "./stream-events.ts";
 
 function sameSessionEpoch<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
-  return session.resetEpoch === runtime.graph.__runtime.resetEpoch;
+  return (
+    session.resetEpoch === runtime.graph.__runtime.resetEpoch &&
+    runtime.streamToken === session.token
+  );
 }
 
 function isCurrentSession<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
@@ -77,23 +80,32 @@ export function openStream<T>(
 ): void {
   const state = runtime.graph.__runtime;
   const controller = new AbortController();
-  const removeAbort = addSignalAbort(abortSignal, controller);
+  const removeSignalAbort = addSignalAbort(abortSignal, controller);
+  let callerAttached = true;
+  const removeAbort = (): void => {
+    if (!callerAttached) return;
+    callerAttached = false;
+    removeSignalAbort();
+  };
   const session: StreamSession<T> = {
     controller,
+    token: {},
     resetEpoch: state.resetEpoch,
     listeners: new Set(),
     ended: false,
     emitted: false,
+    removeCallerAbort: removeAbort,
     unobservedSince: runtime.liveReadableCount === 0 ? Date.now() : undefined,
   };
   runtime.stream = session;
+  runtime.streamToken = session.token;
   state.activeControllers.add(controller);
   try {
     reactiveInternal.batch(() => {
       runtime.failing = false;
       runtime.invalidated = false;
       runtime.errorCell.set(undefined);
-      setStreamStatus(runtime, "opening");
+      if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "opening");
     });
   } catch (error) {
     if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
@@ -130,7 +142,7 @@ export function openStream<T>(
         try {
           reactiveInternal.batch(() => {
             writeAllStatuses(runtime);
-            setStreamStatus(runtime, "stale");
+            if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "stale");
           });
         } catch (error) {
           if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
@@ -167,9 +179,16 @@ export function openStream<T>(
   }
   session.iterator = iterator;
   controller.signal.addEventListener("abort", closeOnAbort, { once: true });
+  let controllerAttached = true;
+  const removeControllerAbort = (): void => {
+    if (!controllerAttached) return;
+    controllerAttached = false;
+    controller.signal.removeEventListener("abort", closeOnAbort);
+  };
+  session.removeControllerAbort = removeControllerAbort;
   void consumeStream(runtime, session)
     .finally(() => {
-      controller.signal.removeEventListener("abort", closeOnAbort);
+      removeControllerAbort();
       removeAbort();
       state.activeControllers.delete(controller);
     })

@@ -38,8 +38,8 @@ import {
 } from "./registry.ts";
 import type { GraphRuntime, GraphRuntimeState, RealmStoreState, StoreRuntime } from "./runtime.ts";
 import { collectDeclaredStores, finiteBound, graphIdleMs } from "./runtime-validation.ts";
-import { assertGraphOpen, reportContinuationError } from "./faults.ts";
-import { collectExpired, touch } from "./collection.ts";
+import { AbortError, assertGraphOpen, reportContinuationError } from "./faults.ts";
+import { collectExpired, endStream, touch } from "./collection.ts";
 import { getOrCreateStore } from "./store.ts";
 import { makeQueryStore } from "./query.ts";
 import { runMutation } from "./mutation.ts";
@@ -192,6 +192,57 @@ function normalizeMutationCall(
   return { input: callInput, options: callOptions };
 }
 
+function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?: unknown): void {
+  if (state.disposed) return;
+  const cancellation = reason === undefined ? new AbortError("Graph work was canceled.") : reason;
+  const operation = state.resetOperation;
+  const controllers = [...state.activeControllers];
+  const controllerSet = new Set(controllers);
+  const resetRequests =
+    operation === undefined
+      ? []
+      : [...state.stores.values()].flatMap((runtime) =>
+          [...runtime.requests].filter(
+            (request) =>
+              request.callerAbortSignal === operation.signal &&
+              controllerSet.has(request.controller),
+          ),
+        );
+  const streams = [...state.stores.values()].flatMap((runtime) => {
+    const session = runtime.stream;
+    return session !== undefined && !session.ended ? [{ runtime, session }] : [];
+  });
+  const projections = [...state.projections].flatMap((projection) => {
+    const cancel = projection.captureCancellation();
+    return cancel === undefined ? [] : [cancel];
+  });
+  const streamControllers = new Set(streams.map(({ session }) => session.controller));
+  const failures: unknown[] = [];
+  const attempt = (action: () => void): void => {
+    try {
+      action();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+  if (operation !== undefined) {
+    if (state.resetOperation === operation) state.resetOperation = undefined;
+    attempt(() => operation.reject(cancellation));
+    // Preserve the cancellation reason for captured queries before aborting their reset signal.
+    for (const request of resetRequests) attempt(() => request.removeCallerAbort());
+    attempt(() => operation.abort(cancellation));
+  }
+  for (const controller of controllers)
+    if (!streamControllers.has(controller)) attempt(() => controller.abort(cancellation));
+  for (const { runtime, session } of streams)
+    attempt(() => {
+      endStream(runtime, session, "closed", undefined, { abortReason: cancellation });
+    });
+  for (const cancel of projections) attempt(() => cancel(cancellation));
+  if (failures.length > 0)
+    throw new AggregateError(failures, "Several graph cancellation operations failed");
+}
+
 function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
   if (state.disposed) return;
   state.disposed = true;
@@ -220,16 +271,10 @@ function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
     runtime.readStops.length = 0;
     const stream = runtime.stream;
     if (stream != null && !stream.ended) {
-      stream.ended = true;
-      runtime.stream = undefined;
-      state.activeControllers.delete(stream.controller);
-      stream.controller.abort();
-      if (stream.iterator != null && typeof stream.iterator.return === "function") {
-        try {
-          void Promise.resolve(stream.iterator.return()).catch(() => undefined);
-        } catch {
-          /* disposal is terminal */
-        }
+      try {
+        endStream(runtime, stream, "closed");
+      } catch (error) {
+        reportContinuationError(state, error);
       }
     }
     runtime.presence.set(false);
@@ -312,6 +357,7 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     api: buildApi(state, options.contract.operations) as ContractApi<C>,
     resetVersion: computed(() => state.resetVersion.get(), { label: `graph:${id}:reset-version` }),
     reset: () => resetGraph(state),
+    cancelPending: (reason?: unknown) => cancelPending(state, reason),
     store: graphStore,
     at: graphAt,
     dispose: () => disposeGraph(state),
