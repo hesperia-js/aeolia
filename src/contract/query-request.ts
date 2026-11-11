@@ -274,12 +274,17 @@ export function startQueryRequest<T>(
     let result: Promise<T>;
     try {
       const options = { abortSignal: controller.signal, graph: state.graph.id, key: runtime.key };
+      const settledBeforeFetchRead = request.settled;
+      const activeBeforeFetchRead = runtime.activeRequest;
       const fetch = caller.query.fetch;
       if (
         state.disposed ||
         runtime.disposed ||
-        runtime.activeRequest !== request ||
-        request.settled ||
+        runtime.activeRequest !== activeBeforeFetchRead ||
+        request.settled !== settledBeforeFetchRead ||
+        (settledBeforeFetchRead
+          ? !controller.signal.aborted || activeBeforeFetchRead !== undefined
+          : activeBeforeFetchRead !== request) ||
         request.superseded ||
         request.generation !== runtime.generation ||
         request.resetEpoch !== state.resetEpoch

@@ -185,12 +185,31 @@ export function runMutation<I, R>(
     if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
 
     const controller = new AbortController();
-    const removeAbort = addSignalAbort(
-      options?.abortSignal,
-      controller,
-      (remove) => physicalCleanup(state.retirement, remove),
-      () => isCurrentMutationEpoch(state, resetEpoch),
-    );
+    let removeAbort: () => void;
+    try {
+      removeAbort = addSignalAbort(
+        options?.abortSignal,
+        controller,
+        (remove) => physicalCleanup(state.retirement, remove),
+        () => isCurrentMutationEpoch(state, resetEpoch),
+      );
+    } catch (error) {
+      if (isCurrentMutationEpoch(state, resetEpoch)) {
+        try {
+          physicalCleanup(state.retirement, () =>
+            reactiveInternal.batch(() => {
+              for (const prediction of predictions) {
+                if (!isCurrentMutationEpoch(state, resetEpoch)) return;
+                removePrediction(prediction.runtime, prediction.id);
+              }
+            }),
+          );
+        } catch {
+          // Registration keeps its original error; retirement records cleanup failure.
+        }
+      }
+      throw error;
+    }
     if (!isCurrentMutationEpoch(state, resetEpoch)) {
       physicalCleanup(state.retirement, removeAbort);
       return superseded();

@@ -722,7 +722,10 @@ function isOptimisticMap(
   const factory = read(value, Symbol.iterator);
   if (typeof factory !== "function") return false;
   const iterator: unknown = Reflect.apply(factory, value, []);
-  if (!isObject(iterator)) throw new TypeError("The optimistic map iterator is not an object.");
+  if (!isObject(iterator)) {
+    afterRead?.();
+    throw new TypeError("The optimistic map iterator is not an object.");
+  }
   let needsClose = true;
   const close = (): void => {
     if (!needsClose) return;

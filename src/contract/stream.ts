@@ -246,7 +246,9 @@ export function streamMember<T>(
   assertGraphOpen(state);
   const keyForInput = stream.key;
   assertGraphOpen(state);
-  const key = storeKey(Reflect.apply(keyForInput, stream, [input]));
+  const keyValue = Reflect.apply(keyForInput, stream, [input]);
+  assertGraphOpen(state);
+  const key = storeKey(keyValue);
   const runtime = getOrCreateStore(state, key) as StoreRuntime<T>;
   configureKeyedValue(runtime, stream, options);
   assertGraphOpen(state);

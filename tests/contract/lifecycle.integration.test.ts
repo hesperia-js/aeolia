@@ -1266,6 +1266,94 @@ for (const owner of ["query", "stream", "projection", "mutation-select", "mutati
   });
 }
 
+for (const owner of ["query", "stream"] as const) {
+  it(`does not configure a ${owner} store after its key callback retires the graph`, async () => {
+    let retirement: Promise<void> | undefined;
+    let configuredAfterRetirement = false;
+    const query = {
+      kind: "query" as const,
+      name: "retirement.key-call-query",
+      key() {
+        if (owner === "query") retirement ??= graph.retire();
+        return "retirement/key-call-query";
+      },
+      get equals() {
+        if (retirement !== undefined) configuredAfterRetirement = true;
+        return Object.is;
+      },
+      fetch: async () => 1,
+    };
+    const stream = {
+      kind: "stream" as const,
+      name: "retirement.key-call-stream",
+      key() {
+        if (owner === "stream") retirement ??= graph.retire();
+        return "retirement/key-call-stream";
+      },
+      get equals() {
+        if (retirement !== undefined) configuredAfterRetirement = true;
+        return Object.is;
+      },
+      open: (): AsyncIterable<number> => ({
+        [Symbol.asyncIterator]: () => ({ next: async () => ({ done: true, value: undefined }) }),
+      }),
+    };
+    const graph = createGraph({
+      contract: defineContract({ namespace: "retirement-key-call", operations: { query, stream } }),
+    });
+    try {
+      expect(() => {
+        if (owner === "query") graph.api.query(undefined);
+        else graph.api.stream(undefined);
+      }).toThrow();
+      expect(retirement).toBeDefined();
+      expect(configuredAfterRetirement).toBe(false);
+      await retirement;
+    } finally {
+      graph.dispose();
+    }
+  });
+}
+
+it("does not dispatch a pre-aborted query after its fetch getter retires the graph", async () => {
+  let retirement: Promise<void> | undefined;
+  let armed = false;
+  let dispatched = false;
+  const controller = new AbortController();
+  controller.abort();
+  const query = {
+    kind: "query" as const,
+    name: "retirement.pre-aborted-dispatch",
+    key: () => "retirement/pre-aborted-dispatch",
+    get fetch() {
+      if (armed) retirement ??= graph.retire();
+      return async () => {
+        dispatched = true;
+        return 1;
+      };
+    },
+  };
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "retirement-pre-aborted-dispatch",
+      operations: { query },
+    }),
+  });
+  try {
+    armed = true;
+    try {
+      graph.api.query(undefined, { abortSignal: controller.signal });
+    } catch (error) {
+      expect(error).toMatchObject({ kind: "disposed" });
+    }
+    expect(retirement).toBeDefined();
+    expect(dispatched).toBe(false);
+    await retirement;
+  } finally {
+    graph.dispose();
+  }
+});
+
 for (const owner of ["query", "mutation", "stream", "projection"] as const) {
   it(`does not dispatch a ${owner} provider after its getter retires the graph`, async () => {
     let retirement: Promise<void> | undefined;
@@ -1558,7 +1646,15 @@ for (const owner of ["stream", "projection"] as const) {
   });
 }
 
-for (const phase of ["size", "iterator", "factory", "next", "pull", "entry"] as const) {
+for (const phase of [
+  "size",
+  "iterator",
+  "factory",
+  "factory-invalid",
+  "next",
+  "pull",
+  "entry",
+] as const) {
   it(`stops nested optimistic map validation when ${phase} retires the graph`, async () => {
     let retirement: Promise<void> | undefined;
     let readAfterRetirement = false;
@@ -1585,9 +1681,13 @@ for (const phase of ["size", "iterator", "factory", "next", "pull", "entry"] as 
         if (retirement !== undefined) readAfterRetirement = true;
         if (property === "size" && phase === "size") retirement ??= graph.retire();
         if (property === Symbol.iterator && phase === "iterator") retirement ??= graph.retire();
-        if (property === Symbol.iterator && ["factory", "next", "pull", "entry"].includes(phase))
+        if (
+          property === Symbol.iterator &&
+          ["factory", "factory-invalid", "next", "pull", "entry"].includes(phase)
+        )
           return () => {
-            if (phase === "factory") retirement ??= graph.retire();
+            if (phase === "factory" || phase === "factory-invalid") retirement ??= graph.retire();
+            if (phase === "factory-invalid") return 0;
             return {
               get next() {
                 if (phase === "next") retirement ??= graph.retire();
@@ -1619,7 +1719,14 @@ for (const phase of ["size", "iterator", "factory", "next", "pull", "entry"] as 
       },
     });
     try {
-      expect(() => graph.api.mutate(undefined, { optimistic })).toThrow();
+      let failure: unknown;
+      try {
+        graph.api.mutate(undefined, { optimistic });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeDefined();
+      if (phase === "factory-invalid") expect(failure).toMatchObject({ kind: "disposed" });
       expect(retirement).toBeDefined();
       expect(readAfterRetirement).toBe(false);
       expect(pulledAfterRetirement).toBe(false);
@@ -1690,6 +1797,64 @@ it("does not invoke optimistic lookup after its getter retires the graph", async
     graph.dispose();
   }
 });
+
+for (const rollbackFails of [false, true]) {
+  it(`removes an optimistic prediction when mutation signal registration throws (rollback fails: ${rollbackFails})`, async () => {
+    const registrationError = new Error("registration failed");
+    const rollbackError = new Error("rollback listener failed");
+    const controller = new AbortController();
+    let ran = false;
+    let sawPrediction = false;
+    let stop = (): void => undefined;
+    const signal = new Proxy(controller.signal, {
+      get(target, property) {
+        if (property === "addEventListener")
+          return (...args: Parameters<AbortSignal["addEventListener"]>) => {
+            target.addEventListener(...args);
+            throw registrationError;
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const query = createQuery({
+      name: "retirement.registration-prediction-query",
+      key: () => "retirement/registration-prediction",
+      fetch: async () => 1,
+    });
+    const mutate = createMutation({
+      name: "retirement.registration-prediction-mutation",
+      affects: [affects(query, { optimistic: () => 2 })],
+      run: async () => {
+        ran = true;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "retirement-registration-prediction",
+        operations: { query, mutate },
+      }),
+    });
+    try {
+      const store = graph.api.query(undefined);
+      await store.ready;
+      expect(store.value.get()).toBe(1);
+      stop = subscribe(store.value, (value) => {
+        if (value === 2) sawPrediction = true;
+        else if (value === 1 && sawPrediction && rollbackFails) throw rollbackError;
+      });
+      expect(() => graph.api.mutate(undefined, { abortSignal: signal })).toThrow(registrationError);
+      expect(ran).toBe(false);
+      expect(store.value.get()).toBe(1);
+      stop();
+      if (rollbackFails) await expect(graph.retire()).rejects.toBe(rollbackError);
+      else await graph.retire();
+    } finally {
+      stop();
+      graph.dispose();
+    }
+  });
+}
 
 for (const owner of ["query", "mutation", "stream"] as const) {
   it(`does not register a ${owner} listener after its getter retires the graph`, async () => {
