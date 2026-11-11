@@ -96,12 +96,12 @@ export function createQuery<
 >(
   input: CreateQueryInput<I, T, K> & { readonly key: Key; readonly fetch: Fetch },
 ): QueryDefinition<QueryInputFromCallbacks<I, Key, Fetch>, T, K>;
-export function createQuery<I, T, K extends string>(
-  input: CreateQueryInput<I, T, K>,
-): QueryDefinition<I, T, K>;
-export function createQuery<I, T, K extends string>(
-  input: CreateQueryInput<I, T, K>,
-): QueryDefinition<I, T, K> {
+export function createQuery<I, T, K extends string, P = never>(
+  input: CreateQueryInput<I, T, K, P>,
+): QueryDefinition<I, T, K, P>;
+export function createQuery<I, T, K extends string, P = never>(
+  input: CreateQueryInput<I, T, K, P>,
+): QueryDefinition<I, T, K, P> {
   if (!isCreateQueryInput(input)) throw new TypeError("Invalid query declaration.");
   return Object.freeze({ ...input, kind: "query" as const });
 }

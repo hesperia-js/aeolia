@@ -1,4 +1,12 @@
-import { createGraph, type Signal as RootSignal } from "aeolia";
+import {
+  createGraph,
+  observeStore as rootObserveStore,
+  observeQueryProgress as rootObserveQueryProgress,
+  type ObservationLease as RootObservationLease,
+  type QueryProgressEvent as RootQueryProgressEvent,
+  type QueryProgressObservation as RootQueryProgressObservation,
+  type Signal as RootSignal,
+} from "aeolia";
 import {
   affects,
   bindOperation,
@@ -9,6 +17,8 @@ import {
   createStream,
   defineContract,
   inspectBoundAddress,
+  observeStore,
+  observeQueryProgress,
   peekStore,
   predictionFor,
   profileEffect,
@@ -17,6 +27,13 @@ import {
   type BoundStreamValueOptions,
   type MutationBinding,
   type StoreCapture,
+  type ObservationLease,
+  type QueryFetchOptions,
+  type QueryProgressSnapshot,
+  type QueryProgressStatus,
+  type QueryProgressEvent,
+  type QueryProgressObservation,
+  type QueryStore,
   type TargetPrediction,
 } from "aeolia/contract";
 import { Signal, computed, signal } from "aeolia/reactive";
@@ -35,8 +52,14 @@ function subpathConsumer(): void {
   const graph = createGraph({
     contract: defineContract({ namespace: "subpaths", operations: { item } }),
   });
-  const ready: Promise<{ id: string }> = graph.api.item("one").ready;
-  const capture: StoreCapture<{ id: string }> = peekStore(graph.api.item("one"));
+  const handle = graph.api.item("one");
+  const ready: Promise<{ id: string }> = handle.ready;
+  const lease: ObservationLease<{ id: string }> = observeStore(graph, handle);
+  const rootLease: RootObservationLease<{ id: string }> = rootObserveStore(graph, handle);
+  const capture: StoreCapture<{ id: string }> = peekStore(handle);
+  // @ts-expect-error The contract entry preserves the observed query's value type.
+  lease.publish(1);
+  void [rootLease, capture];
   // @ts-expect-error The contract subpath retains the required input type.
   graph.api.item(1);
   void ready;
@@ -118,3 +141,42 @@ function streamSubpathConsumer(): void {
 }
 
 void streamSubpathConsumer;
+
+function queryProgressSubpathConsumer(): void {
+  type Progress = { readonly received: number };
+  const query = createQuery<string, number, string, Progress>({
+    name: "subpath-progress",
+    key: (input) => input,
+    fetch: async (_input, { reportProgress }) => {
+      reportProgress({ received: 1 });
+      return 1;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "subpath-progress", operations: { query } }),
+  });
+  const store: QueryStore<number, Progress> = graph.api.query("one");
+  const options: QueryFetchOptions<Progress> = {
+    abortSignal: new AbortController().signal,
+    graph: graph.id,
+    key: store.key,
+    reportProgress(value) {
+      void (value satisfies Progress);
+    },
+  };
+  const result: Promise<number> = query.fetch("one", options);
+  const snapshot: QueryProgressSnapshot<Progress> = store.progress.get();
+  const status: QueryProgressStatus = snapshot.status;
+  const observation: QueryProgressObservation<Progress> = observeQueryProgress(store);
+  const rootObservation: RootQueryProgressObservation<Progress> = rootObserveQueryProgress(store);
+  const captured: QueryProgressSnapshot<Progress> = observation.capture();
+  const stop = rootObservation.subscribe((event: RootQueryProgressEvent<Progress>) => {
+    const current: QueryProgressEvent<Progress> = event;
+    void current;
+  });
+  // @ts-expect-error Contract snapshots do not expose Hesperia projection policy.
+  void snapshot.project;
+  void [result, status, captured, stop];
+}
+
+void queryProgressSubpathConsumer;

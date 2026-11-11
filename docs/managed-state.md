@@ -293,6 +293,57 @@ Starting another reset rejects the earlier reset promise with an `AbortError`.
 `reset()` after graph disposal, or from a write-restricted reactive scope,
 throws a `Fault` synchronously.
 
+## Query observation and progress
+
+Use `observeStore(graph, acquiredQuery)` to acquire the sole publisher for an
+already-existing query incarnation. The query must belong to the graph and be
+active. Acquisition does not create a store, fetch data, or renew idle
+retention. A collected query cannot be revived by acquiring a lease. After
+reset, a retained query handle can acquire a lease for its new incarnation.
+
+`lease.publish(value)` replaces the committed base beneath predictions and
+clears the incarnation's shared observation issue. It does not settle or
+supersede a request, resolve `ready`, change query status or error, or count as
+query progress. A request that was already running can still commit its result
+after a publication. A publication after a successful landing preserves that
+landing's freshness age. Equality and synchronous propagation follow the
+native store rules.
+
+`lease.reject(issue, diagnostic?)` stores the caller's opaque issue without
+changing the value or request outcome. An optional diagnostic reports its
+`cause` through the graph's continuation error route. `lease.report(cause)` uses
+that route without changing the issue. Disposing a lease releases its publisher
+slot and preserves the issue for a replacement lease on the same incarnation.
+The next valid publication clears the issue. Reset, collection, and graph or
+context retirement discard it. Stale lease methods return `false` without
+effects.
+
+Reading or subscribing to `lease.issue` retains query metadata while the
+incarnation lives. It does not activate an ordinary fetch or freshness timer,
+but a live issue reader joins reset's query refresh population. `lease.active`
+is lifecycle metadata that remains false after lease retirement. Its reads and subscriptions do
+not retain the query.
+
+Each `QueryStore` exposes `progress`, a readable snapshot of the latest query
+execution. `observeQueryProgress(store)` provides a non-coalescing observation
+with `capture()` and `subscribe()`. A subscription receives one current seed,
+then every accepted progress report and lifecycle transition in FIFO order.
+The stream does not replay older events. Capturing does not retain or activate
+the query. A subscription retains the query until you unsubscribe.
+
+A snapshot identifies its execution and reports whether it has a progress
+value, the latest value, its `reportRevision`, status, and original error or
+interruption reason. `hasValue` distinguishes no report from a report whose
+value is `undefined`. Status is `idle`, `active`, `complete`, `interrupted`, or
+`failed`. Progress reports describe work inside the query callback. They do
+not commit the query value or settle its request. `observeStore().publish()`
+also does not create a progress report.
+
+`ObservationPublishOptions.transfer` labels the exact observed base revision.
+The default `eligible` value keeps it eligible for supported snapshots. Use
+`exclude` only for a native fallback whose transfer policy has been explicitly
+qualified. This label does not describe later writes or stream values.
+
 `snapshot(graph)` serializes selected committed values, not executable graph
 machinery. Reconstruction therefore means creating another graph with the same
 contract and passing the snapshot to `adopt(target, state)`. Requests, timers,

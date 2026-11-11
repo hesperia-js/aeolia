@@ -2,6 +2,8 @@ import { __internal as reactiveInternal } from "../reactive.ts";
 import { AbortError, assertGraphOpen, reportContinuationError } from "./faults.ts";
 import { endStream, touch, updateCollectionCandidate } from "./collection.ts";
 import { nextGeneration } from "./store-state.ts";
+import { retireObservation } from "./observation-state.ts";
+import { interruptQueryProgress } from "./query-progress.ts";
 import { nextValueRevision } from "./identity.ts";
 import { callerForSource, startQueryRequest } from "./query-request.ts";
 import { openStream } from "./stream.ts";
@@ -48,6 +50,7 @@ function detachRequest<C extends Contract>(
   if (request.settled) return undefined;
   request.superseded = true;
   request.settled = true;
+  interruptQueryProgress(runtime, request, reason, { authorityChanged: true });
   const failures: unknown[] = [];
   for (const remove of [request.removeCallerAbort, request.removeRequestAbort]) {
     if (remove === undefined) continue;
@@ -351,6 +354,10 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
       },
     };
     state.resetOperation = operation;
+    for (const runtime of state.stores.values()) {
+      if (!currentOperation(state, operation)) break;
+      retireObservation(runtime);
+    }
     previous?.reject(new AbortError("A newer graph reset superseded this reset."));
 
     const oldControllers: AbortController[] = [];

@@ -1,5 +1,6 @@
 import type {
   QueryDefinition,
+  QueryProgressObservation,
   QueryStore,
   StoreOptions,
   StoreStatus,
@@ -33,6 +34,7 @@ import { admitStore, getOrCreateStore } from "./store.ts";
 import { observeStoreReadable } from "./store.ts";
 import { configureKeyedValue, nextGeneration } from "./store-state.ts";
 import { startQuery, armStoreTimer } from "./query-request.ts";
+import { queryProgressObservation, queryProgressReadable } from "./query-progress.ts";
 import { asWindow, createCaller, queryIsStale, writeCallerStatus } from "./status.ts";
 import { storeKey } from "./identity.ts";
 import { touch } from "./collection.ts";
@@ -114,7 +116,7 @@ export function ready<T>(runtime: StoreRuntime<T>, caller: QueryCaller<T>): Prom
 
 export function makeQueryStore<T>(
   state: GraphRuntimeState<any>,
-  query: QueryDefinition<any, T, any>,
+  query: QueryDefinition<any, T, any, any>,
   input: unknown,
   options: StoreOptions<T> | undefined,
   binding?: QueryBindingRuntime,
@@ -231,6 +233,11 @@ export function makeQueryStore<T>(
         enumerable: true,
         get: () => ready(runtime, caller),
       });
+      Object.defineProperty(queryStore, "progress", {
+        configurable: false,
+        enumerable: true,
+        get: () => queryProgressReadable<T, never>(runtime),
+      });
       Object.freeze(queryStore);
       queryRuntimeByStore.set(queryStore, runtime as StoreRuntime<unknown>);
       runtimeByStore.set(queryStore, runtime as StoreRuntime<unknown>);
@@ -251,4 +258,24 @@ export function makeQueryStore<T>(
   } finally {
     finishPhysicalWork(physical);
   }
+}
+
+/**
+ * Observe the authoritative progress of an already acquired query store.
+ *
+ * `capture()` reads plain owner state without reactive tracking. `subscribe()`
+ * gives one current seed and then every newer accepted report and lifecycle
+ * event in FIFO order, even when `store.progress` coalesces several writes in
+ * one reactive pass. Observation does not start work, touch query freshness, or
+ * make the observer an owner of request cancellation.
+ *
+ * @param store - Genuine query-store wrapper returned by an Aeolia graph.
+ * @returns A non-coalescing current capture and ordered event subscription.
+ * @throws TypeError if the value is not an Aeolia query store.
+ * @throws Fault if the store or graph is disposed.
+ */
+export function observeQueryProgress<T, P>(store: QueryStore<T, P>): QueryProgressObservation<P> {
+  const runtime = queryRuntimeByStore.get(store);
+  if (runtime === undefined) throw new TypeError("The value is not an Aeolia query store");
+  return queryProgressObservation<unknown, P>(runtime);
 }

@@ -31,6 +31,9 @@ import {
   createStream,
   queryOptions,
   subscribe,
+  observeQueryProgress,
+  observeStore,
+  type ObservationLease,
   type AffectSpec,
   type CreateMutationInput,
   type CreateQueryInput,
@@ -38,6 +41,11 @@ import {
   type CreateStreamInput,
   type DefineContractInput,
   type FetchOptions,
+  type QueryFetchOptions,
+  type QueryProgressEvent,
+  type QueryProgressObservation,
+  type QueryProgressSnapshot,
+  type QueryProgressStatus,
   type Observer,
   withoutWrites,
 } from "aeolia";
@@ -53,6 +61,15 @@ const query = createQuery({
   name: "items.get",
   key: (input: { readonly id: string }) => `items/${input.id}`,
   fetch: backend.respond<{ readonly id: string }, { readonly id: string }>("items.get"),
+});
+type Progress = { readonly received: number };
+const progressQuery = createQuery<string, number, string, Progress>({
+  name: "items.progress",
+  key: (input) => `progress/${input}`,
+  fetch: async (_input, { reportProgress }) => {
+    reportProgress({ received: 1 });
+    return 1;
+  },
 });
 const mutation = createMutation({
   name: "items.save",
@@ -219,6 +236,35 @@ function typecheckOnly(): void {
     key: queried.key,
   };
 
+  const progressGraph = createGraph({
+    contract: defineContract({ namespace: "progress-types", operations: { progressQuery } }),
+  });
+  const progressStore = progressGraph.api.progressQuery("one");
+  const progressOptions: QueryFetchOptions<Progress> = {
+    abortSignal: new AbortController().signal,
+    graph: progressGraph.id,
+    key: progressStore.key,
+    reportProgress(value) {
+      void (value satisfies Progress);
+    },
+  };
+  progressOptions.reportProgress({ received: 2 });
+  // @ts-expect-error Progress reporters retain their declared value type.
+  progressOptions.reportProgress({ received: "two" });
+  // @ts-expect-error Finite queries do not declare a progress value type.
+  fetchOptions.reportProgress?.("undeclared");
+  const progressStatus: QueryProgressStatus = progressStore.progress.get().status;
+  const progressSnapshot: QueryProgressSnapshot<Progress> = progressStore.progress.get();
+  const progressObservation: QueryProgressObservation<Progress> =
+    observeQueryProgress(progressStore);
+  const progressCapture: QueryProgressSnapshot<Progress> = progressObservation.capture();
+  const stopProgress = progressObservation.subscribe((event: QueryProgressEvent<Progress>) => {
+    const snapshot: QueryProgressSnapshot<Progress> = event.snapshot;
+    void snapshot;
+  });
+  // @ts-expect-error Native progress snapshots do not expose Hesperia projection policy.
+  void progressStore.progress.get().project;
+
   void declared.value.get();
   void queried.status.get();
   void inferredQuery.value.get();
@@ -238,6 +284,7 @@ function typecheckOnly(): void {
   });
   stopStreamValues();
   void queried.revalidate(fetchOptions);
+  void [progressStatus, progressSnapshot, progressCapture, stopProgress];
   void changed;
   void streamed.pending.get();
   void addressed.value.get();
@@ -294,6 +341,12 @@ function bindingTypesOnly(): void {
     value: { initial: { label: "loading" }, equals: (left, right) => left.label === right.label },
   });
   const handle: QueryStore<{ label: string }> = binding.member({ id: "one" });
+  const lease: ObservationLease<{ label: string }> = observeStore(graph, handle);
+  lease.publish({ label: "observed" }, { transfer: "eligible" });
+  // @ts-expect-error Observation values retain the completed profile's type.
+  lease.publish({ id: "raw" });
+  // @ts-expect-error Transfer provenance has an explicit finite literal domain.
+  lease.publish({ label: "observed" }, { transfer: "maybe" });
   // @ts-expect-error Available metadata is read-only.
   handle.available.set(true);
   const capture = peekStore(handle);

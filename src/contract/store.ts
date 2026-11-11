@@ -291,6 +291,7 @@ export function makeStore<T>(
     collectionIndex: -1,
     liveReadableCount: 0,
     metadataReadableCount: 0,
+    progressReadableCount: 0,
     readyWaiterCount: 0,
     valueLive: false,
     dropped: false,

@@ -18,6 +18,13 @@ import {
 } from "./status.ts";
 import { interact, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { issue, nextGeneration, recordLanding, retirePredictions } from "./store-state.ts";
+import {
+  beginQueryProgress,
+  completeQueryProgress,
+  failQueryProgress,
+  interruptQueryProgress,
+  reportQueryProgress,
+} from "./query-progress.ts";
 
 import { beginBindingAddress, changeBoundAddress, endBindingAddress } from "./registry.ts";
 import {
@@ -73,6 +80,21 @@ function reportRequestOutcome(
   request.resolveOutcome(outcome);
 }
 
+function mayPublishSettledProgress<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
+  const state = runtime.graph.__runtime;
+  return (
+    request.settled &&
+    runtime.activeRequest === request &&
+    !request.superseded &&
+    request.generation === runtime.generation &&
+    request.resetEpoch === state.resetEpoch &&
+    request.incarnation === runtime.incarnation &&
+    !runtime.disposed &&
+    !state.disposed &&
+    runtime.binding?.context.disposed !== true
+  );
+}
+
 export function settleQuerySuccess<T>(
   runtime: StoreRuntime<T>,
   request: QueryRequest,
@@ -80,7 +102,17 @@ export function settleQuerySuccess<T>(
 ): void {
   reportRequestOutcome(request, { ok: true });
   const state = runtime.graph.__runtime;
-  const current = finishRequest(runtime, request);
+  let current: boolean;
+  try {
+    current = finishRequest(runtime, request);
+  } catch (finishError) {
+    try {
+      if (mayPublishSettledProgress(runtime, request)) completeQueryProgress(runtime, request);
+    } catch (progressError) {
+      reportContinuationError(state, progressError);
+    }
+    throw finishError;
+  }
   const wasActive = runtime.activeRequest === request;
   if (wasActive) runtime.activeRequest = undefined;
   if (!current || runtime.disposed || !wasActive) {
@@ -97,6 +129,7 @@ export function settleQuerySuccess<T>(
     if (!runtime.disposed && request.resetEpoch === state.resetEpoch)
       reportContinuationError(state, error);
   }
+  completeQueryProgress(runtime, request);
   if (!runtime.disposed && request.resetEpoch === state.resetEpoch) {
     try {
       armStoreTimer(runtime);
@@ -114,7 +147,20 @@ export function settleQueryFailure<T>(
 ): void {
   reportRequestOutcome(request, { ok: false, error: reason });
   const state = runtime.graph.__runtime;
-  const current = finishRequest(runtime, request);
+  let current: boolean;
+  try {
+    current = finishRequest(runtime, request);
+  } catch (finishError) {
+    try {
+      if (mayPublishSettledProgress(runtime, request)) {
+        if (request.controller.signal.aborted) interruptQueryProgress(runtime, request, reason);
+        else failQueryProgress(runtime, request, reason);
+      }
+    } catch (progressError) {
+      reportContinuationError(state, progressError);
+    }
+    throw finishError;
+  }
   const wasActive = runtime.activeRequest === request;
   if (wasActive) runtime.activeRequest = undefined;
   if (!current || runtime.disposed || !wasActive) {
@@ -127,6 +173,8 @@ export function settleQueryFailure<T>(
       runtime.failing = true;
       runtime.invalidated = true;
       runtime.errorCell.set(reason);
+      if (request.controller.signal.aborted) interruptQueryProgress(runtime, request, reason);
+      else failQueryProgress(runtime, request, reason);
       touch(runtime);
       writeAllStatuses(runtime);
     });
@@ -214,8 +262,10 @@ export function startQueryRequest<T>(
       runtime.recoveryDisarmed = false;
     }
     if (runtime.activeRequest != null && !runtime.activeRequest.settled) {
-      runtime.activeRequest.superseded = true;
-      runtime.activeRequest.controller.abort();
+      const predecessor = runtime.activeRequest;
+      predecessor.superseded = true;
+      predecessor.controller.abort();
+      interruptQueryProgress(runtime, predecessor, predecessor.controller.signal.reason);
       if (state.resetEpoch !== resetEpoch || state.disposed) return undefined;
       if (runtime.binding !== undefined) {
         assertStoreOpen(runtime);
@@ -282,6 +332,8 @@ export function startQueryRequest<T>(
       controller,
       generation,
       resetEpoch,
+      incarnation,
+      progressIdentity: Object.freeze({}),
       automaticRecovery,
       predictionIds: reactiveInternal
         .signalValue(runtime.predictionStack)
@@ -316,6 +368,7 @@ export function startQueryRequest<T>(
     let setupFailed = false;
     try {
       reactiveInternal.batch(() => {
+        beginQueryProgress(runtime, request);
         runtime.failing = false;
         runtime.errorCell.set(undefined);
         touch(runtime);
@@ -391,6 +444,7 @@ export function startQueryRequest<T>(
         abortSignal: controller.signal,
         graph: state.graph.id,
         key: runtime.key,
+        reportProgress: (value: unknown) => reportQueryProgress(runtime, request, value),
       };
       const settledBeforeFetchRead = request.settled;
       const activeBeforeFetchRead = runtime.activeRequest;

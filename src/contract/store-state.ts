@@ -29,12 +29,23 @@ export function nextGeneration(current: number, minimum = current): Generation {
 }
 
 export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation): Generation {
-  if (runtime.binding === undefined) {
-    runtime.generation = Math.max(runtime.generation, minimum) + 1;
-    return runtime.generation as Generation;
-  }
-  const generation = nextGeneration(runtime.generation, minimum);
+  const previousGeneration = runtime.generation;
+  const owner = runtime.queryProgressAuthority;
+  const activeProgressRequest = owner?.current.status === "active" ? owner.request : undefined;
+  const request = activeProgressRequest ?? runtime.activeRequest;
+  const generation =
+    runtime.binding === undefined
+      ? ((Math.max(runtime.generation, minimum) + 1) as Generation)
+      : nextGeneration(runtime.generation, minimum);
   runtime.generation = generation;
+  if (
+    request !== undefined &&
+    !request.superseded &&
+    request.generation === previousGeneration &&
+    owner?.current.execution === request.progressIdentity &&
+    owner.current.status === "active"
+  )
+    runtime.queryProgressAuthorityChange?.(request);
   return generation;
 }
 
@@ -47,6 +58,17 @@ export function recordLanding<T>(
   assertStoreOpen(runtime);
   const revision = nextValueRevision(runtime.valueRevision);
   if (runtime.binding === undefined) {
+    const state = runtime.graph.__runtime;
+    const epoch = state.resetEpoch;
+    const generation = runtime.generation;
+    const incarnation = runtime.incarnation;
+    const current = (): boolean =>
+      !state.disposed &&
+      !runtime.disposed &&
+      state.resetEpoch === epoch &&
+      runtime.generation === generation &&
+      runtime.incarnation === incarnation &&
+      runtime.valueRevision === revision;
     runtime.valueRevision = revision;
     runtime.lastLandingAt = Date.now();
     runtime.failing = false;
@@ -59,10 +81,17 @@ export function recordLanding<T>(
     } catch (error) {
       errors.push(error);
     }
+    let landed = false;
     try {
-      runtime.committed.set(value);
+      landed = reactiveInternal.guardedWrite(runtime.committed, value, current, () => undefined);
     } catch (error) {
       errors.push(error);
+    }
+    if (!landed && errors.length === 0) return;
+    if (!current()) {
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, "Store landing propagation failed");
+      return;
     }
     runtime.baseAvailable = true;
     runtime.hasAcceptedLanding = true;
@@ -135,7 +164,39 @@ export function recordLanding<T>(
   }
 }
 
-export type KeyedDefinition<T> = QueryDefinition<any, T, any> | StreamDefinition<any, T, any>;
+export function publishObservation<T>(
+  runtime: StoreRuntime<T>,
+  value: T,
+  eligible: boolean,
+  current: () => boolean,
+): boolean {
+  const before = runtime.valueRevision;
+  const next = nextValueRevision(before);
+  const addressWrite = beginBindingAddress(runtime.binding, String(runtime.key));
+  try {
+    let committed = false;
+    reactiveInternal.batch(() => {
+      reactiveInternal.guardedWrite(
+        runtime.committed,
+        value,
+        () => current() && runtime.valueRevision === before,
+        () => {
+          runtime.valueRevision = next;
+          runtime.baseAvailable = true;
+          runtime.transferEligible = eligible;
+          runtime.presence.set(true);
+          runtime.observation!.issue.set(undefined);
+          committed = true;
+        },
+      );
+    });
+    return committed;
+  } finally {
+    endBindingAddress(runtime.binding, String(runtime.key), addressWrite);
+  }
+}
+
+export type KeyedDefinition<T> = QueryDefinition<any, T, any, any> | StreamDefinition<any, T, any>;
 
 export function optionConflict(
   runtime: StoreRuntime<unknown>,

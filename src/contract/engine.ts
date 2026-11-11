@@ -26,6 +26,8 @@ import {
 import { validateContract } from "./validation.ts";
 import { isObject } from "../utils.ts";
 import { nextValueRevision, storeKey } from "./identity.ts";
+import { retireObservation } from "./observation-state.ts";
+import { retireQueryProgress } from "./query-progress.ts";
 import { Fault, __registerFaultChannel, __unregisterFaultChannel } from "../fault.ts";
 import type { Unsubscribe } from "../fault.ts";
 import { __internal as reactiveInternal, computed, signal } from "../reactive.ts";
@@ -151,7 +153,7 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
       api[property] = () => getOrCreateStore(state, storeKey(value.name), value).store;
     } else if (isOperationDefinition(value)) {
       if (value.kind === "query") {
-        state.queryDefinitions.add(value as QueryDefinition<any, any, any>);
+        state.queryDefinitions.add(value as QueryDefinition<any, any, any, any>);
         api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) =>
           graphAcquisition(state, () => {
             const [input, options] = args;
@@ -160,7 +162,7 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
             );
             return makeQueryStore(
               state,
-              value as QueryDefinition<unknown, unknown, any>,
+              value as QueryDefinition<unknown, unknown, any, any>,
               call.input,
               call.options,
             );
@@ -379,6 +381,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   for (const controller of controllers) state.activeControllers.delete(controller);
   state.bindingContexts.delete(context);
   for (const runtime of stores) {
+    retireQueryProgress(runtime);
     runtime.disposed = true;
     runtime.incarnation = undefined;
     state.stores.delete(runtime.identity);
@@ -395,7 +398,10 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   };
   attempt(() =>
     reactiveInternal.batch(() => {
-      for (const [index, runtime] of stores.entries()) runtime.valueRevision = revisions[index]!;
+      for (const [index, runtime] of stores.entries()) {
+        runtime.valueRevision = revisions[index]!;
+        retireObservation(runtime);
+      }
       context.activeCell.set(false);
     }),
   );
@@ -448,6 +454,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
 function* disposalSteps<C extends Contract>(
   state: GraphRuntimeState<C>,
 ): Generator<() => void, void, void> {
+  for (const runtime of state.stores.values()) yield () => retireObservation(runtime);
   for (const context of Array.from(state.bindingContexts)) {
     yield () => {
       try {
@@ -498,6 +505,7 @@ function* disposalSteps<C extends Contract>(
       };
     }
     yield () => runtime.presence.set(false);
+    retireQueryProgress(runtime);
     runtime.disposed = true;
     runtime.collectionIndex = -1;
     yield () => {

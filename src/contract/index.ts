@@ -11,6 +11,9 @@ export {
 export { project } from "./projection.ts";
 export { queryOptions } from "./query-options.ts";
 export { peekStore } from "./store.ts";
+export { observeStore } from "./observation.ts";
+export { observeQueryProgress } from "./query.ts";
+export type { ObservationLease, ObservationPublishOptions } from "./observation.ts";
 export { bindOperation, createBindingContext } from "./query-binding.ts";
 export type {
   BindingContext,
@@ -43,6 +46,11 @@ export type {
   DeclaredStores,
   DefineContractInput,
   FetchOptions,
+  QueryFetchOptions,
+  QueryProgressEvent,
+  QueryProgressObservation,
+  QueryProgressSnapshot,
+  QueryProgressStatus,
   Generation,
   Graph,
   GraphId,

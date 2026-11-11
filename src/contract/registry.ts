@@ -97,7 +97,7 @@ export function isQueryTargetCurrent(target: QueryTargetRuntime): boolean {
   );
 }
 
-export function captureQueryTarget<Q extends QueryDefinition<any, any, any>, V>(
+export function captureQueryTarget<Q extends QueryDefinition<any, any, any, any>, V>(
   binding: QueryBindingRuntime,
   runtime: StoreRuntime<unknown>,
 ): TypedTarget<Q, V> | undefined {
@@ -124,7 +124,7 @@ export function captureQueryTarget<Q extends QueryDefinition<any, any, any>, V>(
 
 export function captureBoundProducer<
   M extends MutationDefinition<any, any>,
-  Q extends QueryDefinition<any, any, any>,
+  Q extends QueryDefinition<any, any, any, any>,
   V,
 >(
   mutation: M,

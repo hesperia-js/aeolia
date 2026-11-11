@@ -5,6 +5,7 @@ import { assertGraphOpen, reportContinuationError } from "./faults.ts";
 import { writeAllStatuses } from "./status.ts";
 import type { StoreRuntime, StreamSession } from "./runtime.ts";
 import { publishStreamEvent } from "./stream-events.ts";
+import { retireObservation } from "./observation-state.ts";
 import { nextValueRevision } from "./identity.ts";
 import { Fault } from "../fault.ts";
 import type { StreamDetachment, StreamTerminalCapture } from "./stream-binding.ts";
@@ -107,6 +108,7 @@ export function isLive<T>(runtime: StoreRuntime<T>): boolean {
   }
   return (
     runtime.liveReadableCount > 0 ||
+    runtime.progressReadableCount > 0 ||
     runtime.readyWaiterCount > 0 ||
     (runtime.stream?.listeners.size ?? 0) > 0
   );
@@ -504,12 +506,16 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
       incarnation = undefined;
       runtime.valueRevision = revision;
       valueRevision = revision;
+      retireObservation(runtime);
+      if (!current()) return;
       runtime.source = undefined;
       runtime.streamSource = undefined;
       runtime.onReadableActivation = undefined;
       runtime.refreshOnActivation = false;
       runtime.baseAvailable = false;
       runtime.hasAcceptedLanding = false;
+      runtime.queryProgressClear?.();
+      if (!current()) return;
       runtime.transferEligible = true;
       runtime.failing = false;
       runtime.recoveryDisarmed = false;

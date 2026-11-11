@@ -94,7 +94,7 @@ export function makePending(status: Readable<StoreStatus>): Readable<boolean> {
 
 export function createCaller<T>(
   runtime: StoreRuntime<T>,
-  query: QueryDefinition<any, T, any>,
+  query: QueryDefinition<any, T, any, any>,
   input: unknown,
   windowMs: number,
   abortSignal?: AbortSignal,
