@@ -1739,6 +1739,88 @@ for (const phase of [
   });
 }
 
+for (const trigger of ["retire", "throw", "invalid-entry"] as const) {
+  for (const closeFailureAt of ["getter", "call"] as const) {
+    for (const cleanupCause of [new Error("iterator close failed"), undefined]) {
+      it(`retains ${closeFailureAt} cleanup failure ${String(cleanupCause)} after ${trigger}`, async () => {
+        const semanticCause = new Error("iterator next failed");
+        let retirement: Promise<void> | undefined;
+        let closeReads = 0;
+        let closeCalls = 0;
+        let pulls = 0;
+        let dispatches = 0;
+        const mutate = createMutation({
+          name: "retirement.optimistic-close",
+          affects: [],
+          run: async () => {
+            dispatches += 1;
+          },
+        });
+        const graph = createGraph({
+          contract: defineContract({
+            namespace: "retirement-optimistic-close",
+            operations: { mutate },
+          }),
+        });
+        const optimistic = new Proxy(new Map(), {
+          get(target, property) {
+            if (property === Symbol.iterator)
+              return () => ({
+                get next() {
+                  if (trigger === "retire") {
+                    retirement = graph.retire();
+                    void retirement.catch(() => undefined);
+                  }
+                  if (trigger === "throw") throw semanticCause;
+                  return () => {
+                    pulls += 1;
+                    return { done: false, value: ["invalid"] };
+                  };
+                },
+                get return() {
+                  closeReads += 1;
+                  if (closeFailureAt === "getter") throw cleanupCause;
+                  return () => {
+                    closeCalls += 1;
+                    throw cleanupCause;
+                  };
+                },
+              });
+            const value: unknown = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        try {
+          let semanticFailure: unknown;
+          let semanticThrew = false;
+          try {
+            void graph.api.mutate(undefined, { optimistic });
+          } catch (error) {
+            semanticThrew = true;
+            semanticFailure = error;
+          }
+          expect(semanticThrew).toBe(true);
+          if (trigger === "retire") expect(semanticFailure).toMatchObject({ kind: "disposed" });
+          if (trigger === "throw") expect(semanticFailure).toBe(semanticCause);
+          if (trigger === "invalid-entry") expect(semanticFailure).toBeInstanceOf(TypeError);
+          expect(pulls).toBe(trigger === "invalid-entry" ? 1 : 0);
+          expect(dispatches).toBe(0);
+          expect(closeReads).toBe(1);
+          expect(closeCalls).toBe(closeFailureAt === "call" ? 1 : 0);
+          const result = await (retirement ?? graph.retire()).then(
+            () => ({ kind: "fulfilled" as const }),
+            (cause: unknown) => ({ kind: "rejected" as const, cause }),
+          );
+          expect(result.kind).toBe("rejected");
+          if (result.kind === "rejected") expect(result.cause).toBe(cleanupCause);
+        } finally {
+          graph.dispose();
+        }
+      });
+    }
+  }
+}
+
 it("does not invoke optimistic lookup after its getter retires the graph", async () => {
   let retirement: Promise<void> | undefined;
   let validationFinished = false;
