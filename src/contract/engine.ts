@@ -48,7 +48,16 @@ import { armStoreTimer } from "./query-request.ts";
 import { hasQueryOptionsBrand } from "./query-options.ts";
 import { issue } from "./store-state.ts";
 import { writeAllStatuses } from "./status.ts";
-import { resetGraph } from "./reset.ts";
+import { drainResetCleanups, resetGraph } from "./reset.ts";
+import {
+  beginPhysicalWork,
+  createRetirementOwner,
+  finishPhysicalWork,
+  physicalCleanup,
+  recordCleanupFailure,
+  retireOwner,
+} from "./retirement.ts";
+import type { PhysicalWork } from "./retirement.ts";
 
 /** @internal Default keyed-store retention period, in milliseconds. */
 export const DEFAULT_IDLE_MS = 300_000;
@@ -101,6 +110,16 @@ function adoptRealmEntry(
   armStoreTimer(runtime);
 }
 
+function graphAcquisition<T>(state: GraphRuntimeState<any>, action: () => T): T {
+  assertGraphOpen(state);
+  const work = beginPhysicalWork(state.retirement, "acquisition");
+  try {
+    return action();
+  } finally {
+    finishPhysicalWork(work);
+  }
+}
+
 function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: OperationTree): unknown {
   const api: Record<string, unknown> = {};
   for (const [property, value] of Object.entries(tree)) {
@@ -108,30 +127,42 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
       api[property] = () => getOrCreateStore(state, storeKey(value.name), value).store;
     } else if (isOperationDefinition(value)) {
       if (value.kind === "query")
-        api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) => {
-          const [input, options] = args;
-          const call = normalizeQueryCall(input, options, args.length > 1);
-          return makeQueryStore(
-            state,
-            value as QueryDefinition<unknown, unknown, any>,
-            call.input,
-            call.options,
-          );
-        };
+        api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) =>
+          graphAcquisition(state, () => {
+            const [input, options] = args;
+            const call = normalizeQueryCall(input, options, args.length > 1, () =>
+              assertGraphOpen(state),
+            );
+            return makeQueryStore(
+              state,
+              value as QueryDefinition<unknown, unknown, any>,
+              call.input,
+              call.options,
+            );
+          });
       else if (value.kind === "mutation")
-        api[property] = (...args: [input?: unknown, options?: MutationOptions]) => {
-          const [input, options] = args;
-          const call = normalizeMutationCall(input, options, args.length > 1);
-          return runMutation(
-            state,
-            value as MutationDefinition<unknown, unknown>,
-            call.input,
-            call.options,
-          );
-        };
+        api[property] = (...args: [input?: unknown, options?: MutationOptions]) =>
+          graphAcquisition(state, () => {
+            const [input, options] = args;
+            const call = normalizeMutationCall(
+              input,
+              options,
+              args.length > 1,
+              () => assertGraphOpen(state),
+              (cleanup) => physicalCleanup(state.retirement, cleanup),
+            );
+            return runMutation(
+              state,
+              value as MutationDefinition<unknown, unknown>,
+              call.input,
+              call.options,
+            );
+          });
       else
         api[property] = (input: unknown, options?: ValueOptions<unknown>) =>
-          streamMember(state, value as StreamDefinition<unknown, unknown, any>, input, options);
+          graphAcquisition(state, () =>
+            streamMember(state, value as StreamDefinition<unknown, unknown, any>, input, options),
+          );
     } else if (value !== null && typeof value === "object")
       api[property] = buildApi(state, value as OperationTree);
   }
@@ -142,6 +173,7 @@ function normalizeQueryCall(
   input: unknown,
   options: StoreOptions<unknown> | undefined,
   hasSecondArgument: boolean,
+  afterRead: () => void,
 ): {
   readonly input: unknown;
   readonly options?: StoreOptions<unknown>;
@@ -161,7 +193,7 @@ function normalizeQueryCall(
     callOptions = input;
   }
   if (callOptions === undefined) return { input: callInput };
-  if (!isStoreOptions(callOptions)) throw new TypeError("Invalid query options.");
+  if (!isStoreOptions(callOptions, afterRead)) throw new TypeError("Invalid query options.");
   return { input: callInput, options: callOptions };
 }
 
@@ -169,6 +201,8 @@ function normalizeMutationCall(
   input: unknown,
   options: MutationOptions | undefined,
   hasSecondArgument: boolean,
+  afterRead: () => void,
+  cleanup: (action: () => void) => void,
 ): {
   readonly input: unknown;
   readonly options?: MutationOptions;
@@ -188,7 +222,8 @@ function normalizeMutationCall(
     callOptions = input;
   }
   if (callOptions === undefined) return { input: callInput };
-  if (!isMutationOptions(callOptions)) throw new TypeError("Invalid mutation options.");
+  if (!isMutationOptions(callOptions, afterRead, cleanup))
+    throw new TypeError("Invalid mutation options.");
   return { input: callInput, options: callOptions };
 }
 
@@ -243,53 +278,135 @@ function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?:
     throw new AggregateError(failures, "Several graph cancellation operations failed");
 }
 
-function disposeGraph<C extends Contract>(state: GraphRuntimeState<C>): void {
-  if (state.disposed) return;
-  state.disposed = true;
-  state.resetOperation?.reject(new Fault("disposed", []));
-  state.resetOperation?.abort(new Fault("disposed", []));
+function* disposalSteps<C extends Contract>(
+  state: GraphRuntimeState<C>,
+): Generator<() => void, void, void> {
+  if (state.resetOperation !== undefined) {
+    const operation = state.resetOperation;
+    yield () => operation.reject(new Fault("disposed", []));
+    yield () => operation.abort(new Fault("disposed", []));
+  }
   state.resetOperation = undefined;
-  state.stopAbort?.();
+  if (state.stopAbort !== undefined) yield () => state.stopAbort?.();
   state.stopAbort = undefined;
-  if (state.collectionTimer != null) clearTimeout(state.collectionTimer);
+  const collectionTimer = state.collectionTimer;
+  if (collectionTimer != null) yield () => clearTimeout(collectionTimer);
   state.collectionTimer = undefined;
   state.collectionHeap.length = 0;
   for (const projection of Array.from(state.projections)) {
-    try {
-      projection.dispose();
-    } catch (error) {
-      reportContinuationError(state, error);
-    }
+    yield () => {
+      try {
+        projection.dispose();
+      } catch (error) {
+        reportContinuationError(state, error);
+      }
+    };
   }
   state.projections.clear();
   for (const runtime of state.stores.values()) {
-    if (runtime.timer != null) clearTimeout(runtime.timer);
+    const timer = runtime.timer;
+    if (timer != null) yield () => clearTimeout(timer);
     runtime.timer = undefined;
-    for (const stop of runtime.livenessStops) stop();
-    for (const stop of runtime.readStops) stop();
+    for (const stop of runtime.livenessStops) yield stop;
+    for (const stop of runtime.readStops) yield stop;
     runtime.livenessStops.length = 0;
     runtime.readStops.length = 0;
     const stream = runtime.stream;
     if (stream != null && !stream.ended) {
+      yield () => {
+        try {
+          endStream(runtime, stream, "closed");
+        } catch (error) {
+          reportContinuationError(state, error);
+        }
+      };
+    }
+    yield () => runtime.presence.set(false);
+    runtime.disposed = true;
+    runtime.collectionIndex = -1;
+    yield () => {
       try {
-        endStream(runtime, stream, "closed");
+        physicalCleanup(state.retirement, () => runtime.lifecycle.update((value) => value + 1));
       } catch (error) {
         reportContinuationError(state, error);
       }
+    };
+  }
+  for (const controller of Array.from(state.activeControllers)) yield () => controller.abort();
+  state.activeControllers.clear();
+  yield () => __unregisterFaultChannel(state.graph);
+  state.faultObservers.clear();
+}
+
+function disposeGraph<C extends Contract>(
+  state: GraphRuntimeState<C>,
+  physical?: PhysicalWork,
+): void {
+  if (physical === undefined && state.disposed) return;
+  let progress = state.disposal;
+  if (progress?.complete) return;
+  if (progress?.active) {
+    if (physical !== undefined && progress.resumeWork === undefined)
+      progress.resumeWork = beginPhysicalWork(state.retirement, "cleanup");
+    return;
+  }
+  const work = physical ?? beginPhysicalWork(state.retirement, "cleanup");
+  try {
+    if (progress === undefined) {
+      progress = { steps: disposalSteps(state), active: false, complete: false };
+      state.disposal = progress;
+      state.disposed = true;
     }
-    runtime.presence.set(false);
-    runtime.disposed = true;
-    runtime.collectionIndex = -1;
+    progress.active = true;
+    runDisposal(state, progress, physical !== undefined);
+  } catch (cause) {
+    recordCleanupFailure(work, cause);
+    throw cause;
+  } finally {
+    if (progress !== undefined) {
+      progress.active = false;
+      const resume = progress.resumeWork;
+      if (resume !== undefined) {
+        progress.resumeWork = undefined;
+        if (!progress.complete) {
+          progress.active = true;
+          try {
+            runDisposal(state, progress, true);
+          } catch (cause) {
+            recordCleanupFailure(resume, cause);
+            reportContinuationError(state, cause);
+          } finally {
+            progress.active = false;
+          }
+        }
+        finishPhysicalWork(resume);
+      }
+    }
+    finishPhysicalWork(work);
+  }
+}
+
+function runDisposal<C extends Contract>(
+  state: GraphRuntimeState<C>,
+  progress: NonNullable<GraphRuntimeState<C>["disposal"]>,
+  retiring: boolean,
+): void {
+  while (!progress.complete) {
+    const step = progress.steps.next();
+    if (step.done) {
+      progress.complete = true;
+      break;
+    }
+    if (!retiring) {
+      step.value();
+      continue;
+    }
     try {
-      runtime.lifecycle.update((value) => value + 1);
-    } catch (error) {
-      reportContinuationError(state, error);
+      physicalCleanup(state.retirement, step.value);
+    } catch (cause) {
+      reportContinuationError(state, cause);
     }
   }
-  for (const controller of Array.from(state.activeControllers)) controller.abort();
-  state.activeControllers.clear();
-  __unregisterFaultChannel(state.graph);
-  state.faultObservers.clear();
 }
 
 /**
@@ -324,6 +441,8 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     declaredStores: new Map(),
     faultObservers: new Set(),
     activeControllers: new Set(),
+    retirement: createRetirementOwner(),
+    resetCleanupScopes: new Set(),
     projections: new Set(),
     collectionHeap: [],
     sweepScheduled: false,
@@ -361,19 +480,50 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     store: graphStore,
     at: graphAt,
     dispose: () => disposeGraph(state),
+    retire: () => {
+      if (state.retirement.promise !== undefined) return state.retirement.promise;
+      if (!state.disposed) reactiveInternal.assertWritesAllowed(state.resetVersion);
+      return retireOwner(state.retirement, (work) => {
+        try {
+          disposeGraph(state, work);
+        } finally {
+          if (state.disposed) drainResetCleanups(state);
+        }
+      });
+    },
   });
   graphRuntimeByGraph.set(graph, state);
   __registerFaultChannel(graph, onFault);
-  const abortSignal = options.abortSignal;
-  if (abortSignal != null) {
-    if (abortSignal.aborted) disposeGraph(state);
-    else {
-      const abort = (): void => disposeGraph(state);
-      abortSignal.addEventListener("abort", abort, { once: true });
-      state.stopAbort = () => abortSignal.removeEventListener("abort", abort);
+  const acquisition = beginPhysicalWork(state.retirement, "acquisition");
+  try {
+    const abortSignal = options.abortSignal;
+    if (abortSignal != null) {
+      if (abortSignal.aborted || state.disposed) disposeGraph(state);
+      else {
+        const abort = (): void => disposeGraph(state);
+        const stop = (): void => abortSignal.removeEventListener("abort", abort);
+        state.stopAbort = stop;
+        try {
+          abortSignal.addEventListener("abort", abort, { once: true });
+        } catch (cause) {
+          state.stopAbort = undefined;
+          try {
+            physicalCleanup(state.retirement, stop);
+          } catch (cleanupCause) {
+            reportContinuationError(state, cleanupCause);
+          }
+          throw cause;
+        }
+        if (state.disposed) {
+          state.stopAbort = undefined;
+          physicalCleanup(state.retirement, stop);
+        }
+      }
     }
+    return graph;
+  } finally {
+    finishPhysicalWork(acquisition);
   }
-  return graph;
 }
 
 /** @internal Integration surface shared by Aeolia's graph-adjacent modules. */

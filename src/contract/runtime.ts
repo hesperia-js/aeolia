@@ -12,6 +12,7 @@ import type {
 } from "./types.ts";
 import type { Fault, Unsubscribe } from "../fault.ts";
 import type { Computed, WritableSignal } from "../reactive.ts";
+import type { PhysicalWork, ResetCleanupScope, RetirementOwner } from "./retirement.ts";
 
 export type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -61,6 +62,7 @@ export interface QueryRequest {
 export type QueryOutcome = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
 
 export interface StreamSession<T> {
+  readonly physical: PhysicalWork;
   readonly controller: AbortController;
   readonly token: object;
   /** Reset identity under which this session was opened. */
@@ -169,6 +171,15 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly declaredStores: Map<string, StoreDefinition<unknown>>;
   readonly faultObservers: Set<(fault: Fault) => void>;
   readonly activeControllers: Set<AbortController>;
+  readonly retirement: RetirementOwner;
+  readonly resetCleanupScopes: Set<ResetCleanupScope>;
+  resetCleanupScope?: ResetCleanupScope;
+  disposal?: {
+    readonly steps: Generator<() => void, void, void>;
+    active: boolean;
+    complete: boolean;
+    resumeWork?: PhysicalWork;
+  };
   readonly projections: Set<GraphProjection>;
   readonly collectionHeap: CollectionCandidate[];
   stopAbort?: Unsubscribe;
