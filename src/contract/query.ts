@@ -51,7 +51,12 @@ export function readinessState<T>(
   return computed(
     () => {
       caller.runtime.lifecycle.get();
-      if (caller.runtime.disposed || caller.runtime.graph.__runtime.disposed) return "disposed";
+      if (
+        caller.runtime.disposed ||
+        caller.runtime.graph.__runtime.disposed ||
+        caller.runtime.binding?.context.disposed
+      )
+        return "disposed";
       const status = caller.statusCell.get();
       const pending = status === "fetching" || status === "revalidating";
       return pending ? "pending" : status;
