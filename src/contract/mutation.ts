@@ -61,7 +61,9 @@ function resolveMutationTarget(
 ): MutationTarget | undefined {
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const queryInput = affected.select(input);
+  if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const key = storeKey(affected.query.key(queryInput));
+  if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const runtime = state.stores.get(String(key));
   return {
     affected,

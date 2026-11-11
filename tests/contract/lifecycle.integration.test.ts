@@ -926,6 +926,39 @@ it("allows retirement after a write-restricted first attempt", async () => {
   }
 });
 
+it("does not resolve a stream key after option validation retires the graph", async () => {
+  let retirement: Promise<void> | undefined;
+  let keys = 0;
+  const stream = createStream({
+    name: "retirement.validation-stream",
+    key: () => {
+      keys += 1;
+      return "retirement/validation-stream";
+    },
+    open: (): AsyncIterable<number> => ({
+      [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }),
+    }),
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-validation-stream", operations: { stream } }),
+  });
+  try {
+    expect(() =>
+      graph.api.stream(undefined, {
+        get equals() {
+          retirement ??= graph.retire();
+          return Object.is;
+        },
+      }),
+    ).toThrow();
+    expect(retirement).toBeDefined();
+    expect(keys).toBe(0);
+    await retirement;
+  } finally {
+    graph.dispose();
+  }
+});
+
 for (const trigger of ["options", "seed", "signal"] as const) {
   it(`does not open a stream retired during ${trigger} setup`, async () => {
     let retirement: Promise<void> | undefined;
@@ -945,7 +978,10 @@ for (const trigger of ["options", "seed", "signal"] as const) {
       },
     });
     const graph = createGraph({
-      contract: defineContract({ namespace: "retirement-reentrant-stream", operations: { stream } }),
+      contract: defineContract({
+        namespace: "retirement-reentrant-stream",
+        operations: { stream },
+      }),
     });
     const retire = (): void => {
       retirement ??= graph.retire();
@@ -975,9 +1011,12 @@ for (const trigger of ["options", "seed", "signal"] as const) {
       },
     };
     const store = graph.at("retirement/reentrant-stream");
-    const stop = subscribe(store.value, (value) => {
-      if (trigger === "seed" && value === 7) retire();
-    });
+    const stop =
+      trigger === "seed"
+        ? subscribe(store.value, (value) => {
+            if (value === 7) retire();
+          })
+        : () => {};
     let callError: unknown;
     try {
       try {
@@ -997,6 +1036,99 @@ for (const trigger of ["options", "seed", "signal"] as const) {
     }
   });
 }
+
+it("removes query cancellation when retirement interrupts listener registration", async () => {
+  let retirement: Promise<void> | undefined;
+  let fetches = 0;
+  let removes = 0;
+  const controller = new AbortController();
+  const query = createQuery({
+    name: "retirement.reentrant-query",
+    key: () => "retirement/reentrant-query",
+    fetch: () => {
+      fetches += 1;
+      return new Promise<number>(() => undefined);
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-reentrant-query", operations: { query } }),
+  });
+  const callerSignal = new Proxy(controller.signal, {
+    get(target, property) {
+      if (property === "addEventListener")
+        return (...args: Parameters<AbortSignal["addEventListener"]>) => {
+          target.addEventListener(...args);
+          retirement ??= graph.retire();
+        };
+      if (property === "removeEventListener")
+        return (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+          removes += 1;
+          target.removeEventListener(...args);
+        };
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  try {
+    try {
+      graph.api.query(undefined, { abortSignal: callerSignal });
+    } catch (error) {
+      expect(error).toMatchObject({ kind: "disposed" });
+    }
+    expect(retirement).toBeDefined();
+    expect(fetches).toBe(0);
+    expect(removes).toBe(1);
+    await retirement;
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("does not resolve a mutation target after its selector retires the graph", async () => {
+  let retirement: Promise<void> | undefined;
+  let keys = 0;
+  let runs = 0;
+  const query = createQuery({
+    name: "retirement.reentrant-target",
+    key: () => {
+      keys += 1;
+      return "retirement/reentrant-target";
+    },
+    fetch: async () => 1,
+  });
+  const mutate = createMutation({
+    name: "retirement.reentrant-mutation",
+    affects: [
+      affects(query, {
+        select: () => {
+          retirement ??= graph.retire();
+          return undefined;
+        },
+      }),
+    ],
+    run: async () => {
+      runs += 1;
+      return 1;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "retirement-reentrant-mutation",
+      operations: { mutate, query },
+    }),
+  });
+  try {
+    const result = graph.api.mutate();
+    void result.catch(() => undefined);
+    expect(retirement).toBeDefined();
+    expect(keys).toBe(0);
+    expect(runs).toBe(0);
+    await result.catch(() => undefined);
+    await retirement;
+  } finally {
+    graph.dispose();
+  }
+});
 
 for (const owner of ["stream", "projection"] as const) {
   for (const cleanup of ["getter", "held"] as const) {

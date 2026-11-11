@@ -183,6 +183,10 @@ export function startQueryRequest<T>(
     const controller = new AbortController();
     const unlinkCallerAbort = addSignalAbort(abortSignal, controller);
     const removeCallerAbort = (): void => physicalCleanup(state.retirement, unlinkCallerAbort);
+    if (state.resetEpoch !== resetEpoch || state.disposed) {
+      removeCallerAbort();
+      return undefined;
+    }
     const generation = issue(runtime);
     const source: QuerySource<T> = { query: caller.query, input: caller.input };
     let resolveOutcome!: QueryRequest["resolveOutcome"];

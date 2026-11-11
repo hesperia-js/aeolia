@@ -546,12 +546,10 @@ function openIndependent<T, V>(
       if (!isCurrentGeneration(runtime, controller, generation)) return;
       const iterator = iterable[Symbol.asyncIterator]();
       if (!isCurrentGeneration(runtime, controller, generation)) {
-        if (typeof iterator.return === "function") {
-          try {
-            returnPhysicalIterator(source.retirement, iterator, "projection-return");
-          } catch {
-            // The source generation has already been retired.
-          }
+        try {
+          returnPhysicalIterator(source.retirement, iterator, "projection-return");
+        } catch {
+          // The source generation has already been retired.
         }
         return;
       }

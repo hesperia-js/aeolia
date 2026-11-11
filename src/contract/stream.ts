@@ -89,6 +89,7 @@ export function openStream<T>(
   const physical = beginPhysicalWork(state.retirement, "stream");
   let driven = false;
   try {
+    const resetEpoch = state.resetEpoch;
     const controller = new AbortController();
     const removeSignalAbort = addSignalAbort(abortSignal, controller);
     let callerAttached = true;
@@ -97,6 +98,10 @@ export function openStream<T>(
       callerAttached = false;
       physicalCleanup(state.retirement, removeSignalAbort);
     };
+    if (state.disposed || state.resetEpoch !== resetEpoch) {
+      removeAbort();
+      return;
+    }
     const session: StreamSession<T> = {
       physical,
       controller,
@@ -178,12 +183,10 @@ export function openStream<T>(
       return;
     }
     if (!isCurrentSession(runtime, session)) {
-      if (typeof iterator.return === "function") {
-        try {
-          returnPhysicalIterator(state.retirement, iterator, "stream-return");
-        } catch {
-          /* A reset owns the current session now. */
-        }
+      try {
+        returnPhysicalIterator(state.retirement, iterator, "stream-return");
+      } catch {
+        /* A reset owns the current session now. */
       }
       removeAbort();
       return;
@@ -225,18 +228,23 @@ export function streamMember<T>(
   assertGraphOpen(state);
   if (options !== undefined && !isValueOptions(options))
     throw new TypeError("Invalid stream options.");
+  assertGraphOpen(state);
   const key = storeKey(stream.key(input));
   const runtime = getOrCreateStore(state, key) as StoreRuntime<T>;
   configureKeyedValue(runtime, stream, options);
+  assertGraphOpen(state);
 
   const active = runtime.stream;
   if (active === undefined) {
+    const abortSignal = options?.abortSignal;
+    assertGraphOpen(state);
     runtime.streamSource = {
       stream,
       input,
-      ...(options?.abortSignal === undefined ? {} : { abortSignal: options.abortSignal }),
+      ...(abortSignal === undefined ? {} : { abortSignal }),
     };
-    openStream(runtime, stream, input, key, options?.abortSignal);
+    openStream(runtime, stream, input, key, abortSignal);
+    assertGraphOpen(state);
   }
   const status = runtime.streamStatus;
   const pending = computed(() => status.get() === "opening", {

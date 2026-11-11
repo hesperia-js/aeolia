@@ -16,12 +16,14 @@ const branchScript = match[1];
 const { version } = await Bun.file(new URL("../../package.json", import.meta.url)).json();
 
 function accepts(branch: string) {
-  return Bun.spawnSync([process.execPath, "-e", branchScript], {
-    cwd: root,
-    env: { ...process.env, AEOLIA_HEAD_BRANCH: branch },
-    stdout: "pipe",
-    stderr: "pipe",
-  }).exitCode === 0;
+  return (
+    Bun.spawnSync([process.execPath, "-e", branchScript], {
+      cwd: root,
+      env: { ...process.env, AEOLIA_HEAD_BRANCH: branch },
+      stdout: "pipe",
+      stderr: "pipe",
+    }).exitCode === 0
+  );
 }
 
 test("the branch gate accepts supported branches and the authored release", () => {
