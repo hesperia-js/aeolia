@@ -1038,6 +1038,159 @@ for (const trigger of ["options", "seed", "signal"] as const) {
   });
 }
 
+it("does not resolve a query key after a freshness option retires the graph", async () => {
+  let optionValidated = false;
+  let retirement: Promise<void> | undefined;
+  let keys = 0;
+  const query = createQuery({
+    name: "retirement.query-window",
+    key: () => {
+      keys += 1;
+      return "retirement/query-window";
+    },
+    fetch: async () => 1,
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-query-window", operations: { query } }),
+  });
+  try {
+    expect(() =>
+      graph.api.query(undefined, {
+        get revalidateAfterMs() {
+          if (optionValidated) retirement ??= graph.retire();
+          optionValidated = true;
+          return 1;
+        },
+      }),
+    ).toThrow();
+    expect(retirement).toBeDefined();
+    expect(keys).toBe(0);
+    await retirement;
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("does not read query cancellation after value options retire the graph", async () => {
+  let retirement: Promise<void> | undefined;
+  let keyResolved = false;
+  let readAfterRetirement = false;
+  const query = createQuery({
+    name: "retirement.query-options",
+    key: () => {
+      keyResolved = true;
+      return "retirement/query-options";
+    },
+    fetch: async () => 1,
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-query-options", operations: { query } }),
+  });
+  try {
+    expect(() =>
+      graph.api.query(undefined, {
+        get equals() {
+          if (keyResolved) retirement ??= graph.retire();
+          return Object.is;
+        },
+        get abortSignal() {
+          if (retirement !== undefined) readAfterRetirement = true;
+          return undefined;
+        },
+      }),
+    ).toThrow();
+    expect(retirement).toBeDefined();
+    expect(readAfterRetirement).toBe(false);
+    await retirement;
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("does not reread cancellation options after revalidation retires the graph", async () => {
+  let retirement: Promise<void> | undefined;
+  let readAfterRetirement = false;
+  const controller = new AbortController();
+  const query = createQuery({
+    name: "retirement.revalidate-options",
+    key: () => "retirement/revalidate-options",
+    fetch: async () => 1,
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-revalidate-options", operations: { query } }),
+  });
+  try {
+    const store = graph.api.query(undefined, { initial: 1 });
+    expect(() =>
+      store.revalidate({
+        get abortSignal() {
+          if (retirement !== undefined) readAfterRetirement = true;
+          retirement ??= graph.retire();
+          return controller.signal;
+        },
+      }),
+    ).toThrow();
+    expect(retirement).toBeDefined();
+    expect(readAfterRetirement).toBe(false);
+    await retirement;
+  } finally {
+    graph.dispose();
+  }
+});
+
+for (const mode of ["query", "stream", "mutation", "revalidate"] as const) {
+  it(`does not continue ${mode} signal validation after retirement`, async () => {
+    let retirement: Promise<void> | undefined;
+    let readAfterRetirement = false;
+    const controller = new AbortController();
+    const query = createQuery({
+      name: "retirement.signal-validation",
+      key: () => "retirement/signal-validation",
+      fetch: async () => 1,
+    });
+    const stream = createStream({
+      name: "retirement.signal-validation-stream",
+      key: () => "retirement/signal-validation-stream",
+      open: (): AsyncIterable<number> => ({
+        [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }),
+      }),
+    });
+    const mutate = createMutation({
+      name: "retirement.signal-validation-mutation",
+      affects: [],
+      run: async () => 1,
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "retirement-signal-validation",
+        operations: { query, stream, mutate },
+      }),
+    });
+    const signal = new Proxy(controller.signal, {
+      get(target, property) {
+        if (retirement !== undefined) readAfterRetirement = true;
+        if (property === "aborted") retirement ??= graph.retire();
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    try {
+      const store = mode === "revalidate" ? graph.api.query(undefined, { initial: 1 }) : undefined;
+      expect(() => {
+        if (mode === "query") graph.api.query(undefined, { abortSignal: signal });
+        else if (mode === "stream") graph.api.stream(undefined, { abortSignal: signal });
+        else if (mode === "mutation") graph.api.mutate(undefined, { abortSignal: signal });
+        else store!.revalidate({ abortSignal: signal });
+      }).toThrow();
+      expect(retirement).toBeDefined();
+      expect(readAfterRetirement).toBe(false);
+      await retirement;
+    } finally {
+      graph.dispose();
+    }
+  });
+}
+
 it("removes query cancellation when retirement interrupts listener registration", async () => {
   let retirement: Promise<void> | undefined;
   let fetches = 0;

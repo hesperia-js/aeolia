@@ -96,10 +96,14 @@ export function makeQueryStore<T>(
 ): QueryStore<T> {
   assertGraphOpen(state);
   const window = asWindow(options?.revalidateAfterMs, query.revalidateAfterMs);
+  assertGraphOpen(state);
   const key = storeKey(query.key(input));
   const runtime = getOrCreateStore(state, key) as StoreRuntime<T>;
   configureKeyedValue(runtime, query, options);
-  const caller = createCaller(runtime, query, input, window, options?.abortSignal);
+  assertGraphOpen(state);
+  const abortSignal = options?.abortSignal;
+  assertGraphOpen(state);
+  const caller = createCaller(runtime, query, input, window, abortSignal);
   addCaller(runtime, caller);
   runtime.source = { query, input };
   runtime.onReadableActivation = () => {
@@ -124,10 +128,16 @@ export function makeQueryStore<T>(
     readonly abortSignal?: AbortSignal;
   }): Promise<void> => {
     assertStoreOpen(runtime);
-    if (revalidateOptions !== undefined && !isCancellationOptions(revalidateOptions))
+    if (
+      revalidateOptions !== undefined &&
+      !isCancellationOptions(revalidateOptions, () => assertStoreOpen(runtime))
+    )
       throw new TypeError("Invalid query revalidation options.");
+    assertStoreOpen(runtime);
     addCaller(runtime, caller);
-    return startQuery(runtime, caller, true, revalidateOptions?.abortSignal ?? caller.abortSignal);
+    const abortSignal = revalidateOptions?.abortSignal ?? caller.abortSignal;
+    assertStoreOpen(runtime);
+    return startQuery(runtime, caller, true, abortSignal);
   };
   Object.assign(queryStore, { pending, error: runtime.error, status, revalidate });
   Object.defineProperty(queryStore, "ready", {

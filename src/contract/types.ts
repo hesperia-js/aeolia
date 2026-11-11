@@ -247,13 +247,17 @@ export interface ValueOptions<T> {
   readonly snapshot?: boolean;
 }
 
-type OptionChecks = readonly (readonly [string, (value: unknown) => boolean])[];
+type OptionChecks = readonly (readonly [
+  string,
+  (value: unknown, afterRead?: () => void) => boolean,
+])[];
 
-function matchesOptions(value: unknown, checks: OptionChecks): boolean {
+function matchesOptions(value: unknown, checks: OptionChecks, afterRead?: () => void): boolean {
   if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
   return checks.every(([field, check]) => {
     const option: unknown = Reflect.get(value, field);
-    return option === undefined || check(option);
+    afterRead?.();
+    return option === undefined || check(option, afterRead);
   });
 }
 
@@ -292,22 +296,25 @@ function isNamedDeclaration(value: unknown): value is { readonly name: string } 
 }
 
 /** Validates value options; the caller's arbitrary initial data remains unknown. */
-export function isValueOptions(value: unknown): value is ValueOptions<unknown> {
-  return matchesOptions(value, valueOptionChecks);
+export function isValueOptions(
+  value: unknown,
+  afterRead?: () => void,
+): value is ValueOptions<unknown> {
+  return matchesOptions(value, valueOptionChecks, afterRead);
 }
 
 /** Validates the cancellation-only options accepted by explicit revalidation. */
 export function isCancellationOptions(
   value: unknown,
+  afterRead?: () => void,
 ): value is Pick<ValueOptions<unknown>, "abortSignal"> {
-  return (
-    isObject(value) &&
-    typeof value !== "function" &&
-    !Array.isArray(value) &&
-    (!("abortSignal" in value) ||
-      value.abortSignal === undefined ||
-      isAbortSignal(value.abortSignal))
-  );
+  if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
+  const hasSignal = "abortSignal" in value;
+  afterRead?.();
+  if (!hasSignal) return true;
+  const signal = value.abortSignal;
+  afterRead?.();
+  return signal === undefined || isAbortSignal(signal, afterRead);
 }
 
 /** Options for one query caller, extending keyed value configuration. */
@@ -331,8 +338,11 @@ const storeOptionChecks = Object.entries({
 } satisfies Record<keyof StoreOptions<unknown>, (value: unknown) => boolean>);
 
 /** Validates query option types; effective freshness bounds are checked when used. */
-export function isStoreOptions(value: unknown): value is StoreOptions<unknown> {
-  return matchesOptions(value, storeOptionChecks);
+export function isStoreOptions(
+  value: unknown,
+  afterRead?: () => void,
+): value is StoreOptions<unknown> {
+  return matchesOptions(value, storeOptionChecks, afterRead);
 }
 
 /** Recognizes the options-only call form, including malformed option values. */
@@ -728,8 +738,11 @@ const mutationOptionChecks = Object.entries({
 } satisfies Record<keyof MutationOptions, (value: unknown) => boolean>);
 
 /** Validates mutation options and every supplied optimistic producer. */
-export function isMutationOptions(value: unknown): value is MutationOptions {
-  return matchesOptions(value, mutationOptionChecks);
+export function isMutationOptions(
+  value: unknown,
+  afterRead?: () => void,
+): value is MutationOptions {
+  return matchesOptions(value, mutationOptionChecks, afterRead);
 }
 
 /** Recognizes the options-only call form, including malformed option values. */

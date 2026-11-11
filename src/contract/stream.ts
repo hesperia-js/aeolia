@@ -226,7 +226,7 @@ export function streamMember<T>(
   options: ValueOptions<T> | undefined,
 ): StreamStore<T> {
   assertGraphOpen(state);
-  if (options !== undefined && !isValueOptions(options))
+  if (options !== undefined && !isValueOptions(options, () => assertGraphOpen(state)))
     throw new TypeError("Invalid stream options.");
   assertGraphOpen(state);
   const key = storeKey(stream.key(input));

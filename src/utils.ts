@@ -3,16 +3,22 @@ export function isObject(value: unknown): value is object {
 }
 
 /** Checks the cross-runtime cancellation interface without relying on its constructor. */
-export function isAbortSignal(value: unknown): value is AbortSignal {
+export function isAbortSignal(value: unknown, afterRead?: () => void): value is AbortSignal {
   if (!isObject(value)) return false;
   const signal = value as Partial<AbortSignal>;
+  const read = (key: keyof AbortSignal) => {
+    const result = signal[key];
+    afterRead?.();
+    return result;
+  };
+  if (typeof read("aborted") !== "boolean") return false;
+  const onabort = read("onabort");
+  if (onabort !== null && typeof onabort !== "function") return false;
   return (
-    typeof signal.aborted === "boolean" &&
-    (signal.onabort === null || typeof signal.onabort === "function") &&
-    typeof signal.addEventListener === "function" &&
-    typeof signal.removeEventListener === "function" &&
-    typeof signal.dispatchEvent === "function" &&
-    typeof signal.throwIfAborted === "function"
+    typeof read("addEventListener") === "function" &&
+    typeof read("removeEventListener") === "function" &&
+    typeof read("dispatchEvent") === "function" &&
+    typeof read("throwIfAborted") === "function"
   );
 }
 

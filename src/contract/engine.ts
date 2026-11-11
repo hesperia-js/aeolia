@@ -130,7 +130,9 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
         api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) =>
           graphAcquisition(state, () => {
             const [input, options] = args;
-            const call = normalizeQueryCall(input, options, args.length > 1);
+            const call = normalizeQueryCall(input, options, args.length > 1, () =>
+              assertGraphOpen(state),
+            );
             return makeQueryStore(
               state,
               value as QueryDefinition<unknown, unknown, any>,
@@ -142,7 +144,9 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
         api[property] = (...args: [input?: unknown, options?: MutationOptions]) =>
           graphAcquisition(state, () => {
             const [input, options] = args;
-            const call = normalizeMutationCall(input, options, args.length > 1);
+            const call = normalizeMutationCall(input, options, args.length > 1, () =>
+              assertGraphOpen(state),
+            );
             return runMutation(
               state,
               value as MutationDefinition<unknown, unknown>,
@@ -165,6 +169,7 @@ function normalizeQueryCall(
   input: unknown,
   options: StoreOptions<unknown> | undefined,
   hasSecondArgument: boolean,
+  afterRead: () => void,
 ): {
   readonly input: unknown;
   readonly options?: StoreOptions<unknown>;
@@ -184,7 +189,7 @@ function normalizeQueryCall(
     callOptions = input;
   }
   if (callOptions === undefined) return { input: callInput };
-  if (!isStoreOptions(callOptions)) throw new TypeError("Invalid query options.");
+  if (!isStoreOptions(callOptions, afterRead)) throw new TypeError("Invalid query options.");
   return { input: callInput, options: callOptions };
 }
 
@@ -192,6 +197,7 @@ function normalizeMutationCall(
   input: unknown,
   options: MutationOptions | undefined,
   hasSecondArgument: boolean,
+  afterRead: () => void,
 ): {
   readonly input: unknown;
   readonly options?: MutationOptions;
@@ -211,7 +217,7 @@ function normalizeMutationCall(
     callOptions = input;
   }
   if (callOptions === undefined) return { input: callInput };
-  if (!isMutationOptions(callOptions)) throw new TypeError("Invalid mutation options.");
+  if (!isMutationOptions(callOptions, afterRead)) throw new TypeError("Invalid mutation options.");
   return { input: callInput, options: callOptions };
 }
 
