@@ -926,6 +926,141 @@ it("allows retirement after a write-restricted first attempt", async () => {
   }
 });
 
+for (const trigger of ["options", "seed", "signal"] as const) {
+  it(`does not open a stream retired during ${trigger} setup`, async () => {
+    let retirement: Promise<void> | undefined;
+    let keyResolved = false;
+    let opens = 0;
+    let removes = 0;
+    const controller = new AbortController();
+    const stream = createStream({
+      name: "retirement.reentrant-stream",
+      key: () => {
+        keyResolved = true;
+        return "retirement/reentrant-stream";
+      },
+      open: (): AsyncIterable<number> => {
+        opens += 1;
+        return { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => undefined) }) };
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "retirement-reentrant-stream", operations: { stream } }),
+    });
+    const retire = (): void => {
+      retirement ??= graph.retire();
+    };
+    const callerSignal = new Proxy(controller.signal, {
+      get(target, property) {
+        if (property === "addEventListener")
+          return (...args: Parameters<AbortSignal["addEventListener"]>) => {
+            target.addEventListener(...args);
+            if (trigger === "signal") retire();
+          };
+        if (property === "removeEventListener")
+          return (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+            removes += 1;
+            target.removeEventListener(...args);
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const options = {
+      ...(trigger === "seed" ? { initial: 7 } : {}),
+      ...(trigger === "signal" ? { abortSignal: callerSignal } : {}),
+      get equals() {
+        if (trigger === "options" && keyResolved) retire();
+        return Object.is;
+      },
+    };
+    const store = graph.at("retirement/reentrant-stream");
+    const stop = subscribe(store.value, (value) => {
+      if (trigger === "seed" && value === 7) retire();
+    });
+    let callError: unknown;
+    try {
+      try {
+        graph.api.stream(undefined, options);
+      } catch (error) {
+        callError = error;
+      }
+      expect(retirement).toBeDefined();
+      expect(opens).toBe(0);
+      if (trigger === "signal") expect(removes).toBe(1);
+      await retirement;
+      expect(graph.retire()).toBe(retirement);
+      if (callError !== undefined) expect(callError).toMatchObject({ kind: "disposed" });
+    } finally {
+      stop();
+      graph.dispose();
+    }
+  });
+}
+
+for (const owner of ["stream", "projection"] as const) {
+  for (const cleanup of ["getter", "held"] as const) {
+    it(`owns a late ${owner} iterator cleanup (${cleanup})`, async () => {
+      const failure = new Error("late iterator return getter failed");
+      const returned = Promise.withResolvers<IteratorResult<number>>();
+      let retirement: Promise<void> | undefined;
+      let returns = 0;
+      let reads = 0;
+      const stream = createStream({
+        name: `retirement.late-iterator.${owner}.${cleanup}`,
+        key: () => `retirement/late-iterator/${owner}/${cleanup}`,
+        open: (): AsyncIterable<number> => ({
+          [Symbol.asyncIterator]() {
+            retirement = graph.retire();
+            return {
+              next: () => {
+                reads += 1;
+                return new Promise<IteratorResult<number>>(() => undefined);
+              },
+              get return() {
+                if (cleanup === "getter") throw failure;
+                return () => {
+                  returns += 1;
+                  return returned.promise;
+                };
+              },
+            };
+          },
+        }),
+      });
+      const graph = createGraph({
+        contract: defineContract({ namespace: "retirement-late-iterator", operations: { stream } }),
+      });
+      let callError: unknown;
+      try {
+        try {
+          if (owner === "stream") graph.api.stream(undefined);
+          else project(graph, stream, undefined, { kind: "accumulate", max: 2 });
+        } catch (error) {
+          callError = error;
+        }
+        expect(retirement).toBeDefined();
+        const owned = retirement!;
+        expect(graph.retire()).toBe(owned);
+        expect(reads).toBe(0);
+        if (cleanup === "getter") {
+          await expect(owned).rejects.toBe(failure);
+        } else {
+          expect(returns).toBe(1);
+          await expectRetirementPending(owned);
+          returned.resolve({ done: true, value: undefined });
+          await owned;
+          expect(returns).toBe(1);
+        }
+        if (callError !== undefined) expect(callError).toMatchObject({ kind: "disposed" });
+      } finally {
+        returned.resolve({ done: true, value: undefined });
+        graph.dispose();
+      }
+    });
+  }
+}
+
 for (const owner of ["stream", "projection"] as const) {
   it(`records one return getter failure during graph retirement (${owner})`, async () => {
     const failure = new Error(`${owner} return getter failed`);
