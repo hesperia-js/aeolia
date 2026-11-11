@@ -101,6 +101,9 @@ export function subscribeStore<T>(
   assertStoreOpen(runtime);
   const presentValue = computed<symbol | T | undefined>(
     () => {
+      runtime.lifecycle.get();
+      if (runtime.disposed || runtime.graph.__runtime.disposed || runtime.binding?.context.disposed)
+        return STORE_ABSENT;
       const value = runtime.value.get();
       if (!runtime.store.available.get()) return STORE_ABSENT;
       return value;

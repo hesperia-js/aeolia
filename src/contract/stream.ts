@@ -688,6 +688,9 @@ function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): S
     value: (observer: (value: T) => void) => {
       const present = computed(
         () => {
+          runtime.lifecycle.get();
+          if (runtime.disposed || runtime.graph.__runtime.disposed || bound.binding.context.disposed)
+            return STORE_ABSENT;
           const value = facets.value.get();
           return facets.available.get() ? value : STORE_ABSENT;
         },

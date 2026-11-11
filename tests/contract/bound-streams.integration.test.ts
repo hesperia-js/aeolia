@@ -6,6 +6,7 @@ import {
   createStream,
   defineContract,
   Fault,
+  onFault,
   peekStore,
   storeKey,
   subscribe,
@@ -76,6 +77,37 @@ function fixture() {
 }
 
 describe("genuine context-bound stream sessions", () => {
+  for (const owner of ["context", "graph"] as const) {
+    it(`closes live bound stream subscriptions on ${owner} disposal`, () => {
+      const f = fixture();
+      const present = f.binding.member({ room: "present" }, { initial: 1 });
+      const empty = f.binding.member({ room: "empty" });
+      const values: Array<number | undefined> = [];
+      const emptyValues: Array<number | undefined> = [];
+      const faults: Fault[] = [];
+      const stopFaults = onFault(f.graph, (fault) => faults.push(fault));
+      const stop = subscribe(present, (value) => values.push(value));
+      const stopEmpty = subscribe(empty, (value) => emptyValues.push(value));
+      try {
+        expect(values).toStrictEqual([1]);
+        expect(emptyValues).toStrictEqual([]);
+        expect(faults).toStrictEqual([]);
+        if (owner === "context") f.context.dispose();
+        else f.graph.dispose();
+        expect(values).toStrictEqual([1]);
+        expect(emptyValues).toStrictEqual([]);
+        expect(faults).toStrictEqual([]);
+        expect(() => present.value.get()).toThrow("disposed");
+        expect(() => empty.available.get()).toThrow("disposed");
+      } finally {
+        stop();
+        stopEmpty();
+        stopFaults();
+        f.graph.dispose();
+      }
+    });
+  }
+
   it("registers inertly, checks actual member provenance and isolates equal raw/context keys", () => {
     const f = fixture();
     const foreign = createGraph({

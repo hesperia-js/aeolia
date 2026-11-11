@@ -2,6 +2,8 @@ import { expect, jest, test } from "bun:test";
 import {
   adopt,
   affects,
+  bindOperation,
+  createBindingContext,
   createGraph,
   createMutation,
   createQuery,
@@ -10,6 +12,7 @@ import {
   project,
   snapshot,
   subscribe,
+  withoutWrites,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
@@ -280,3 +283,117 @@ test("an empty store rejects a non-callable observer at registration", () => {
     graph.dispose();
   }
 });
+
+test("graph disposal closes live store subscriptions without emitting absent or predicted values", () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "disposal-query",
+    key: (key: string) => key,
+    fetch: backend.respond<string, number>("disposal-query"),
+  });
+  const mutation = createMutation({
+    name: "disposal-mutation",
+    run: backend.perform<string, void>("disposal-mutation"),
+    affects: [
+      affects(query, {
+        select: (key: string) => key,
+        on: "invalidate",
+        optimistic: () => 42,
+      }),
+    ],
+  });
+  const faults: unknown[] = [];
+  const graph = createGraph({
+    contract: { namespace: "subscription-disposal", operations: { query, mutation } },
+    onUnobservedFault: (fault) => faults.push(fault),
+  });
+  const present = graph.api.query("present", { initial: 1 });
+  const empty = graph.api.query("empty");
+  const predicted = graph.api.query("predicted");
+  const presentValues: number[] = [];
+  const emptyValues: number[] = [];
+  const predictedValues: number[] = [];
+  const stops = [
+    subscribe(present, (value) => presentValues.push(value)),
+    subscribe(empty, (value) => emptyValues.push(value)),
+    subscribe(predicted, (value) => predictedValues.push(value)),
+  ];
+  try {
+    const pending = graph.api.mutation("predicted");
+    void pending.catch(() => undefined);
+    expect(presentValues).toStrictEqual([1]);
+    expect(emptyValues).toStrictEqual([]);
+    expect(predictedValues).toStrictEqual([42]);
+    graph.dispose();
+    expect(presentValues).toStrictEqual([1]);
+    expect(emptyValues).toStrictEqual([]);
+    expect(predictedValues).toStrictEqual([42]);
+    expect(faults).toStrictEqual([]);
+    expect(() => present.value.get()).toThrow("disposed");
+    expect(() => empty.available.get()).toThrow("disposed");
+  } finally {
+    for (const stop of stops) stop();
+    graph.dispose();
+  }
+});
+
+test("a refused context disposal leaves its subscribed store live for retry", async () => {
+  const query = createQuery({ name: "restricted-query", key: () => "one", fetch: async () => 1 });
+  const graph = createGraph({
+    contract: { namespace: "restricted-context-subscription", operations: { query } },
+  });
+  const context = createBindingContext(graph);
+  const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+  const store = binding.member(undefined);
+  await store.ready;
+  const values: number[] = [];
+  const stop = subscribe(store, (value) => values.push(value));
+  try {
+    expect(() => withoutWrites(() => context.dispose())).toThrow("write-forbidden");
+    expect(context.active.get()).toBe(true);
+    store.set(2);
+    expect(values).toStrictEqual([1, 2]);
+    context.dispose();
+    expect(values).toStrictEqual([1, 2]);
+    expect(() => store.value.get()).toThrow("disposed");
+  } finally {
+    stop();
+    graph.dispose();
+  }
+});
+
+for (const withContext of [false, true]) {
+  test(`retirement retries a write-restricted graph disposal with a live subscription and ${withContext ? "a" : "no"} context`, async () => {
+    const local = createStore({ name: "restricted-store", initial: 1 });
+    const faults: unknown[] = [];
+    const graph = createGraph({
+      contract: { namespace: "restricted-graph-subscription", operations: { local } },
+      onUnobservedFault: (fault) => faults.push(fault),
+    });
+    const context = withContext ? createBindingContext(graph) : undefined;
+    const store = graph.api.local();
+    const values: number[] = [];
+    const stop = subscribe(store, (value) => values.push(value));
+    let refusal: unknown;
+    try {
+      try {
+        withoutWrites(() => graph.dispose());
+      } catch (cause) {
+        refusal = cause;
+      }
+      expect(refusal).toBeDefined();
+      expect(String(refusal)).toContain("write-forbidden");
+      expect(values).toStrictEqual([1]);
+      if (context !== undefined) expect(context.active.get()).toBe(true);
+      await expect(graph.retire()).rejects.toBe(refusal);
+      expect(values).toStrictEqual([1]);
+      expect(faults).toStrictEqual([]);
+      if (context !== undefined) expect(context.active.get()).toBe(false);
+      expect(() => store.value.get()).toThrow("disposed");
+      expect(() => store.available.get()).toThrow("disposed");
+    } finally {
+      stop();
+      graph.dispose();
+    }
+  });
+}

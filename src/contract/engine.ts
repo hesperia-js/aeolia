@@ -372,7 +372,21 @@ function disposeBindingContext(context: BindingContextRuntime): void {
     state.disposed ? runtime.valueRevision : nextValueRevision(runtime.valueRevision),
   );
   const controllers = [...context.mutationControllers];
+  const attempt = (action: () => void, alreadyOwned = false): void => {
+    try {
+      if (alreadyOwned) action();
+      else physicalCleanup(context.retirement, action);
+    } catch (error) {
+      reportContinuationError(state, error);
+    }
+  };
   context.disposed = true;
+  if (!state.disposed)
+    attempt(() =>
+      reactiveInternal.batch(() => {
+        for (const runtime of stores) runtime.lifecycle.update((value) => value + 1);
+      }),
+    );
   for (const profiles of context.bindings.values())
     for (const binding of profiles.values()) binding.addresses.clear();
   for (const members of context.streamBindings.values())
@@ -388,14 +402,6 @@ function disposeBindingContext(context: BindingContextRuntime): void {
     updateCollectionCandidate(runtime);
   }
   armCollectionTimer(state);
-  const attempt = (action: () => void, alreadyOwned = false): void => {
-    try {
-      if (alreadyOwned) action();
-      else physicalCleanup(context.retirement, action);
-    } catch (error) {
-      reportContinuationError(state, error);
-    }
-  };
   attempt(() =>
     reactiveInternal.batch(() => {
       for (const [index, runtime] of stores.entries()) {
@@ -443,7 +449,6 @@ function disposeBindingContext(context: BindingContextRuntime): void {
     attempt(() => runtime.committed.set(undefined));
     attempt(() => runtime.presence.set(false));
     attempt(() => runtime.errorCell.set(undefined));
-    attempt(() => runtime.lifecycle.update((value) => value + 1));
     for (const stop of [...runtime.livenessStops, ...runtime.readStops]) attempt(stop);
     runtime.livenessStops.length = 0;
     runtime.readStops.length = 0;
@@ -454,6 +459,18 @@ function disposeBindingContext(context: BindingContextRuntime): void {
 function* disposalSteps<C extends Contract>(
   state: GraphRuntimeState<C>,
 ): Generator<() => void, void, void> {
+  yield () => {
+    try {
+      physicalCleanup(state.retirement, () =>
+        reactiveInternal.batch(() => {
+          for (const runtime of state.stores.values())
+            runtime.lifecycle.update((value) => value + 1);
+        }),
+      );
+    } catch (error) {
+      reportContinuationError(state, error);
+    }
+  };
   for (const runtime of state.stores.values()) yield () => retireObservation(runtime);
   for (const context of Array.from(state.bindingContexts)) {
     yield () => {
@@ -508,13 +525,6 @@ function* disposalSteps<C extends Contract>(
     retireQueryProgress(runtime);
     runtime.disposed = true;
     runtime.collectionIndex = -1;
-    yield () => {
-      try {
-        physicalCleanup(state.retirement, () => runtime.lifecycle.update((value) => value + 1));
-      } catch (error) {
-        reportContinuationError(state, error);
-      }
-    };
   }
   for (const controller of Array.from(state.activeControllers)) yield () => controller.abort();
   state.activeControllers.clear();
@@ -548,6 +558,7 @@ function disposeGraph<C extends Contract>(
     }
     progress.active = true;
     if (!progress.contextsPreflighted) {
+      if (state.stores.size > 0) reactiveInternal.assertWritesAllowed(state.resetVersion);
       for (const context of state.bindingContexts) {
         if (!context.disposed) reactiveInternal.assertWritesAllowed(context.activeCell);
       }

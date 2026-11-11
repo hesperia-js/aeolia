@@ -129,6 +129,27 @@ async function expectPending(promise: Promise<unknown>): Promise<void> {
 }
 
 describe("context-bound mutation effects", () => {
+  it("closes a live prediction-only subscription when its context is disposed", () => {
+    const f = fixture();
+    const handle = f.native.member({ id: "one" });
+    const values: number[] = [];
+    const stop = subscribe(handle, (value) => values.push(value));
+    try {
+      const prediction = predictionFor(f.save, f.native.target(handle)!, () => 42);
+      const pending = f.binding().member({ id: "one", value: 42 }, { optimistic: [prediction] });
+      void pending.catch(() => undefined);
+      expect(values).toStrictEqual([42]);
+      f.context.dispose();
+      expect(values).toStrictEqual([42]);
+      expect(f.faults).toStrictEqual([]);
+      expect(() => handle.value.get()).toThrow("disposed");
+      expect(() => handle.available.get()).toThrow("disposed");
+    } finally {
+      stop();
+      f.graph.dispose();
+    }
+  });
+
   for (const arrayKind of ["effects", "optimistic"] as const) {
     for (const owner of ["context", "graph"] as const) {
       for (const phase of ["iterator getter", "factory", "next getter"] as const) {
