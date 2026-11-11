@@ -10,6 +10,13 @@ import { getOrCreateStore, observeStoreReadable } from "./store.ts";
 import { endStream, setStreamStatus, touch } from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
 import { publishStreamEvent } from "./stream-events.ts";
+import {
+  beginPhysicalWork,
+  finishPhysicalWork,
+  observePhysicalWork,
+  physicalCleanup,
+  returnPhysicalIterator,
+} from "./retirement.ts";
 
 function sameSessionEpoch<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): boolean {
   return (
@@ -79,122 +86,134 @@ export function openStream<T>(
   abortSignal: AbortSignal | undefined,
 ): void {
   const state = runtime.graph.__runtime;
-  const controller = new AbortController();
-  const removeSignalAbort = addSignalAbort(abortSignal, controller);
-  let callerAttached = true;
-  const removeAbort = (): void => {
-    if (!callerAttached) return;
-    callerAttached = false;
-    removeSignalAbort();
-  };
-  const session: StreamSession<T> = {
-    controller,
-    token: {},
-    resetEpoch: state.resetEpoch,
-    listeners: new Set(),
-    ended: false,
-    emitted: false,
-    removeCallerAbort: removeAbort,
-    unobservedSince: runtime.liveReadableCount === 0 ? Date.now() : undefined,
-  };
-  runtime.stream = session;
-  runtime.streamToken = session.token;
-  state.activeControllers.add(controller);
+  const physical = beginPhysicalWork(state.retirement, "stream");
+  let driven = false;
   try {
-    reactiveInternal.batch(() => {
-      runtime.failing = false;
-      runtime.invalidated = false;
-      runtime.errorCell.set(undefined);
-      if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "opening");
-    });
-  } catch (error) {
-    if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
-  }
-  if (!isCurrentSession(runtime, session)) {
-    removeAbort();
-    return;
-  }
-  const closeOnAbort = (): void => {
-    if (session.ended) return;
+    const controller = new AbortController();
+    const removeSignalAbort = addSignalAbort(abortSignal, controller);
+    let callerAttached = true;
+    const removeAbort = (): void => {
+      if (!callerAttached) return;
+      callerAttached = false;
+      physicalCleanup(state.retirement, removeSignalAbort);
+    };
+    const session: StreamSession<T> = {
+      physical,
+      controller,
+      token: {},
+      resetEpoch: state.resetEpoch,
+      listeners: new Set(),
+      ended: false,
+      emitted: false,
+      removeCallerAbort: removeAbort,
+      unobservedSince: runtime.liveReadableCount === 0 ? Date.now() : undefined,
+    };
+    runtime.stream = session;
+    runtime.streamToken = session.token;
+    state.activeControllers.add(controller);
     try {
-      endStream(runtime, session, "closed");
+      reactiveInternal.batch(() => {
+        runtime.failing = false;
+        runtime.invalidated = false;
+        runtime.errorCell.set(undefined);
+        if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "opening");
+      });
     } catch (error) {
       if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
     }
-  };
-  if (controller.signal.aborted) {
-    closeOnAbort();
-    removeAbort();
-    return;
-  }
-  let iterable: AsyncIterable<T>;
-  try {
-    iterable = stream.open(input, {
-      abortSignal: controller.signal,
-      graph: state.graph.id,
-      key,
-      reportGap: () => {
-        if (!isCurrentSession(runtime, session)) return;
-        publishStreamEvent(runtime, session, { kind: "gap" });
-        if (!isCurrentSession(runtime, session)) return;
-        if (!session.emitted) return;
-        runtime.invalidated = true;
-        try {
-          reactiveInternal.batch(() => {
-            writeAllStatuses(runtime);
-            if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "stale");
-          });
-        } catch (error) {
-          if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
-        }
-      },
-    });
-  } catch (error) {
-    removeAbort();
-    failStream(runtime, session, error);
-    return;
-  }
-  if (!isCurrentSession(runtime, session)) {
-    removeAbort();
-    return;
-  }
-  let iterator: AsyncIterator<T>;
-  try {
-    iterator = iterable[Symbol.asyncIterator]();
-  } catch (error) {
-    removeAbort();
-    failStream(runtime, session, error);
-    return;
-  }
-  if (!isCurrentSession(runtime, session)) {
-    if (typeof iterator.return === "function") {
-      try {
-        void Promise.resolve(iterator.return()).catch(() => undefined);
-      } catch {
-        /* A reset owns the current session now. */
-      }
-    }
-    removeAbort();
-    return;
-  }
-  session.iterator = iterator;
-  controller.signal.addEventListener("abort", closeOnAbort, { once: true });
-  let controllerAttached = true;
-  const removeControllerAbort = (): void => {
-    if (!controllerAttached) return;
-    controllerAttached = false;
-    controller.signal.removeEventListener("abort", closeOnAbort);
-  };
-  session.removeControllerAbort = removeControllerAbort;
-  void consumeStream(runtime, session)
-    .finally(() => {
-      removeControllerAbort();
+    if (!isCurrentSession(runtime, session)) {
       removeAbort();
-      state.activeControllers.delete(controller);
-    })
-    .catch((error) => {
-      if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
-    });
+      return;
+    }
+    const closeOnAbort = (): void => {
+      if (session.ended) return;
+      try {
+        endStream(runtime, session, "closed");
+      } catch (error) {
+        if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+      }
+    };
+    if (controller.signal.aborted) {
+      closeOnAbort();
+      removeAbort();
+      return;
+    }
+    let iterable: AsyncIterable<T>;
+    try {
+      iterable = stream.open(input, {
+        abortSignal: controller.signal,
+        graph: state.graph.id,
+        key,
+        reportGap: () => {
+          if (!isCurrentSession(runtime, session)) return;
+          publishStreamEvent(runtime, session, { kind: "gap" });
+          if (!isCurrentSession(runtime, session)) return;
+          if (!session.emitted) return;
+          runtime.invalidated = true;
+          try {
+            reactiveInternal.batch(() => {
+              writeAllStatuses(runtime);
+              if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "stale");
+            });
+          } catch (error) {
+            if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+          }
+        },
+      });
+    } catch (error) {
+      removeAbort();
+      failStream(runtime, session, error);
+      return;
+    }
+    if (!isCurrentSession(runtime, session)) {
+      removeAbort();
+      return;
+    }
+    let iterator: AsyncIterator<T>;
+    try {
+      iterator = iterable[Symbol.asyncIterator]();
+    } catch (error) {
+      removeAbort();
+      failStream(runtime, session, error);
+      return;
+    }
+    if (!isCurrentSession(runtime, session)) {
+      if (typeof iterator.return === "function") {
+        try {
+          returnPhysicalIterator(state.retirement, iterator, "stream-return");
+        } catch {
+          /* A reset owns the current session now. */
+        }
+      }
+      removeAbort();
+      return;
+    }
+    session.iterator = iterator;
+    controller.signal.addEventListener("abort", closeOnAbort, { once: true });
+    let controllerAttached = true;
+    const removeControllerAbort = (): void => {
+      if (!controllerAttached) return;
+      controllerAttached = false;
+      physicalCleanup(state.retirement, () =>
+        controller.signal.removeEventListener("abort", closeOnAbort),
+      );
+    };
+    session.removeControllerAbort = removeControllerAbort;
+    const consuming = consumeStream(runtime, session);
+    driven = true;
+    void consuming
+      .finally(() => {
+        removeControllerAbort();
+        removeAbort();
+        state.activeControllers.delete(controller);
+      })
+      .catch((error) => {
+        if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+      });
+    observePhysicalWork(physical, consuming);
+  } finally {
+    if (!driven) finishPhysicalWork(physical);
+  }
 }
 
 export function streamMember<T>(

@@ -1108,4 +1108,20 @@ export interface Graph<C extends Contract = Contract> {
    * reads through held store readables fail with a `disposed` {@link Fault}.
    */
   dispose(): void;
+
+  /**
+   * Disposes this graph and joins its original operations and cleanup.
+   *
+   * Retirement waits for original query and mutation work, stream and projection
+   * reads, iterator returns, and cleanup, including work removed by an earlier
+   * reset or disposal. A source that never acknowledges completion keeps it
+   * pending. Semantic operation failures keep their existing channels; cleanup
+   * failures reject the shared promise. After admission, repeated and reentrant
+   * calls return the same promise.
+   *
+   * @returns The graph's shared physical retirement promise.
+   * @throws A {@link Fault} If the first call would close a live graph from a
+   * write-restricted reactive scope. No retirement is admitted in that case.
+   */
+  retire(): Promise<void>;
 }

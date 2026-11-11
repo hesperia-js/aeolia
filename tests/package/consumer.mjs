@@ -72,11 +72,23 @@ export async function verifyConsumer() {
       (error) =>
         check(error instanceof Fault && error.kind === "disposed", "Expected a disposal fault"),
     );
-    graph.dispose();
-    check(call.aborted, "Disposal did not abort the backend request");
+    const retirement = graph.retire();
+    check(graph.retire() === retirement, "Retirement did not return the same promise");
+    let retired = false;
+    void retirement.then(
+      () => {
+        retired = true;
+      },
+      () => {
+        retired = true;
+      },
+    );
+    check(call.aborted, "Retirement did not abort the backend request");
     await disposedRead;
+    check(!retired, "Retirement finished before the original query settled");
     backend.resolve(call, "late response");
     await refreshing;
+    await retirement;
     check(!observed.includes("late response"), "Disposed graph published a late response");
   } finally {
     stop();

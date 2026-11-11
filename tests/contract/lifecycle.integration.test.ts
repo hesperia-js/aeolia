@@ -10,6 +10,7 @@ import {
   project,
   subscribe,
   watch,
+  withoutWrites,
   Fault,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
@@ -475,3 +476,893 @@ for (const closeFailure of ["accessor", "throw", "reject"] as const) {
     expect(returns).toEqual(["first", "second", "projection"]);
   });
 }
+
+it("caches graph retirement before abort callouts and joins the original query", async () => {
+  const backend = testBackend();
+  let reentrant: Promise<void> | undefined;
+  let admissionFailure: unknown;
+  let reacquire: (() => void) | undefined;
+  let retireOwner: (() => Promise<void>) | undefined;
+  const query = createQuery({
+    name: "retirement.query",
+    key: () => "retirement/one",
+    fetch: (input: void, options) => {
+      options.abortSignal.addEventListener("abort", () => {
+        try {
+          reacquire?.();
+        } catch (cause) {
+          admissionFailure = cause;
+        }
+        reentrant = retireOwner?.();
+      });
+      return backend.respond<void, number>("retirement.query")(input, options);
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement", operations: { query } }),
+  });
+  reacquire = () => graph.api.query();
+  retireOwner = () => graph.retire();
+  const store = graph.api.query();
+  const ready = store.ready.then(
+    () => undefined,
+    () => undefined,
+  );
+  const call = backend.calls[0]!;
+  let resolved = false;
+  try {
+    const retirement = graph.retire();
+    expect(reentrant).toBe(retirement);
+    expect(graph.retire()).toBe(retirement);
+    if (!(admissionFailure instanceof Fault))
+      throw new Error("Expected a disposed admission fault");
+    expect(admissionFailure.kind).toBe("disposed");
+    expect(backend.calls).toHaveLength(1);
+    await ready;
+    expect(call.aborted).toBe(true);
+    let settled = false;
+    void retirement.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await flush();
+    expect(settled).toBe(false);
+    backend.resolve(call, 42);
+    resolved = true;
+    await retirement;
+  } finally {
+    if (!resolved) backend.resolve(call, 42);
+    graph.dispose();
+  }
+});
+
+it("joins the original stream read and its iterator return after graph retirement", async () => {
+  let resolveRead!: (result: IteratorResult<number>) => void;
+  let resolveReturn!: (result: IteratorResult<number>) => void;
+  const read = new Promise<IteratorResult<number>>((resolve) => {
+    resolveRead = resolve;
+  });
+  const returned = new Promise<IteratorResult<number>>((resolve) => {
+    resolveReturn = resolve;
+  });
+  const stream = createStream({
+    name: "retirement.stream",
+    key: () => "retirement/stream",
+    open: () => ({
+      [Symbol.asyncIterator]: () => ({ next: () => read, return: () => returned }),
+    }),
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-stream", operations: { stream } }),
+  });
+  graph.api.stream(undefined);
+  const retirement = graph.retire();
+  let settled = false;
+  void retirement.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  try {
+    await flush();
+    expect(settled).toBe(false);
+    resolveRead({ done: true, value: undefined });
+    await flush();
+    expect(settled).toBe(false);
+    resolveReturn({ done: true, value: undefined });
+    await retirement;
+  } finally {
+    resolveRead({ done: true, value: undefined });
+    resolveReturn({ done: true, value: undefined });
+    graph.dispose();
+  }
+});
+
+for (const reenter of [false, true]) {
+  it(`recovers a detached stream return after reset interruption (reentrant retirement: ${reenter})`, async () => {
+    let resolveRead!: (result: IteratorResult<number>) => void;
+    let resolveReturn!: (result: IteratorResult<number>) => void;
+    let resolveQuery!: (value: number) => void;
+    const read = new Promise<IteratorResult<number>>((resolve) => {
+      resolveRead = resolve;
+    });
+    const returned = new Promise<IteratorResult<number>>((resolve) => {
+      resolveReturn = resolve;
+    });
+    const queryResult = new Promise<number>((resolve) => {
+      resolveQuery = resolve;
+    });
+    let returnCalls = 0;
+    const stream = createStream({
+      name: "reset-retirement.stream",
+      key: () => "reset-retirement/stream",
+      open: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => read,
+          return: () => {
+            returnCalls += 1;
+            return returned;
+          },
+        }),
+      }),
+    });
+    const query = createQuery({
+      name: "reset-retirement.query",
+      key: () => "reset-retirement/query",
+      fetch: () => queryResult,
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "reset-retirement", operations: { stream, query } }),
+    });
+    const detachFailure = new Error("caller abort listener removal failed");
+    const controller = new AbortController();
+    let failRemoval = true;
+    let reentrantRetirement: Promise<void> | undefined;
+    let returnCallsDuringDetach = -1;
+    const callerSignal = new Proxy(controller.signal, {
+      get(target, property) {
+        if (property === "removeEventListener")
+          return (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+            if (failRemoval) {
+              failRemoval = false;
+              if (reenter) {
+                reentrantRetirement = graph.retire();
+                returnCallsDuringDetach = returnCalls;
+              }
+              throw detachFailure;
+            }
+            target.removeEventListener(...args);
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    graph.api.stream(undefined);
+    graph.api.query(undefined, { abortSignal: callerSignal });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    let resetError: unknown;
+    try {
+      graph.reset();
+    } catch (error) {
+      resetError = error;
+    }
+
+    try {
+      expect(resetError).toBe(detachFailure);
+      expect(returnCalls).toBe(reenter ? 1 : 0);
+      if (reenter) expect(returnCallsDuringDetach).toBe(0);
+      const retirement = graph.retire();
+      if (reenter) expect(reentrantRetirement).toBe(retirement);
+      let settled = false;
+      const result = retirement.then(
+        () => {
+          settled = true;
+          return undefined;
+        },
+        (error: unknown) => {
+          settled = true;
+          return error;
+        },
+      );
+      expect(returnCalls).toBe(1);
+      await flush();
+      expect(settled).toBe(false);
+      resolveRead({ done: true, value: undefined });
+      resolveQuery(1);
+      await flush();
+      expect(settled).toBe(false);
+      resolveReturn({ done: true, value: undefined });
+      expect(await result).toBe(detachFailure);
+      expect(returnCalls).toBe(1);
+      jest.useRealTimers();
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      } finally {
+        jest.useFakeTimers();
+        jest.setSystemTime(100);
+      }
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      resolveRead({ done: true, value: undefined });
+      resolveReturn({ done: true, value: undefined });
+      resolveQuery(1);
+      graph.dispose();
+    }
+  });
+}
+
+it("preserves reset failure and completes remaining retirement cleanup when reporting throws", async () => {
+  let resolveFirstRead!: (result: IteratorResult<number>) => void;
+  let resolveSecondRead!: (result: IteratorResult<number>) => void;
+  let resolveFirstReturn!: (result: IteratorResult<number>) => void;
+  let resolveSecondReturn!: (result: IteratorResult<number>) => void;
+  let resolveQuery!: (value: number) => void;
+  const firstRead = new Promise<IteratorResult<number>>((resolve) => {
+    resolveFirstRead = resolve;
+  });
+  const secondRead = new Promise<IteratorResult<number>>((resolve) => {
+    resolveSecondRead = resolve;
+  });
+  const firstReturn = new Promise<IteratorResult<number>>((resolve) => {
+    resolveFirstReturn = resolve;
+  });
+  const secondReturn = new Promise<IteratorResult<number>>((resolve) => {
+    resolveSecondReturn = resolve;
+  });
+  const queryResult = new Promise<number>((resolve) => {
+    resolveQuery = resolve;
+  });
+  let firstReturnCalls = 0;
+  let secondReturnCalls = 0;
+  const first = createStream({
+    name: "reset-reporting.first",
+    key: () => "reset-reporting/first",
+    open: () => ({
+      [Symbol.asyncIterator]: () => ({
+        next: () => firstRead,
+        return: () => {
+          firstReturnCalls += 1;
+          return firstReturn;
+        },
+      }),
+    }),
+  });
+  const second = createStream({
+    name: "reset-reporting.second",
+    key: () => "reset-reporting/second",
+    open: () => ({
+      [Symbol.asyncIterator]: () => ({
+        next: () => secondRead,
+        return: () => {
+          secondReturnCalls += 1;
+          return secondReturn;
+        },
+      }),
+    }),
+  });
+  const query = createQuery({
+    name: "reset-reporting.query",
+    key: () => "reset-reporting/query",
+    fetch: () => queryResult,
+  });
+  const unobserved: unknown[] = [];
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "reset-reporting",
+      operations: { first, second, query },
+    }),
+    onUnobservedFault: (error) => {
+      unobserved.push(error);
+    },
+  });
+  const resetFailure = new Error("query listener removal failed");
+  const reportingFailure = new Error("cleanup diagnostic failed");
+  const cleanupFailure = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        throw reportingFailure;
+      },
+    },
+  );
+  const streamController = new AbortController();
+  let failStreamRemoval = true;
+  const streamSignal = new Proxy(streamController.signal, {
+    get(target, property) {
+      if (property === "removeEventListener")
+        return (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+          if (failStreamRemoval) {
+            failStreamRemoval = false;
+            throw cleanupFailure;
+          }
+          target.removeEventListener(...args);
+        };
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const queryController = new AbortController();
+  let failQueryRemoval = true;
+  let reentrantRetirement: Promise<void> | undefined;
+  const querySignal = new Proxy(queryController.signal, {
+    get(target, property) {
+      if (property === "removeEventListener")
+        return (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+          if (failQueryRemoval) {
+            failQueryRemoval = false;
+            reentrantRetirement = graph.retire();
+            throw resetFailure;
+          }
+          target.removeEventListener(...args);
+        };
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  graph.api.first(undefined, { abortSignal: streamSignal });
+  graph.api.second(undefined);
+  graph.api.query(undefined, { abortSignal: querySignal });
+
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    let resetError: unknown;
+    try {
+      graph.reset();
+    } catch (error) {
+      resetError = error;
+    }
+    expect(resetError).toBe(resetFailure);
+    expect(firstReturnCalls).toBe(1);
+    expect(secondReturnCalls).toBe(1);
+    const retirement = graph.retire();
+    expect(reentrantRetirement).toBe(retirement);
+    let settled = false;
+    const result = retirement.then(
+      () => {
+        settled = true;
+        return undefined;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    await flush();
+    expect(settled).toBe(false);
+    resolveFirstRead({ done: true, value: undefined });
+    resolveSecondRead({ done: true, value: undefined });
+    resolveQuery(1);
+    resolveFirstReturn({ done: true, value: undefined });
+    await flush();
+    expect(settled).toBe(false);
+    resolveSecondReturn({ done: true, value: undefined });
+    const failure = await result;
+    expect(failure).toBeInstanceOf(AggregateError);
+    const causes: unknown[] = (failure as AggregateError).errors;
+    expect(causes.some((cause) => cause === resetFailure)).toBe(true);
+    expect(causes.some((cause) => cause === cleanupFailure)).toBe(true);
+    expect(causes).toHaveLength(2);
+    expect(causes.some((cause) => cause === reportingFailure)).toBe(false);
+    expect(unobserved.some((error) => error === cleanupFailure)).toBe(true);
+    expect(firstReturnCalls).toBe(1);
+    expect(secondReturnCalls).toBe(1);
+    jest.useRealTimers();
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    } finally {
+      jest.useFakeTimers();
+      jest.setSystemTime(100);
+    }
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    resolveFirstRead({ done: true, value: undefined });
+    resolveSecondRead({ done: true, value: undefined });
+    resolveFirstReturn({ done: true, value: undefined });
+    resolveSecondReturn({ done: true, value: undefined });
+    resolveQuery(1);
+    graph.dispose();
+  }
+});
+
+async function expectRetirementPending(retirement: Promise<void>): Promise<void> {
+  let settled = false;
+  void retirement.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await flush();
+  expect(settled).toBe(false);
+}
+
+it("allows retirement after a write-restricted first attempt", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-admission", operations: {} }),
+  });
+  let refusedPromise: Promise<void> | undefined;
+  let refusal: unknown;
+  try {
+    try {
+      withoutWrites(() => {
+        refusedPromise = graph.retire();
+        void refusedPromise.catch(() => undefined);
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Fault);
+    expect((refusal as Fault).kind).toBe("write-forbidden");
+    expect(refusedPromise).toBeUndefined();
+    const writable = graph.at("still-open");
+    writable.set(1);
+    expect(writable.value.get()).toBe(1);
+    const retirement = graph.retire();
+    expect(graph.retire()).toBe(retirement);
+    await retirement;
+  } finally {
+    graph.dispose();
+    await refusedPromise?.catch(() => undefined);
+  }
+});
+
+for (const owner of ["stream", "projection"] as const) {
+  it(`records one return getter failure during graph retirement (${owner})`, async () => {
+    const failure = new Error(`${owner} return getter failed`);
+    const pull = Promise.withResolvers<IteratorResult<number>>();
+    const started = Promise.withResolvers<void>();
+    let getterCalls = 0;
+    const stream = createStream({
+      name: `retirement.getter.${owner}`,
+      key: () => `retirement-getter/${owner}`,
+      open: (): AsyncIterable<number> => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              started.resolve();
+              return pull.promise;
+            },
+            get return(): never {
+              getterCalls += 1;
+              throw failure;
+            },
+          };
+        },
+      }),
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "retirement-getter", operations: { stream } }),
+    });
+    try {
+      if (owner === "stream") graph.api.stream(undefined);
+      else project(graph, stream, undefined, { kind: "accumulate", max: 2 });
+      await started.promise;
+      const retirement = graph.retire();
+      const outcome = retirement.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(getterCalls).toBe(1);
+      await expectRetirementPending(retirement);
+      pull.resolve({ done: true, value: undefined });
+      expect(await outcome).toBe(failure);
+      expect(getterCalls).toBe(1);
+    } finally {
+      pull.resolve({ done: true, value: undefined });
+      graph.dispose();
+    }
+  });
+}
+
+for (const scenario of ["distinct", "same", "report"] as const) {
+  it(`settles retirement after two cleanup failures (${scenario})`, async () => {
+    const firstFailure = new Error("first return rejection");
+    const secondFailure = scenario === "same" ? firstFailure : new Error("second return rejection");
+    const reportFailure = new Error("cleanup report construction failed");
+    const reads = [
+      Promise.withResolvers<IteratorResult<number>>(),
+      Promise.withResolvers<IteratorResult<number>>(),
+    ];
+    const returns = [
+      Promise.withResolvers<IteratorResult<number>>(),
+      Promise.withResolvers<IteratorResult<number>>(),
+    ];
+    const started = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const order: number[] = [];
+    const stream = createStream({
+      name: "retirement.ordered-stream",
+      key: (input: number) => `retirement-ordered/${input}`,
+      open: (input): AsyncIterable<number> => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              started[input]!.resolve();
+              return reads[input]!.promise;
+            },
+            return: () => {
+              order.push(input);
+              return returns[input]!.promise;
+            },
+          };
+        },
+      }),
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "retirement-ordered", operations: { stream } }),
+    });
+    try {
+      graph.api.stream(0);
+      graph.api.stream(1);
+      await Promise.all(started.map((entry) => entry.promise));
+      const retirement = graph.retire();
+      expect(graph.retire()).toBe(retirement);
+      let settlements = 0;
+      let rejection: unknown;
+      const outcome = retirement.then(
+        () => {
+          settlements += 1;
+          return undefined;
+        },
+        (error: unknown) => {
+          settlements += 1;
+          rejection = error;
+          return error;
+        },
+      );
+      expect(order).toEqual([0, 1]);
+      returns[1]!.reject(secondFailure);
+      reads[1]!.resolve({ done: true, value: undefined });
+      reads[0]!.resolve({ done: true, value: undefined });
+      await expectRetirementPending(retirement);
+      if (scenario === "report") {
+        const descriptor = Object.getOwnPropertyDescriptor(globalThis, "AggregateError");
+        if (descriptor === undefined) throw new Error("AggregateError is unavailable");
+        let reportCalls = 0;
+        try {
+          Object.defineProperty(globalThis, "AggregateError", {
+            ...descriptor,
+            value: function () {
+              reportCalls += 1;
+              throw reportFailure;
+            },
+          });
+          returns[0]!.reject(firstFailure);
+          await flush();
+          await flush();
+        } finally {
+          Object.defineProperty(globalThis, "AggregateError", descriptor);
+        }
+        expect(reportCalls).toBeGreaterThan(0);
+        expect(settlements).toBe(1);
+        expect(rejection).toBe(reportFailure);
+      } else {
+        returns[0]!.reject(firstFailure);
+        const error = await outcome;
+        expect(error).toBeInstanceOf(AggregateError);
+        const causes: unknown[] = (error as AggregateError).errors;
+        expect(causes).toHaveLength(2);
+        expect(causes[0]).toBe(firstFailure);
+        expect(causes[1]).toBe(secondFailure);
+      }
+      expect(graph.retire()).toBe(retirement);
+      await flush();
+      expect(settlements).toBe(1);
+      expect(order).toEqual([0, 1]);
+    } finally {
+      for (const read of reads) read.resolve({ done: true, value: undefined });
+      for (const pending of returns) pending.resolve({ done: true, value: undefined });
+      graph.dispose();
+    }
+  });
+}
+
+it("waits for held mutation output after graph retirement", async () => {
+  const original = Promise.withResolvers<string>();
+  let signal: AbortSignal | undefined;
+  const mutation = createMutation({
+    name: "retirement.held-mutation",
+    affects: [],
+    run: (_input: void, options) => {
+      signal = options.abortSignal;
+      return original.promise;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-mutation", operations: { mutation } }),
+  });
+  try {
+    const operation = graph.api.mutation();
+    const retirement = graph.retire();
+    expect(signal?.aborted).toBe(true);
+    await expectRetirementPending(retirement);
+    original.resolve("completed");
+    await expect(operation).resolves.toBe("completed");
+    await retirement;
+  } finally {
+    original.resolve("completed");
+    graph.dispose();
+  }
+});
+
+it("joins an independent projection pull and return during graph retirement", async () => {
+  const pull = Promise.withResolvers<IteratorResult<number>>();
+  const returned = Promise.withResolvers<IteratorResult<number>>();
+  const started = Promise.withResolvers<void>();
+  let returns = 0;
+  const stream = createStream({
+    name: "retirement.projection",
+    key: () => "retirement/projection",
+    open: (): AsyncIterable<number> => ({
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => {
+            started.resolve();
+            return pull.promise;
+          },
+          return: () => {
+            returns += 1;
+            return returned.promise;
+          },
+        };
+      },
+    }),
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-projection", operations: { stream } }),
+  });
+  try {
+    const projection = project(graph, stream, undefined, { kind: "accumulate", max: 2 });
+    await started.promise;
+    const retirement = graph.retire();
+    expect(returns).toBe(1);
+    expect(projection.status.get()).toBe("closed");
+    await expectRetirementPending(retirement);
+    returned.resolve({ done: true, value: undefined });
+    await expectRetirementPending(retirement);
+    pull.resolve({ done: true, value: undefined });
+    await retirement;
+    expect(returns).toBe(1);
+  } finally {
+    pull.resolve({ done: true, value: undefined });
+    returned.resolve({ done: true, value: undefined });
+    graph.dispose();
+  }
+});
+
+it.each(["Error", "undefined"] as const)(
+  "resumes prior graph disposal with a %s lifetime-removal failure and reentrant retirement",
+  async (failureKind) => {
+    const failure = new Error("lifetime listener removal failed");
+    const cause = failureKind === "Error" ? failure : undefined;
+    const original = Promise.withResolvers<number>();
+    const projectionPull = Promise.withResolvers<IteratorResult<number>>();
+    const projectionReturn = Promise.withResolvers<IteratorResult<number>>();
+    const pullStarted = Promise.withResolvers<void>();
+    const lifetime = new AbortController();
+    let retireDuringRemoval: (() => Promise<void>) | undefined;
+    let reentrantRetirement: Promise<void> | undefined;
+    let removalCalls = 0;
+    let fetchCalls = 0;
+    let queryAbortCalls = 0;
+    let returnCalls = 0;
+    let querySignal: AbortSignal | undefined;
+    const abortSignal: AbortSignal = {
+      get aborted() {
+        return lifetime.signal.aborted;
+      },
+      get reason() {
+        return lifetime.signal.reason;
+      },
+      get onabort() {
+        return lifetime.signal.onabort;
+      },
+      set onabort(value) {
+        lifetime.signal.onabort = value;
+      },
+      throwIfAborted() {
+        lifetime.signal.throwIfAborted();
+      },
+      addEventListener(
+        type: Parameters<AbortSignal["addEventListener"]>[0],
+        listener: Parameters<AbortSignal["addEventListener"]>[1],
+        options?: Parameters<AbortSignal["addEventListener"]>[2],
+      ) {
+        lifetime.signal.addEventListener(type, listener, options);
+      },
+      removeEventListener(
+        type: Parameters<AbortSignal["removeEventListener"]>[0],
+        listener: Parameters<AbortSignal["removeEventListener"]>[1],
+        options?: Parameters<AbortSignal["removeEventListener"]>[2],
+      ) {
+        lifetime.signal.removeEventListener(type, listener, options);
+        if (type !== "abort") return;
+        removalCalls += 1;
+        if (removalCalls === 1) reentrantRetirement = retireDuringRemoval?.();
+        throw cause;
+      },
+      dispatchEvent(event) {
+        return lifetime.signal.dispatchEvent(event);
+      },
+    };
+    const query = createQuery({
+      name: "prior-disposal.query",
+      key: () => "prior-disposal/query",
+      fetch: (_input: void, options) => {
+        fetchCalls += 1;
+        querySignal = options.abortSignal;
+        options.abortSignal.addEventListener("abort", () => {
+          queryAbortCalls += 1;
+        });
+        return original.promise;
+      },
+    });
+    const stream = createStream({
+      name: "prior-disposal.projection",
+      key: () => "prior-disposal/projection",
+      open: (): AsyncIterable<number> => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              pullStarted.resolve();
+              return projectionPull.promise;
+            },
+            return: () => {
+              returnCalls += 1;
+              return projectionReturn.promise;
+            },
+          };
+        },
+      }),
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "prior-disposal-retirement",
+        operations: { query, stream },
+      }),
+      abortSignal,
+    });
+    retireDuringRemoval = () => graph.retire();
+    let readySettlements = 0;
+    let ready: Promise<void> | undefined;
+    try {
+      const store = graph.api.query();
+      ready = store.ready.then(
+        () => {
+          readySettlements += 1;
+        },
+        () => {
+          readySettlements += 1;
+        },
+      );
+      const projection = project(graph, stream, undefined, { kind: "accumulate", max: 2 });
+      await pullStarted.promise;
+
+      let disposalThrew = false;
+      let disposalCause: unknown;
+      try {
+        graph.dispose();
+      } catch (caught) {
+        disposalThrew = true;
+        disposalCause = caught;
+      }
+      expect(disposalThrew).toBe(true);
+      expect(disposalCause).toBe(cause);
+
+      const retirement = graph.retire();
+      expect(reentrantRetirement).toBe(retirement);
+      const outcome = retirement.then(
+        () => ({ kind: "fulfilled" as const }),
+        (rejection: unknown) => ({ kind: "rejected" as const, cause: rejection }),
+      );
+      expect(graph.retire()).toBe(retirement);
+
+      expect(removalCalls).toBe(1);
+      expect(fetchCalls).toBe(1);
+      expect(querySignal?.aborted).toBe(true);
+      expect(queryAbortCalls).toBe(1);
+      expect(returnCalls).toBe(1);
+      expect(projection.status.get()).toBe("closed");
+      try {
+        graph.api.query();
+        throw new Error("Expected graph admission to be closed");
+      } catch (admissionCause) {
+        if (!(admissionCause instanceof Fault)) throw admissionCause;
+        expect(admissionCause.kind).toBe("disposed");
+      }
+      await ready;
+      expect(readySettlements).toBe(1);
+      await expectRetirementPending(retirement);
+
+      projectionReturn.resolve({ done: true, value: undefined });
+      await expectRetirementPending(retirement);
+      projectionPull.resolve({ done: true, value: undefined });
+      await expectRetirementPending(retirement);
+      original.resolve(42);
+
+      const result = await outcome;
+      expect(result.kind).toBe("rejected");
+      if (result.kind !== "rejected") throw new Error("Expected the retained cleanup failure");
+      expect(result.cause).toBe(cause);
+      expect(removalCalls).toBe(1);
+      expect(returnCalls).toBe(1);
+    } finally {
+      original.resolve(42);
+      projectionPull.resolve({ done: true, value: undefined });
+      projectionReturn.resolve({ done: true, value: undefined });
+      try {
+        graph.dispose();
+      } catch {
+        // Retirement retains the lifetime-removal cause.
+      }
+      await graph.retire().then(
+        () => undefined,
+        () => undefined,
+      );
+      await ready;
+    }
+  },
+);
+
+it("joins original queries after cancellation and prior void graph disposal", async () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "disposed-retirement.query",
+    key: (input: string) => `disposed-retirement/${input}`,
+    fetch: backend.respond<string, number>("disposed-retirement.query"),
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "disposed-retirement", operations: { query } }),
+  });
+  const cancelledReady = graph.api.query("cancelled").ready.then(
+    () => undefined,
+    () => undefined,
+  );
+  const cancelledCall = backend.calls[0]!;
+  let disposedCall: (typeof backend.calls)[number] | undefined;
+  let cancelledResolved = false;
+  let disposedResolved = false;
+  try {
+    graph.cancelPending();
+    const disposedReady = graph.api.query("disposed").ready.then(
+      () => undefined,
+      () => undefined,
+    );
+    disposedCall = backend.calls[1]!;
+    graph.dispose();
+    const retirement = graph.retire();
+    await Promise.all([cancelledReady, disposedReady]);
+    expect(cancelledCall.aborted).toBe(true);
+    expect(disposedCall!.aborted).toBe(true);
+    await expectRetirementPending(retirement);
+    backend.resolve(disposedCall!, 84);
+    disposedResolved = true;
+    await expectRetirementPending(retirement);
+    backend.resolve(cancelledCall, 42);
+    cancelledResolved = true;
+    await retirement;
+  } finally {
+    if (!cancelledResolved) backend.resolve(cancelledCall, 42);
+    if (!disposedResolved && disposedCall !== undefined) backend.resolve(disposedCall, 84);
+    graph.dispose();
+  }
+});

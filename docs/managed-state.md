@@ -214,6 +214,45 @@ physical transport termination.
 Calling `cancelPending()` after graph disposal does nothing. Dispose the graph
 when its readable state and resources should finally be released.
 
+## Retiring a graph
+
+Use `graph.retire()` when the graph's owner is finished with the graph and
+needs to wait for the work it admitted to complete:
+
+```ts
+try {
+  await graph.retire();
+} catch (error) {
+  console.error("Graph cleanup failed", error);
+}
+```
+
+Retirement permanently closes the graph. It disposes the graph immediately,
+aborts active work, and refuses new work and store reads with a `disposed`
+fault. Its promise waits for the original admitted query and
+mutation work, stream and projection reads, iterator returns, and owned cleanup.
+It also joins that work when an earlier reset, cancellation, or `dispose()`
+removed it from active state. Calling `dispose()` alone does not wait.
+
+After retirement is admitted, repeated and reentrant calls return the same
+promise. Make the first call outside a write-restricted reactive scope. If a
+first call on a live graph is write-restricted, it throws a `write-forbidden`
+fault synchronously and leaves the graph open for a later attempt.
+
+An original operation's failure remains on its existing result or fault channel;
+it does not by itself reject retirement. An owned cleanup failure rejects the
+retirement promise with its original cause. If several cleanup attempts fail,
+the promise rejects with an `AggregateError` whose `errors` follow attempt
+order, including repeated references when separate attempts throw the same
+object. If constructing that report fails, the promise rejects with the report
+construction failure.
+
+Abort signals request cancellation; they cannot force a provider or transport
+to stop. Retirement waits for the original work and cleanup Aeolia owns, not
+for detached work that a provider has stopped representing through its returned
+promise or iterator. If an owned operation or cleanup never settles, retirement
+remains pending.
+
 ## Resetting graph state
 
 `graph.reset()` starts a new state epoch while preserving the graph, API, store
