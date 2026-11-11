@@ -172,8 +172,12 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
         api[property] = (...args: [input?: unknown, options?: MutationOptions]) =>
           graphAcquisition(state, () => {
             const [input, options] = args;
-            const call = normalizeMutationCall(input, options, args.length > 1, () =>
-              assertGraphOpen(state),
+            const call = normalizeMutationCall(
+              input,
+              options,
+              args.length > 1,
+              () => assertGraphOpen(state),
+              (cleanup) => physicalCleanup(state.retirement, cleanup),
             );
             return runMutation(
               state,
@@ -276,13 +280,15 @@ function normalizeMutationCall(
   options: MutationOptions | undefined,
   hasSecondArgument: boolean,
   afterRead: () => void,
+  cleanup: (action: () => void) => void,
 ): {
   readonly input: unknown;
   readonly options?: MutationOptions;
 } {
   const call = normalizeMutationArguments(input, options, hasSecondArgument, afterRead);
   if (call.options === undefined) return { input: call.input };
-  if (!isMutationOptions(call.options, afterRead)) throw new TypeError("Invalid mutation options.");
+  if (!isMutationOptions(call.options, afterRead, cleanup))
+    throw new TypeError("Invalid mutation options.");
   return { input: call.input, options: call.options };
 }
 
