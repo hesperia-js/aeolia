@@ -270,8 +270,13 @@ it("preserves ordinary caller abort behavior for a mutation", async () => {
   }
 });
 
-for (const preAborted of [false, true]) {
-  it(`retains readables and late mutation effects (pre-aborted: ${preAborted})`, async () => {
+for (const { label, preAborted, mode } of [
+  { label: "supplied reason", preAborted: false, mode: "supplied" },
+  { label: "pre-aborted caller", preAborted: true, mode: "supplied" },
+  { label: "omitted reason", preAborted: false, mode: "omitted" },
+  { label: "explicit undefined", preAborted: false, mode: "undefined" },
+] as const) {
+  it(`retains readables and late mutation effects (${label})`, async () => {
     const backend = testBackend();
     const signals: AbortSignal[] = [];
     const query = createQuery({
@@ -310,9 +315,17 @@ for (const preAborted of [false, true]) {
       expect(signals[0]!.aborted).toBe(preAborted);
       const previousReason = signals[0]!.reason;
       if (preAborted) expect(previousReason).toMatchObject({ name: "AbortError" });
-      const reason = new Error("request ended");
+      const suppliedReason = new Error("request ended");
 
-      graph.cancelPending(reason);
+      if (mode === "supplied") graph.cancelPending(suppliedReason);
+      else if (mode === "omitted") graph.cancelPending();
+      else graph.cancelPending(undefined);
+
+      const reason = mode === "supplied" ? suppliedReason : signals[0]!.reason;
+      if (mode !== "supplied") {
+        expect(reason).toBeInstanceOf(Error);
+        expect(reason).toMatchObject({ name: "AbortError" });
+      }
 
       expect(backend.calls[0]!.aborted).toBe(true);
       expect(signals[0]!.reason).toBe(preAborted ? previousReason : reason);
