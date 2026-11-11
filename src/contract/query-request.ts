@@ -191,6 +191,7 @@ export function startQueryRequest<T>(
     outcome,
     resolveOutcome,
     outcomeReported: false,
+    callerAbortSignal: abortSignal,
     removeCallerAbort,
     settled: false,
     superseded: false,

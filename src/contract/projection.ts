@@ -126,18 +126,23 @@ export interface Projection<V> {
   close(): void;
 }
 
+interface ProjectionSource<T> {
+  readonly controller: AbortController;
+  readonly generation: number;
+  iterator?: AsyncIterator<T>;
+  detach?: () => void;
+  retired: boolean;
+}
+
 interface ProjectionRuntime<T, V> {
   readonly graph: Graph;
   readonly valueCell: ReturnType<typeof signal<V>>;
   readonly statusCell: ReturnType<typeof signal<ProjectionStatus>>;
   readonly errorCell: ReturnType<typeof signal<unknown>>;
   readonly policy: ProjectionPolicy<T, V>;
-  controller: AbortController;
-  iterator?: AsyncIterator<T>;
+  source: ProjectionSource<T>;
   unregister?: () => void;
-  detach?: () => void;
   restartSource?: () => void;
-  generation: number;
   closed: boolean;
 }
 
@@ -160,18 +165,41 @@ function safeSet<T, V>(runtime: ProjectionRuntime<T, V>, set: () => void): void 
   }
 }
 
-function stopSource<T, V>(runtime: ProjectionRuntime<T, V>): void {
-  runtime.detach?.();
-  runtime.detach = undefined;
-  runtime.controller.abort();
-  if (runtime.iterator != null && typeof runtime.iterator.return === "function") {
-    try {
-      void Promise.resolve(runtime.iterator.return()).catch(() => undefined);
-    } catch {
-      // A source's close error does not replace its current lifecycle result.
-    }
-  }
-  runtime.iterator = undefined;
+function stopSource<T>(source: ProjectionSource<T>, reason?: unknown): (() => void) | undefined {
+  if (source.retired) return undefined;
+  source.retired = true;
+  const detach = source.detach;
+  const iterator = source.iterator;
+  source.detach = undefined;
+  source.iterator = undefined;
+  let cleaned = false;
+  return () => {
+    if (cleaned) return;
+    cleaned = true;
+    const failures: unknown[] = [];
+    const attempt = (action: () => void): void => {
+      try {
+        action();
+      } catch (error) {
+        failures.push(error);
+      }
+    };
+    if (detach !== undefined) attempt(detach);
+    attempt(() => source.controller.abort(reason));
+    attempt(() => {
+      if (iterator == null) return;
+      const close = iterator.return;
+      if (typeof close !== "function") return;
+      try {
+        void Promise.resolve(close.call(iterator)).catch(() => undefined);
+      } catch {
+        // A source's close error does not replace its current lifecycle result.
+      }
+    });
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1)
+      throw new AggregateError(failures, "Several projection cleanup operations failed");
+  };
 }
 
 function registerTerminalReset<V>(
@@ -190,6 +218,8 @@ function registerTerminalReset<V>(
   const reset = (): void => {
     if (!active) return;
     active = false;
+    const resetEpoch = state.resetEpoch;
+    const current = (): boolean => state.resetEpoch === resetEpoch;
     terminalProjectionReadableFinalizer.unregister(finalizerToken);
     unregister?.();
     unregister = undefined;
@@ -210,14 +240,14 @@ function registerTerminalReset<V>(
         reportGraphContinuationError(graph, reason);
       }
     }
-    if (value !== undefined) {
+    if (current() && value !== undefined) {
       try {
         value.set(initial as V);
       } catch (reason) {
         reportGraphContinuationError(graph, reason);
       }
     }
-    if (error !== undefined) {
+    if (current() && error !== undefined) {
       try {
         error.set(undefined);
       } catch (reason) {
@@ -226,6 +256,7 @@ function registerTerminalReset<V>(
     }
   };
   const projection: GraphProjection = {
+    captureCancellation: () => undefined,
     reset: () => {
       reset();
       return undefined;
@@ -247,58 +278,75 @@ function registerTerminalReset<V>(
   }
 }
 
-function finish<T, V>(runtime: ProjectionRuntime<T, V>, failed: boolean, reason?: unknown): void {
-  if (runtime.closed) return;
+function finish<T, V>(
+  runtime: ProjectionRuntime<T, V>,
+  failed: boolean,
+  reason?: unknown,
+  source = runtime.source,
+  abortReason?: unknown,
+): void {
+  const cleanup = stopSource(source, abortReason);
+  if (cleanup === undefined) return;
+  if (runtime.source !== source || runtime.closed) {
+    cleanup();
+    return;
+  }
   runtime.closed = true;
-  const resetVersion = graphRuntimeByGraph.get(runtime.graph as object)?.resetVersion.peek() ?? 0;
-  runtime.unregister?.();
+  const state = graphRuntimeByGraph.get(runtime.graph as object);
+  const resetEpoch = state?.resetEpoch;
+  const resetVersion = state?.resetVersion.peek();
+  const current = (): boolean =>
+    runtime.source === source &&
+    state?.resetEpoch === resetEpoch &&
+    state?.resetVersion.peek() === resetVersion;
+  const unregister = runtime.unregister;
   runtime.unregister = undefined;
   const terminalStatus = failed ? "failed" : "closed";
-  registerTerminalReset(
-    runtime.graph,
-    terminalStatus,
-    new WeakRef(runtime.valueCell),
-    new WeakRef(runtime.statusCell),
-    new WeakRef(runtime.errorCell),
-  );
-  stopSource(runtime);
-  if ((graphRuntimeByGraph.get(runtime.graph as object)?.resetVersion.peek() ?? 0) !== resetVersion)
-    return;
-  if (failed) {
-    if (reason != null) safeSet(runtime, () => runtime.errorCell.set(reason));
-    if (
-      (graphRuntimeByGraph.get(runtime.graph as object)?.resetVersion.peek() ?? 0) !== resetVersion
-    )
-      return;
+  unregister?.();
+  if (current())
+    registerTerminalReset(
+      runtime.graph,
+      terminalStatus,
+      new WeakRef(runtime.valueCell),
+      new WeakRef(runtime.statusCell),
+      new WeakRef(runtime.errorCell),
+    );
+  let cleanupError: unknown;
+  let cleanupFailed = false;
+  try {
+    cleanup();
+  } catch (error) {
+    cleanupFailed = true;
+    cleanupError = error;
   }
-  safeSet(runtime, () => runtime.statusCell.set(terminalStatus));
+  if (current() && failed && reason != null) safeSet(runtime, () => runtime.errorCell.set(reason));
+  if (current()) safeSet(runtime, () => runtime.statusCell.set(terminalStatus));
+  if (cleanupFailed) throw cleanupError;
 }
 
 function prepareReset<T, V>(runtime: ProjectionRuntime<T, V>): (() => void) | undefined {
   if (runtime.closed) return undefined;
-  const controller = runtime.controller;
-  const iterator = runtime.iterator;
-  runtime.detach?.();
-  runtime.detach = undefined;
-  runtime.iterator = undefined;
-  runtime.generation += 1;
-  runtime.controller = new AbortController();
-  const initial = runtime.policy.kind === "reduce" ? runtime.policy.initial : ([] as unknown as V);
-  safeSet(runtime, () => {
-    runtime.valueCell.set(initial);
-    runtime.errorCell.set(undefined);
-    runtime.statusCell.set("open");
-  });
-  return () => {
-    controller.abort();
-    if (iterator != null && typeof iterator.return === "function") {
-      try {
-        void Promise.resolve(iterator.return()).catch(() => undefined);
-      } catch {
-        // Reset already retired this source session.
-      }
-    }
+  const previous = runtime.source;
+  const cleanup = stopSource(previous);
+  const source: ProjectionSource<T> = {
+    controller: new AbortController(),
+    generation: previous.generation + 1,
+    retired: false,
   };
+  runtime.source = source;
+  const state = graphRuntimeByGraph.get(runtime.graph as object);
+  const resetEpoch = state?.resetEpoch;
+  const current = (): boolean =>
+    isCurrentGeneration(runtime, source.controller, source.generation) &&
+    state?.resetEpoch === resetEpoch;
+  safeSet(runtime, () => {
+    const initial =
+      runtime.policy.kind === "reduce" ? runtime.policy.initial : ([] as unknown as V);
+    if (current()) runtime.valueCell.set(initial);
+  });
+  if (current()) safeSet(runtime, () => runtime.errorCell.set(undefined));
+  if (current()) safeSet(runtime, () => runtime.statusCell.set("open"));
+  return cleanup;
 }
 
 function fail<T, V>(runtime: ProjectionRuntime<T, V>, reason: unknown): void {
@@ -310,7 +358,12 @@ function isCurrentGeneration<T, V>(
   controller: AbortController,
   generation: number,
 ): boolean {
-  return !runtime.closed && runtime.controller === controller && runtime.generation === generation;
+  return (
+    !runtime.closed &&
+    !runtime.source.retired &&
+    runtime.source.controller === controller &&
+    runtime.source.generation === generation
+  );
 }
 
 function accept<T, V>(
@@ -351,17 +404,12 @@ async function consume<T, V>(
   controller: AbortController,
   generation: number,
 ): Promise<void> {
-  const iterator = runtime.iterator;
+  const iterator = runtime.source.iterator;
   if (iterator === undefined) return;
   try {
-    while (
-      !runtime.closed &&
-      runtime.controller === controller &&
-      runtime.generation === generation
-    ) {
+    while (isCurrentGeneration(runtime, controller, generation)) {
       const result = await iterator.next();
-      if (runtime.closed || runtime.controller !== controller || runtime.generation !== generation)
-        return;
+      if (!isCurrentGeneration(runtime, controller, generation)) return;
       if (result.done) {
         finish(runtime, false);
         return;
@@ -369,8 +417,7 @@ async function consume<T, V>(
       accept(runtime, result.value, controller, generation);
     }
   } catch (error) {
-    if (!runtime.closed && runtime.controller === controller && runtime.generation === generation)
-      fail(runtime, error);
+    if (isCurrentGeneration(runtime, controller, generation)) fail(runtime, error);
   }
 }
 
@@ -388,8 +435,7 @@ function initializeProjection<T, V>(
     statusCell,
     errorCell,
     policy,
-    controller,
-    generation: 0,
+    source: { controller, generation: 0, retired: false },
     closed: false,
   };
   if (policy.kind === "reduce") projectionInitialByValueCell.set(valueCell, policy.initial);
@@ -403,6 +449,12 @@ function initializeProjection<T, V>(
   });
 
   runtime.unregister = registerProjection(graph, {
+    captureCancellation: () => {
+      const source = runtime.source;
+      return runtime.closed || source.retired
+        ? undefined
+        : (reason) => finish(runtime, false, undefined, source, reason);
+    },
     reset: () => prepareReset(runtime),
     restart: () => {
       if (!runtime.closed) runtime.restartSource?.();
@@ -431,18 +483,19 @@ function openIndependent<T, V>(
   input: unknown,
   propagateKeyError = false,
 ): void {
-  const controller = runtime.controller;
-  const generation = runtime.generation;
+  const source = runtime.source;
+  const controller = source.controller;
+  const generation = source.generation;
   let key: ReturnType<typeof storeKey>;
   try {
     key = storeKey(stream.key(input));
   } catch (error) {
-    if (runtime.controller !== controller || runtime.generation !== generation) return;
+    if (!isCurrentGeneration(runtime, controller, generation)) return;
     if (propagateKeyError) {
       runtime.unregister?.();
       runtime.unregister = undefined;
       runtime.closed = true;
-      controller.abort();
+      stopSource(source)?.();
       throw error;
     }
     fail(runtime, error);
@@ -454,22 +507,28 @@ function openIndependent<T, V>(
     graph: graph.id,
     key,
     reportGap: () => {
-      if (!runtime.closed && runtime.controller === controller && runtime.generation === generation)
+      if (isCurrentGeneration(runtime, controller, generation))
         fail(runtime, new Error("Aeolia projection stream reported a gap"));
     },
   };
   let iterable: AsyncIterable<T>;
   try {
     iterable = stream.open(input, options);
+    if (!isCurrentGeneration(runtime, controller, generation)) return;
     const iterator = iterable[Symbol.asyncIterator]();
-    if (runtime.closed || runtime.controller !== controller || runtime.generation !== generation) {
-      if (typeof iterator.return === "function")
-        void Promise.resolve(iterator.return()).catch(() => undefined);
+    if (!isCurrentGeneration(runtime, controller, generation)) {
+      if (typeof iterator.return === "function") {
+        try {
+          void Promise.resolve(iterator.return()).catch(() => undefined);
+        } catch {
+          // The source generation has already been retired.
+        }
+      }
       return;
     }
-    runtime.iterator = iterator;
+    source.iterator = iterator;
   } catch (error) {
-    if (runtime.controller !== controller || runtime.generation !== generation) return;
+    if (!isCurrentGeneration(runtime, controller, generation)) return;
     fail(runtime, error);
     return;
   }
@@ -495,20 +554,19 @@ function attachSharedProjection<T, V>(
   store: StoreRuntime<T>,
   source: StreamStore<T>,
 ): void {
-  if (runtime.closed || runtime.detach !== undefined) return;
+  if (runtime.closed || runtime.source.retired || runtime.source.detach !== undefined) return;
+  const generationSource = runtime.source;
   const session = store.stream;
   if (session === undefined || session.ended) {
     const failed = source.status.peek() === "failed";
     finish(runtime, failed, failed ? source.error.peek() : undefined);
     return;
   }
-  const controller = runtime.controller;
-  const generation = runtime.generation;
+  const controller = generationSource.controller;
+  const generation = generationSource.generation;
   const listener = (event: StreamEvent<unknown>): void => {
     if (
-      runtime.closed ||
-      runtime.controller !== controller ||
-      runtime.generation !== generation ||
+      !isCurrentGeneration(runtime, controller, generation) ||
       store.stream !== session ||
       session.resetEpoch !== store.graph.__runtime.resetEpoch
     )
@@ -522,7 +580,7 @@ function attachSharedProjection<T, V>(
   session.unobservedSince = undefined;
   updateCollectionCandidate(store);
   scheduleSweep(store.graph.__runtime);
-  runtime.detach = () => {
+  generationSource.detach = () => {
     session.listeners.delete(listener);
     if (store.stream === session && !isLive(store)) session.unobservedSince = Date.now();
     updateCollectionCandidate(store);

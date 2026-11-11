@@ -40,6 +40,66 @@ function setup() {
   return { backend, graph, source: graph.api.stream() };
 }
 
+it("delivers shared close before nested cancellation without replacing the outer source reason", async () => {
+  const backend = testBackend();
+  const open = backend.stream<void, number>("nested-cancel");
+  let sourceSignal: AbortSignal | undefined;
+  let returns = 0;
+  const stream = createStream({
+    name: "nested-cancel",
+    key: () => "nested-cancel/one",
+    open: (input: void, options): AsyncIterable<number> => {
+      sourceSignal = options.abortSignal;
+      const iterable = open(input, options);
+      return {
+        [Symbol.asyncIterator]() {
+          const iterator = iterable[Symbol.asyncIterator]();
+          return {
+            next: () => iterator.next(),
+            return: () => {
+              returns += 1;
+              return iterator.return!();
+            },
+          };
+        },
+      };
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "nested-cancel", operations: { stream } }),
+  });
+  const source = graph.api.stream(undefined);
+  const history = project(source, { kind: "accumulate", max: 3 });
+  const outerReason = new Error("outer cancellation");
+  const innerReason = new Error("nested cancellation");
+  let nestedCalls = 0;
+  const stop = subscribe(history.status, (status) => {
+    if (status !== "closed") return;
+    nestedCalls += 1;
+    graph.cancelPending(innerReason);
+  });
+  try {
+    const received = until(history.value, (items) => items.length === 1);
+    backend.emit("nested-cancel", 5);
+    await received;
+    graph.cancelPending(outerReason);
+    expect(nestedCalls).toBe(1);
+    expect(sourceSignal!.reason).toBe(outerReason);
+    expect(returns).toBe(1);
+    expect(source.status.get()).toBe("closed");
+    expect(history.status.get()).toBe("closed");
+    expect(history.error.get()).toBeUndefined();
+    expect(history.value.get()).toEqual([5]);
+    expect(source.value.get()).toBe(5);
+    graph.cancelPending();
+    expect(nestedCalls).toBe(1);
+    expect(returns).toBe(1);
+  } finally {
+    stop();
+    graph.dispose();
+  }
+});
+
 it("projects every shared emission without reopening, replaying, or observing direct writes", async () => {
   const { backend, graph, source } = setup();
   try {
