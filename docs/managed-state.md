@@ -173,6 +173,47 @@ the runtime targets that query's key directly. Queries with any other input,
 including `unknown` or a union that includes `undefined`, require `select` so
 the affected key is explicit.
 
+## Cancelling pending work
+
+`graph.cancelPending(reason?)` cancels the work already admitted when the call
+starts. It aborts active query and mutation signals, closes current keyed stream
+sessions and projection sources, and rejects an in-progress reset. The graph,
+API, store values, optimistic predictions, and readable identities remain
+available. Cancellation does not start a reset or advance `graph.resetVersion`.
+
+```ts
+graph.cancelPending(new Error("Request ended"));
+```
+
+The supplied reason becomes the captured work's abort reason and the captured
+reset promise's rejection reason. Omitting the reason, or passing `undefined`,
+uses an `AbortError`. A signal that was already aborted keeps its earlier reason.
+Query failures and stream or projection closure retain their ordinary lifecycle
+behavior; cancellation does not roll back values already committed.
+
+Cancellation captures its work before invoking abort listeners or source
+cleanup. Work explicitly started by those callbacks belongs to a later cohort
+and remains admitted unless another cancellation call captures it. Freshness,
+recovery, and collection timers are also outside the captured cohort. They may
+still trigger ordinary work while the graph remains alive. A cancelled reset
+keeps any state changes it already performed, but does not continue its remaining
+refresh and restart sequence.
+
+An abort signal cannot guarantee that authored work or an external transport
+stops. A mutation callback that ignores cancellation can still settle its promise
+and apply its ordinary effects in the same state epoch. A reset or graph disposal
+has its own rules for ignoring results from an earlier lifetime.
+
+Cancellation attempts every captured source's owned cleanup even if another
+cleanup throws. Escaping synchronous cleanup errors are reported together in an
+`AggregateError` after those attempts. Existing best-effort iterator `return()`
+method failures remain swallowed, and asynchronous host listener errors keep
+their host reporting behavior. Cancellation does not wait for iterator cleanup or
+physical transport termination.
+
+Calling `cancelPending()` after graph disposal does nothing. Dispose the graph
+when its readable state and resources should finally be released.
+
 ## Resetting graph state
 
 `graph.reset()` starts a new state epoch while preserving the graph, API, store
