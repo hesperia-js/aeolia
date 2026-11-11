@@ -132,6 +132,30 @@ export function canReplacePhysicalCarrier(promise: Promise<unknown>, observer: u
   );
 }
 
+/** Carry provenance through one existing native continuation invocation. */
+export function continuePhysicalPromise<T, R = unknown>(
+  promise: Promise<T>,
+  callbacks: (certified: boolean) => {
+    readonly fulfilled?: (value: T) => unknown;
+    readonly rejected?: (cause: unknown) => unknown;
+  },
+): { readonly promise: Promise<R>; readonly certified: boolean } {
+  const observer = promise.then;
+  const certified = canReplacePhysicalCarrier(promise, observer);
+  const handlers = callbacks(certified);
+  const fulfilled = ownDescriptor(handlers, "fulfilled");
+  const rejected = ownDescriptor(handlers, "rejected");
+  const observerArguments =
+    rejected !== undefined
+      ? [fulfilled?.value, rejected.value]
+      : fulfilled !== undefined
+        ? [fulfilled.value]
+        : [];
+  const carrier = nativeApply(observer, promise, observerArguments) as Promise<R>;
+  if (certified) retainGenuinePromise(carrier);
+  return { promise: carrier, certified };
+}
+
 interface CleanupFailure {
   readonly order: number;
   readonly cause: unknown;

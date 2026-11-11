@@ -54,6 +54,24 @@ function streamMember<T>(graph: Graph): StreamStore<T> {
 }
 
 describe("stream stores", () => {
+  it("does not reopen a raw stream on reset for an available-only observer", async () => {
+    const backend = testBackend();
+    const graph = streamGraph(numberStream(backend, "reset-available"));
+    const store = streamMember<number>(graph);
+    const stop = subscribe(store.available, () => undefined);
+    try {
+      expect(store.available.get()).toBe(false);
+      expect(backend.calls).toHaveLength(1);
+      await expect(graph.reset()).resolves.toBeUndefined();
+      expect(backend.calls).toHaveLength(1);
+      expect(backend.calls[0]!.aborted).toBe(true);
+      expect(store.available.get()).toBe(false);
+    } finally {
+      stop();
+      graph.dispose();
+    }
+  });
+
   for (const phase of ["open", "iterator"] as const) {
     it(`retires a stream cancelled during ${phase} and admits a later session`, async () => {
       const backend = testBackend();

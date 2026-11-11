@@ -11,6 +11,7 @@ import {
 } from "../../src/contract/index.ts";
 import { Fault } from "../../src/fault.ts";
 import { computed, subscribe, withoutWrites } from "../../src/reactive.ts";
+import { adopt } from "../../src/realm.ts";
 import { testBackend } from "../../src/testing.ts";
 
 beforeEach(() => {
@@ -35,6 +36,29 @@ async function nextTurn(): Promise<void> {
 }
 
 describe("Graph.reset", () => {
+  it("resets a raw store after adopting the maximum safe generation", async () => {
+    const graph = createGraph({
+      contract: defineContract({ namespace: "reset-generation", operations: {} }),
+    });
+    try {
+      const report = adopt(graph, {
+        version: 1,
+        namespace: "reset-generation",
+        encoding: "aeolia-tagged/1",
+        entries: { value: { value: 7, generation: Number.MAX_SAFE_INTEGER, age: 0 } },
+      } as never);
+      expect(report.adopted.map(String)).toEqual(["value"]);
+      const store = graph.at("value");
+      expect(store.value.get()).toBe(7);
+
+      await expect(graph.reset()).resolves.toBeUndefined();
+      expect(graph.resetVersion.get()).toBe(1);
+      expect(store.value.get()).toBeUndefined();
+    } finally {
+      graph.dispose();
+    }
+  });
+
   it("rejects a reset cancelled in its first refresh, stops dispatch, and preserves reentrant raw work", async () => {
     const reason = new Error("cancel running reset");
     const requests: Array<{

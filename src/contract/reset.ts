@@ -1,12 +1,14 @@
 import { __internal as reactiveInternal } from "../reactive.ts";
 import { AbortError, assertGraphOpen, reportContinuationError } from "./faults.ts";
-import { endStream, isLive, touch, updateCollectionCandidate } from "./collection.ts";
-import { issue } from "./store-state.ts";
+import { endStream, touch, updateCollectionCandidate } from "./collection.ts";
+import { nextGeneration } from "./store-state.ts";
+import { nextValueRevision } from "./identity.ts";
 import { callerForSource, startQueryRequest } from "./query-request.ts";
 import { openStream } from "./stream.ts";
 import {
   beginPhysicalWork,
   finishPhysicalWork,
+  observePhysicalWork,
   observeUnreturnedPromise,
   retainResetCleanup,
 } from "./retirement.ts";
@@ -46,8 +48,16 @@ function detachRequest<C extends Contract>(
   if (request.settled) return undefined;
   request.superseded = true;
   request.settled = true;
-  request.removeCallerAbort();
-  request.removeRequestAbort?.();
+  const failures: unknown[] = [];
+  for (const remove of [request.removeCallerAbort, request.removeRequestAbort]) {
+    if (remove === undefined) continue;
+    try {
+      remove();
+    } catch (cause) {
+      failures.push(cause);
+    }
+  }
+  if (failures.length !== 0) throw failures[0];
   request.removeRequestAbort = undefined;
   request.outcomeReported = true;
   request.resolveOutcome({ ok: false, error: reason });
@@ -57,14 +67,27 @@ function detachRequest<C extends Contract>(
   return request.controller;
 }
 
-function clearRuntime(runtime: StoreRuntime<unknown>, current: () => boolean): void {
+function clearRuntime(
+  runtime: StoreRuntime<unknown>,
+  current: () => boolean,
+  generation: number,
+): void {
   const streamToken = runtime.streamToken;
-  const owns = (): boolean => current() && runtime.streamToken === streamToken;
+  const incarnation = runtime.incarnation;
+  const revision = runtime.valueRevision;
+  const owns = (): boolean =>
+    current() &&
+    !runtime.disposed &&
+    runtime.streamToken === streamToken &&
+    runtime.valueRevision === revision &&
+    runtime.incarnation === incarnation &&
+    runtime.generation === generation;
   if (!owns()) return;
   if (runtime.timer !== undefined) clearTimeout(runtime.timer);
   runtime.timer = undefined;
-  runtime.generation = issue(runtime);
-  runtime.hasCommitted = runtime.declared;
+  runtime.baseAvailable = runtime.declared;
+  runtime.hasAcceptedLanding = runtime.declared;
+  runtime.transferEligible = true;
   runtime.initial = runtime.declared ? runtime.initial : undefined;
   runtime.initialSpecified = runtime.declared;
   runtime.refreshOnActivation = !runtime.declared && runtime.source !== undefined;
@@ -79,11 +102,20 @@ function clearRuntime(runtime: StoreRuntime<unknown>, current: () => boolean): v
     prediction.dead = true;
   runtime.predictionStack.set([]);
   if (!owns()) return;
-  runtime.committed.set(runtime.declared ? runtime.initial : undefined);
+  reactiveInternal.guardedWrite(
+    runtime.committed,
+    runtime.declared ? runtime.initial : undefined,
+    owns,
+    () => undefined,
+  );
   if (!owns()) return;
   runtime.presence.set(runtime.declared);
   if (!owns()) return;
-  runtime.streamStatusCell.set(runtime.streamSource?.abortSignal?.aborted ? "closed" : "empty");
+  const abortSignal = runtime.streamSource?.abortSignal;
+  if (!owns()) return;
+  const aborted = abortSignal?.aborted;
+  if (!owns()) return;
+  runtime.streamStatusCell.set(aborted ? "closed" : "empty");
   for (const caller of runtime.callers) {
     if (!owns()) return;
     caller.statusCell.set("empty");
@@ -91,6 +123,7 @@ function clearRuntime(runtime: StoreRuntime<unknown>, current: () => boolean): v
   if (!owns()) return;
   touch(runtime);
   updateCollectionCandidate(runtime);
+  if (owns()) runtime.transitioning = false;
 }
 
 function currentOperation<C extends Contract>(
@@ -189,7 +222,8 @@ function awaitOutcomes<C extends Contract>(
     if (signal.aborted) rejectCancellation(signal.reason);
     else signal.addEventListener("abort", () => rejectCancellation(signal.reason), { once: true });
   });
-  void Promise.race([promise, cancellation]).then(
+  const physical = beginPhysicalWork(state.retirement, "acquisition");
+  const completion = Promise.race([promise, cancellation]).then(
     () => {
       if (!currentOperation(state, operation)) return;
       state.resetOperation = undefined;
@@ -204,6 +238,7 @@ function awaitOutcomes<C extends Contract>(
       reject(error);
     },
   );
+  observePhysicalWork(physical, completion);
 }
 
 export function drainResetCleanups<C extends Contract>(state: GraphRuntimeState<C>): void {
@@ -238,16 +273,39 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
     }
   };
   try {
+    const generations = new Map(
+      [...state.stores.values()]
+        .filter((runtime) => !runtime.disposed)
+        .map(
+          (runtime) =>
+            [
+              runtime,
+              runtime.binding === undefined
+                ? runtime.generation + 1
+                : nextGeneration(runtime.generation),
+            ] as const,
+        ),
+    );
+    const revisions = new Map(
+      [...state.stores.values()].map(
+        (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
+      ),
+    );
     const queries: ActiveQuery<unknown>[] = [];
     const streams: ActiveStream<unknown>[] = [];
     for (const runtime of state.stores.values()) {
-      if (!isLive(runtime)) continue;
+      if (
+        runtime.liveReadableCount <= runtime.metadataReadableCount &&
+        runtime.readyWaiterCount === 0 &&
+        (runtime.stream?.listeners.size ?? 0) === 0
+      )
+        continue;
       if (runtime.source !== undefined)
         queries.push({
           runtime,
           caller: callerForSource(runtime, runtime.source),
         });
-      if (runtime.streamSource !== undefined)
+      if (runtime.binding?.kind !== "stream" && runtime.streamSource !== undefined)
         streams.push({ runtime, source: runtime.streamSource, key: runtime.key });
     }
     const projections = [...state.projections];
@@ -255,6 +313,22 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
     const previous = state.resetOperation;
     const epoch = state.resetEpoch + 1;
     state.resetEpoch = epoch;
+    for (const context of state.bindingContexts) {
+      for (const profiles of context.bindings.values())
+        for (const binding of profiles.values()) binding.addresses.clear();
+      for (const members of context.streamBindings.values())
+        for (const binding of members.values()) binding.addresses.clear();
+    }
+    for (const runtime of state.stores.values())
+      if (
+        !runtime.disposed &&
+        runtime.binding?.kind !== "stream" &&
+        (runtime.binding === undefined ? !runtime.dropped : runtime.incarnation !== undefined)
+      )
+        runtime.incarnation = {};
+    for (const [runtime, revision] of revisions) runtime.valueRevision = revision;
+    for (const [runtime, generation] of generations) runtime.generation = generation;
+    for (const runtime of state.stores.values()) runtime.transitioning = true;
     let resolvePromise!: () => void;
     let rejectPromise!: (error: unknown) => void;
     let settled = false;
@@ -282,6 +356,7 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
     const oldControllers: AbortController[] = [];
     const streamCleanup: Array<() => void> = [];
     for (const runtime of state.stores.values()) {
+      if (!currentOperation(state, operation)) break;
       for (const request of runtime.requests) {
         const detached = detachRequest(
           state,
@@ -290,7 +365,9 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
           new AbortError("A graph reset canceled this query request."),
         );
         if (detached !== undefined) oldControllers.push(detached);
+        if (!currentOperation(state, operation)) break;
       }
+      if (!currentOperation(state, operation)) break;
       runtime.requests.clear();
       runtime.activeRequest = undefined;
       const session = runtime.stream;
@@ -301,9 +378,16 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
         });
         if (cleanup !== undefined) streamCleanup.push(retainResetCleanup(scope, cleanup));
       }
+      if (!currentOperation(state, operation)) break;
+      if (runtime.binding?.kind === "stream" && runtime.incarnation !== undefined) {
+        runtime.incarnation = {};
+        runtime.streamSource = undefined;
+      }
     }
-    oldControllers.push(...state.activeControllers);
-    state.activeControllers.clear();
+    if (currentOperation(state, operation)) {
+      oldControllers.push(...state.activeControllers);
+      state.activeControllers.clear();
+    }
 
     const projectionCleanup: Array<() => void> = [];
     try {
@@ -319,12 +403,16 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
         }
         for (const runtime of state.stores.values()) {
           if (!currentOperation(state, operation)) return;
+          const generation = generations.get(runtime);
+          if (generation === undefined) continue;
           try {
-            clearRuntime(runtime, () => currentOperation(state, operation));
+            clearRuntime(runtime, () => currentOperation(state, operation), generation);
           } catch (error) {
             reportContinuationError(state, error);
           }
         }
+        if (currentOperation(state, operation))
+          for (const runtime of state.stores.values()) runtime.transitioning = false;
         if (currentOperation(state, operation)) state.resetVersion.set(epoch);
       });
     } catch (error) {

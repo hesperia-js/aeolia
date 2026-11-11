@@ -25,26 +25,39 @@ import {
 } from "./types.ts";
 import { validateContract } from "./validation.ts";
 import { isObject } from "../utils.ts";
-import { storeKey } from "./identity.ts";
+import { nextValueRevision, storeKey } from "./identity.ts";
 import { Fault, __registerFaultChannel, __unregisterFaultChannel } from "../fault.ts";
 import type { Unsubscribe } from "../fault.ts";
 import { __internal as reactiveInternal, computed, signal } from "../reactive.ts";
 import {
   allocateGraphId,
   graphRuntimeByGraph,
+  rawStreamMemberByFunction,
   registerProjection,
   reportGraphContinuationError,
   runtimeForStore,
 } from "./registry.ts";
-import type { GraphRuntime, GraphRuntimeState, RealmStoreState, StoreRuntime } from "./runtime.ts";
+import type {
+  BindingContextRuntime,
+  GraphRuntime,
+  GraphRuntimeState,
+  RealmStoreState,
+  StoreRuntime,
+} from "./runtime.ts";
 import { collectDeclaredStores, finiteBound, graphIdleMs } from "./runtime-validation.ts";
 import { AbortError, assertGraphOpen, reportContinuationError } from "./faults.ts";
-import { collectExpired, endStream, touch } from "./collection.ts";
+import {
+  armCollectionTimer,
+  collectExpired,
+  endStream,
+  touch,
+  updateCollectionCandidate,
+} from "./collection.ts";
 import { getOrCreateStore } from "./store.ts";
 import { makeQueryStore } from "./query.ts";
 import { runMutation } from "./mutation.ts";
 import { streamMember } from "./stream.ts";
-import { armStoreTimer } from "./query-request.ts";
+import { armStoreTimer, finishRequest } from "./query-request.ts";
 import { hasQueryOptionsBrand } from "./query-options.ts";
 import { issue } from "./store-state.ts";
 import { writeAllStatuses } from "./status.ts";
@@ -68,14 +81,23 @@ export const DEFAULT_MAX_PREDICTIONS = 64;
 function realmStores(graph: Graph): readonly RealmStoreState[] {
   const state = (graph as GraphRuntime<any>).__runtime;
   assertGraphOpen(state);
-  return [...state.stores.values()].map((runtime) => ({
-    key: runtime.key,
-    snapshot: runtime.snapshot,
-    hasCommitted: runtime.hasCommitted,
-    generation: runtime.generation,
-    ...(runtime.lastLandingAt === undefined ? {} : { lastLandingAt: runtime.lastLandingAt }),
-    committedValue: () => reactiveInternal.signalValue(runtime.committed),
-  }));
+  return [...state.stores.values()].map((runtime) => {
+    if (
+      runtime.binding !== undefined &&
+      runtime.snapshot &&
+      runtime.baseAvailable &&
+      runtime.transferEligible
+    )
+      throw new Fault("encoding", [String(runtime.key)]);
+    return {
+      key: runtime.key,
+      snapshot: runtime.snapshot,
+      hasCommitted: runtime.baseAvailable,
+      generation: runtime.generation,
+      ...(runtime.lastLandingAt === undefined ? {} : { lastLandingAt: runtime.lastLandingAt }),
+      committedValue: () => reactiveInternal.signalValue(runtime.committed),
+    };
+  });
 }
 
 function realmNamespace(graph: Graph): string {
@@ -102,7 +124,9 @@ function adoptRealmEntry(
   runtime.invalidated = false;
   runtime.errorCell.set(undefined);
   runtime.committed.set(value);
-  runtime.hasCommitted = true;
+  runtime.valueRevision = nextValueRevision(runtime.valueRevision);
+  runtime.baseAvailable = true;
+  runtime.hasAcceptedLanding = true;
   runtime.presence.set(true);
   runtime.dropped = false;
   touch(runtime);
@@ -126,7 +150,8 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
     if (isStoreDefinition(value)) {
       api[property] = () => getOrCreateStore(state, storeKey(value.name), value).store;
     } else if (isOperationDefinition(value)) {
-      if (value.kind === "query")
+      if (value.kind === "query") {
+        state.queryDefinitions.add(value as QueryDefinition<any, any, any>);
         api[property] = (...args: [input?: unknown, options?: StoreOptions<unknown>]) =>
           graphAcquisition(state, () => {
             const [input, options] = args;
@@ -140,7 +165,8 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
               call.options,
             );
           });
-      else if (value.kind === "mutation")
+      } else if (value.kind === "mutation") {
+        state.mutationDefinitions.add(value as MutationDefinition<any, any>);
         api[property] = (...args: [input?: unknown, options?: MutationOptions]) =>
           graphAcquisition(state, () => {
             const [input, options] = args;
@@ -154,20 +180,41 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
               call.options,
             );
           });
-      else
-        api[property] = (input: unknown, options?: ValueOptions<unknown>) =>
-          graphAcquisition(state, () =>
-            streamMember(state, value as StreamDefinition<unknown, unknown, any>, input, options),
-          );
+      } else {
+        const definition = value as StreamDefinition<unknown, unknown, any>;
+        const member = (input: unknown, options?: ValueOptions<unknown>) =>
+          graphAcquisition(state, () => streamMember(state, definition, input, options));
+        rawStreamMemberByFunction.set(member, { state, definition });
+        api[property] = member;
+      }
     } else if (value !== null && typeof value === "object")
       api[property] = buildApi(state, value as OperationTree);
   }
   return Object.freeze(api);
 }
 
-function normalizeQueryCall(
+function copyOptionFields(target: object, source: object | undefined, afterRead: () => void): void {
+  if (source === undefined) return;
+  const keys = Reflect.ownKeys(source);
+  afterRead();
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, key);
+    afterRead();
+    if (!descriptor?.enumerable) continue;
+    const value: unknown = Reflect.get(source, key);
+    afterRead();
+    Object.defineProperty(target, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+}
+
+export function normalizeQueryCall(
   input: unknown,
-  options: StoreOptions<unknown> | undefined,
+  options: unknown,
   hasSecondArgument: boolean,
   afterRead: () => void,
 ): {
@@ -176,20 +223,49 @@ function normalizeQueryCall(
 } {
   let callInput = input;
   let callOptions: unknown = options;
-  if (hasQueryOptionsBrand(input)) {
+  if (hasQueryOptionsBrand(input, afterRead)) {
     if (
       options !== undefined &&
       (!isObject(options) || typeof options === "function" || Array.isArray(options))
     )
       throw new TypeError("Invalid query options.");
     callInput = undefined;
-    callOptions = { ...input, ...options };
-  } else if (!hasSecondArgument && hasStoreOptionFields(input)) {
+    const merged = {};
+    copyOptionFields(merged, input, afterRead);
+    copyOptionFields(merged, options as object | undefined, afterRead);
+    callOptions = merged;
+  } else if (!hasSecondArgument && hasStoreOptionFields(input, afterRead)) {
     callInput = undefined;
     callOptions = input;
   }
   if (callOptions === undefined) return { input: callInput };
   if (!isStoreOptions(callOptions, afterRead)) throw new TypeError("Invalid query options.");
+  return { input: callInput, options: callOptions };
+}
+
+export function normalizeMutationArguments(
+  input: unknown,
+  options: unknown,
+  hasSecondArgument: boolean,
+  afterRead: () => void,
+): { readonly input: unknown; readonly options?: unknown } {
+  let callInput = input;
+  let callOptions = options;
+  if (hasQueryOptionsBrand(input, afterRead)) {
+    if (
+      options !== undefined &&
+      (!isObject(options) || typeof options === "function" || Array.isArray(options))
+    )
+      throw new TypeError("Invalid mutation options.");
+    callInput = undefined;
+    const merged = {};
+    copyOptionFields(merged, input, afterRead);
+    copyOptionFields(merged, options as object | undefined, afterRead);
+    callOptions = merged;
+  } else if (!hasSecondArgument && hasMutationOptionFields(input, afterRead)) {
+    callInput = undefined;
+    callOptions = input;
+  }
   return { input: callInput, options: callOptions };
 }
 
@@ -202,23 +278,10 @@ function normalizeMutationCall(
   readonly input: unknown;
   readonly options?: MutationOptions;
 } {
-  let callInput = input;
-  let callOptions: unknown = options;
-  if (hasQueryOptionsBrand(input)) {
-    if (
-      options !== undefined &&
-      (!isObject(options) || typeof options === "function" || Array.isArray(options))
-    )
-      throw new TypeError("Invalid mutation options.");
-    callInput = undefined;
-    callOptions = { ...input, ...options };
-  } else if (!hasSecondArgument && hasMutationOptionFields(input)) {
-    callInput = undefined;
-    callOptions = input;
-  }
-  if (callOptions === undefined) return { input: callInput };
-  if (!isMutationOptions(callOptions, afterRead)) throw new TypeError("Invalid mutation options.");
-  return { input: callInput, options: callOptions };
+  const call = normalizeMutationArguments(input, options, hasSecondArgument, afterRead);
+  if (call.options === undefined) return { input: call.input };
+  if (!isMutationOptions(call.options, afterRead)) throw new TypeError("Invalid mutation options.");
+  return { input: call.input, options: call.options };
 }
 
 function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?: unknown): void {
@@ -272,9 +335,128 @@ function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?:
     throw new AggregateError(failures, "Several graph cancellation operations failed");
 }
 
+export function disposeBindingContextRuntime(
+  context: BindingContextRuntime,
+  physical?: PhysicalWork,
+): void {
+  if (context.disposed) return;
+  reactiveInternal.assertWritesAllowed(context.activeCell);
+  const work = physical ?? beginPhysicalWork(context.retirement, "cleanup");
+  try {
+    disposeBindingContext(context);
+  } catch (cause) {
+    recordCleanupFailure(work, cause);
+    throw cause;
+  } finally {
+    finishPhysicalWork(work);
+  }
+}
+
+export function retireBindingContextRuntime(context: BindingContextRuntime): Promise<void> {
+  return retireOwner(context.retirement, (work) => disposeBindingContextRuntime(context, work));
+}
+
+function disposeBindingContext(context: BindingContextRuntime): void {
+  const state = context.state;
+  const stores = [
+    ...[...context.bindings.values()].flatMap((profiles) =>
+      [...profiles.values()].flatMap((binding) => [...binding.stores.values()]),
+    ),
+    ...[...context.streamBindings.values()].flatMap((members) =>
+      [...members.values()].flatMap((binding) => [...binding.stores.values()]),
+    ),
+  ];
+  const revisions = stores.map((runtime) =>
+    state.disposed ? runtime.valueRevision : nextValueRevision(runtime.valueRevision),
+  );
+  const controllers = [...context.mutationControllers];
+  context.disposed = true;
+  for (const profiles of context.bindings.values())
+    for (const binding of profiles.values()) binding.addresses.clear();
+  for (const members of context.streamBindings.values())
+    for (const binding of members.values()) binding.addresses.clear();
+  context.mutationControllers.clear();
+  for (const controller of controllers) state.activeControllers.delete(controller);
+  state.bindingContexts.delete(context);
+  for (const runtime of stores) {
+    runtime.disposed = true;
+    runtime.incarnation = undefined;
+    state.stores.delete(runtime.identity);
+    updateCollectionCandidate(runtime);
+  }
+  armCollectionTimer(state);
+  const attempt = (action: () => void, alreadyOwned = false): void => {
+    try {
+      if (alreadyOwned) action();
+      else physicalCleanup(context.retirement, action);
+    } catch (error) {
+      reportContinuationError(state, error);
+    }
+  };
+  attempt(() =>
+    reactiveInternal.batch(() => {
+      for (const [index, runtime] of stores.entries()) runtime.valueRevision = revisions[index]!;
+      context.activeCell.set(false);
+    }),
+  );
+  for (const controller of controllers)
+    attempt(() => controller.abort(new Fault("disposed", [String(state.graph.id)])));
+  for (const runtime of stores) {
+    const session = runtime.stream;
+    if (session !== undefined && runtime.binding?.kind === "stream")
+      attempt(
+        () =>
+          endStream(runtime, session, "closed", new Fault("disposed", [String(state.graph.id)])),
+        true,
+      );
+    if (runtime.timer !== undefined) clearTimeout(runtime.timer);
+    runtime.timer = undefined;
+    runtime.source = undefined;
+    runtime.onReadableActivation = undefined;
+    runtime.refreshOnActivation = false;
+    runtime.baseAvailable = false;
+    runtime.hasAcceptedLanding = false;
+    runtime.transferEligible = true;
+    const requests = Array.from(runtime.requests);
+    for (const request of requests) {
+      const reason = new Fault("disposed", [String(runtime.key)]);
+      request.superseded = true;
+      state.activeControllers.delete(request.controller);
+      attempt(() => finishRequest(runtime, request), true);
+      if (!request.outcomeReported) {
+        request.outcomeReported = true;
+        request.resolveOutcome({ ok: false, error: reason });
+      }
+      attempt(() => request.controller.abort(reason));
+    }
+    runtime.requests.clear();
+    runtime.activeRequest = undefined;
+    for (const prediction of reactiveInternal.signalValue(runtime.predictionStack))
+      prediction.dead = true;
+    attempt(() => runtime.predictionStack.set([]));
+    attempt(() => runtime.committed.set(undefined));
+    attempt(() => runtime.presence.set(false));
+    attempt(() => runtime.errorCell.set(undefined));
+    attempt(() => runtime.lifecycle.update((value) => value + 1));
+    for (const stop of [...runtime.livenessStops, ...runtime.readStops]) attempt(stop);
+    runtime.livenessStops.length = 0;
+    runtime.readStops.length = 0;
+    runtime.callers.length = 0;
+  }
+}
+
 function* disposalSteps<C extends Contract>(
   state: GraphRuntimeState<C>,
 ): Generator<() => void, void, void> {
+  for (const context of Array.from(state.bindingContexts)) {
+    yield () => {
+      try {
+        disposeBindingContextRuntime(context);
+      } catch (error) {
+        reportContinuationError(state, error);
+      }
+    };
+  }
   if (state.resetOperation !== undefined) {
     const operation = state.resetOperation;
     yield () => operation.reject(new Fault("disposed", []));
@@ -347,11 +529,22 @@ function disposeGraph<C extends Contract>(
   const work = physical ?? beginPhysicalWork(state.retirement, "cleanup");
   try {
     if (progress === undefined) {
-      progress = { steps: disposalSteps(state), active: false, complete: false };
+      progress = {
+        steps: disposalSteps(state),
+        contextsPreflighted: false,
+        active: false,
+        complete: false,
+      };
       state.disposal = progress;
       state.disposed = true;
     }
     progress.active = true;
+    if (!progress.contextsPreflighted) {
+      for (const context of state.bindingContexts) {
+        if (!context.disposed) reactiveInternal.assertWritesAllowed(context.activeCell);
+      }
+      progress.contextsPreflighted = true;
+    }
     runDisposal(state, progress, physical !== undefined);
   } catch (cause) {
     recordCleanupFailure(work, cause);
@@ -432,6 +625,9 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
       ? {}
       : { onUnobservedFault: options.onUnobservedFault }),
     stores: new Map(),
+    queryDefinitions: new Set(),
+    mutationDefinitions: new Set(),
+    bindingContexts: new Set(),
     declaredStores: new Map(),
     faultObservers: new Set(),
     activeControllers: new Set(),
@@ -476,7 +672,8 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     dispose: () => disposeGraph(state),
     retire: () => {
       if (state.retirement.promise !== undefined) return state.retirement.promise;
-      if (!state.disposed) reactiveInternal.assertWritesAllowed(state.resetVersion);
+      if (!state.disposed || state.disposal?.contextsPreflighted === false)
+        reactiveInternal.assertWritesAllowed(state.resetVersion);
       return retireOwner(state.retirement, (work) => {
         try {
           disposeGraph(state, work);

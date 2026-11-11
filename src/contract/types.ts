@@ -1,14 +1,55 @@
 import type { Readable } from "../reactive.ts";
 import { isAbortSignal, isObject } from "../utils.ts";
-import type { GraphId, StoreKey, StoreStatus, StreamStatus } from "./identity.ts";
+import type {
+  GraphId,
+  StoreIdentity,
+  StoreKey,
+  StoreStatus,
+  StreamStatus,
+  ValueRevision,
+} from "./identity.ts";
 import { isStoreKey } from "./identity.ts";
 import { affectedBrand } from "./symbols.ts";
 import type { queryOptionsBrand } from "./symbols.ts";
 export type { Readable } from "../reactive.ts";
-export type { Generation, GraphId, StoreKey, StoreStatus, StreamStatus } from "./identity.ts";
+export type {
+  Generation,
+  GraphId,
+  StoreIdentity,
+  StoreKey,
+  StoreStatus,
+  StreamStatus,
+  ValueRevision,
+} from "./identity.ts";
+
+/** A coherent borrowed visible value, or an invalidated capture with no value. */
+export type StoreCapture<T> =
+  | {
+      /** Authority or visible revision changed during the read. */
+      readonly kind: "changed";
+    }
+  | ({
+      /** This capture describes one unchanged native value revision. */
+      readonly kind: "stable";
+      /** Physical identity of the captured native entry. */
+      readonly identity: StoreIdentity;
+      /** Store-local visible-value ordering at capture. */
+      readonly valueRevision: ValueRevision;
+    } & (
+      | {
+          /** No base or effective prediction is present. */
+          readonly present: false;
+        }
+      | {
+          /** A value is present, even when that value is undefined. */
+          readonly present: true;
+          /** Borrowed authored value; its object graph is neither cloned nor frozen. */
+          readonly value: T;
+        }
+    ));
 
 /**
- * The graph-owned value for one store key.
+ * The graph-owned value for one physical entry.
  *
  * `value` exposes the committed value with active optimistic predictions
  * folded over it. Reading it never starts I/O, but reads and live observers
@@ -16,7 +57,10 @@ export type { Generation, GraphId, StoreKey, StoreStatus, StreamStatus } from ".
  * identity if an idle keyed store later releases its contents.
  */
 export interface Store<T> {
-  /** The graph-local key shared by all views of this store. */
+  /** Physical identity shared across caller wrappers, reset and collection. */
+  readonly identity: StoreIdentity;
+
+  /** Authored logical key; different bound entries may have the same key. */
   readonly key: StoreKey;
 
   /** The graph that owns this store. */
@@ -30,6 +74,13 @@ export interface Store<T> {
    * does not initiate a backend call.
    */
   readonly value: Readable<T | undefined>;
+
+  /**
+   * Visible presence, including a present `undefined` or an effective prediction.
+   * Reads touch retention; live observers retain metadata without fetching or
+   * arming freshness/recovery. Presence does not imply request readiness.
+   */
+  readonly available: Readable<boolean>;
 
   /**
    * Commits a local value and advances the store generation.
@@ -63,7 +114,7 @@ export interface Store<T> {
 /**
  * A query-specific view of a keyed {@link Store}.
  *
- * Multiple calls for one key share the value, error, and active request, but
+ * Calls for one raw key or one bound query/key share value, error and request, but
  * each returned view has its own status and freshness window. It remains a
  * writable store, so `set` and `update` can establish local authoritative
  * state while a request is in flight.
@@ -261,13 +312,14 @@ function matchesOptions(value: unknown, checks: OptionChecks, afterRead?: () => 
   });
 }
 
-function hasOptionFields(value: unknown, checks: OptionChecks): boolean {
-  return (
-    isObject(value) &&
-    typeof value !== "function" &&
-    !Array.isArray(value) &&
-    checks.some(([field]) => Object.hasOwn(value, field))
-  );
+function hasOptionFields(value: unknown, checks: OptionChecks, afterRead?: () => void): boolean {
+  if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
+  for (const [field] of checks) {
+    const found = Object.hasOwn(value, field);
+    afterRead?.();
+    if (found) return true;
+  }
+  return false;
 }
 
 const valueOptionValidators = {
@@ -346,8 +398,8 @@ export function isStoreOptions(
 }
 
 /** Recognizes the options-only call form, including malformed option values. */
-export function hasStoreOptionFields(value: unknown): boolean {
-  return hasOptionFields(value, storeOptionChecks);
+export function hasStoreOptionFields(value: unknown, afterRead?: () => void): boolean {
+  return hasOptionFields(value, storeOptionChecks, afterRead);
 }
 
 /** Context supplied to a query, mutation, or stream callback. */
@@ -388,7 +440,8 @@ export interface CreateQueryInput<I, T, K extends string> {
    * Derives the shared store key for an input.
    *
    * Inputs producing the same key share committed value, errors, requests,
-   * predictions, and freshness source. The key must be non-empty.
+   * predictions and freshness source within their raw namespace or query binding.
+   * The key must be non-empty.
    */
   readonly key: (input: I) => K;
 
@@ -787,8 +840,8 @@ export function isMutationOptions(
 }
 
 /** Recognizes the options-only call form, including malformed option values. */
-export function hasMutationOptionFields(value: unknown): boolean {
-  return hasOptionFields(value, mutationOptionChecks);
+export function hasMutationOptionFields(value: unknown, afterRead?: () => void): boolean {
+  return hasOptionFields(value, mutationOptionChecks, afterRead);
 }
 
 /** Any executable query, mutation, or stream declaration. */
@@ -811,6 +864,11 @@ export function isOperationDefinition(value: unknown): value is OperationDefinit
   }
 }
 
+// Tree admission keeps comparator arguments opaque, including never-valued streams.
+type ContractStreamDefinition = Omit<StreamDefinition<any, any, any>, "equals"> & {
+  readonly equals?: (a: never, b: never) => boolean;
+};
+
 /**
  * A nested, named operation and store declaration tree.
  *
@@ -820,7 +878,11 @@ export function isOperationDefinition(value: unknown): value is OperationDefinit
  * within their respective categories.
  */
 export type OperationTree = {
-  readonly [name: string]: OperationDefinition | StoreDefinition<any> | OperationTree;
+  readonly [name: string]:
+    | OperationDefinition
+    | ContractStreamDefinition
+    | StoreDefinition<any>
+    | OperationTree;
 };
 
 /** Input accepted by {@link defineContract}. */
@@ -898,7 +960,7 @@ export type ContractApi<C extends Contract> =
 export type StorePatterns<D> =
   D extends QueryDefinition<any, any, infer K>
     ? K
-    : D extends StreamDefinition<any, any, infer K>
+    : D extends StreamDefinition<any, infer _T, infer K>
       ? K
       : D extends StoreDefinition<any, any> | MutationDefinition<any, any>
         ? never
@@ -910,7 +972,7 @@ export type StorePatterns<D> =
 export type StoreNames<D> =
   D extends StoreDefinition<any, infer N>
     ? N
-    : D extends OperationDefinition
+    : D extends OperationDefinition | ContractStreamDefinition
       ? never
       : D extends object
         ? { readonly [P in keyof D]: StoreNames<D[P]> }[keyof D]
@@ -920,7 +982,7 @@ export type StoreNames<D> =
 export type DeclaredStores<D> =
   D extends StoreDefinition<infer T, infer N>
     ? StoreDefinition<T, N>
-    : D extends OperationDefinition
+    : D extends OperationDefinition | ContractStreamDefinition
       ? never
       : D extends object
         ? { readonly [P in keyof D]: DeclaredStores<D[P]> }[keyof D]
@@ -1088,7 +1150,8 @@ export interface Graph<C extends Contract = Contract> {
   ): Store<T>;
 
   /**
-   * Gets or creates the store at an exact runtime key.
+   * Gets or creates the raw-namespace store at an exact logical key.
+   * This does not address a context-bound query profile.
    *
    * Declared stores are configured when their declared name is reached;
    * otherwise the returned store starts empty. The type narrows the value only

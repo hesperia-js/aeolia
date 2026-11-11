@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it, jest } from "bun:test";
 import {
+  bindStream,
+  createBindingContext,
   createGraph,
   createStream,
   defineContract,
@@ -204,3 +206,49 @@ it("ends projections with their source session and does not reconnect them on re
     graph.dispose();
   }
 });
+
+it.each(["end", "reset"] as const)(
+  "keeps bound shared projections on A after %s and starts B explicitly",
+  async (mode) => {
+    const backend = testBackend();
+    const stream = createStream({
+      name: "fixed-projection",
+      key: () => "one",
+      open: backend.stream<void, number>("fixed-projection"),
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "fixed-projection", operations: { stream } }),
+    });
+    try {
+      const binding = bindStream(graph, stream, graph.api.stream, {
+        context: createBindingContext(graph),
+      });
+      const a = binding.member();
+      const history = project(a, { kind: "accumulate", max: 3 });
+      const receivedA = until(history.value, (items) => items.length === 1);
+      backend.emit("fixed-projection", 5);
+      await receivedA;
+      let resetting: Promise<void> | undefined;
+      if (mode === "reset") resetting = graph.reset();
+      else backend.end("fixed-projection");
+      await binding.session(a).detached;
+      await resetting;
+      expect(history.status.get()).toBe("closed");
+      expect(backend.calls).toHaveLength(1);
+      const prior = mode === "reset" ? [] : [5];
+      expect(history.value.get()).toEqual(prior);
+      const b = binding.member();
+      const next = project(b, { kind: "accumulate", max: 3 });
+      const receivedB = until(next.value, (items) => items.length === 1);
+      backend.emit("fixed-projection", 9);
+      await receivedB;
+      expect(next.value.get()).toEqual([9]);
+      expect(history.value.get()).toEqual(prior);
+      expect(history.status.get()).toBe("closed");
+      expect(backend.calls).toHaveLength(2);
+      next.close();
+    } finally {
+      graph.dispose();
+    }
+  },
+);

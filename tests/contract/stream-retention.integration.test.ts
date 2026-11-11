@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, expect, it, jest } from "bun:test";
-import { createGraph, createStream, defineContract, subscribe } from "../../src/index.ts";
+import {
+  bindStream,
+  createBindingContext,
+  inspectBoundAddress,
+  createGraph,
+  createStream,
+  defineContract,
+  subscribe,
+} from "../../src/index.ts";
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -11,7 +19,7 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-function setup() {
+function setup(bound = false) {
   let item = Promise.withResolvers<IteratorResult<number>>();
   let nextPull = Promise.withResolvers<void>();
   let sourceSignal: AbortSignal | undefined;
@@ -21,6 +29,7 @@ function setup() {
     key: () => "retention-events/one",
     open: (_input: void, { abortSignal }) => {
       sourceSignal = abortSignal;
+      nextPull = Promise.withResolvers<void>();
       return {
         [Symbol.asyncIterator]() {
           return {
@@ -41,12 +50,17 @@ function setup() {
     contract: defineContract({ namespace: "retention", operations: { stream } }),
     idleMs: 10,
   });
-  const store = graph.api.stream();
+  const binding = bindStream(graph, stream, graph.api.stream, {
+    context: createBindingContext(graph),
+  });
+  const store = bound ? binding.member() : graph.api.stream();
   return {
     graph,
+    binding,
     store,
     signal: () => sourceSignal!,
     returns: () => returns,
+    pulled: () => nextPull.promise,
     async emit(value: number) {
       const pending = item;
       item = Promise.withResolvers<IteratorResult<number>>();
@@ -119,6 +133,42 @@ it("expires a never-observed stream despite continuous source activity", async (
     expect(source.signal().aborted).toBe(true);
     expect(source.returns()).toBe(1);
   } finally {
+    source.graph.dispose();
+  }
+});
+
+it("does not let retired facets, metadata waiters or address inspection retain B or renew its idle period", async () => {
+  const source = setup(true);
+  const stopOld = subscribe(source.store.value, () => undefined);
+  try {
+    await source.emit(1);
+    source.graph.cancelPending();
+    const ticketA = source.binding.session(source.store);
+    await ticketA.detached;
+    const b = source.binding.member();
+    await source.pulled();
+    const ticketB = source.binding.session(b);
+    const detachedB = ticketB.detached;
+    jest.advanceTimersByTime(9);
+    expect(source.signal().aborted).toBe(false);
+    expect(source.binding.session(source.store)).toBe(ticketA);
+    expect(source.store.value.get()).toBe(1);
+    expect(inspectBoundAddress(source.binding, b.key)).toMatchObject({
+      state: "occupied",
+      present: false,
+    });
+    jest.advanceTimersByTime(1);
+    const receipt = await detachedB;
+    expect(source.signal().aborted).toBe(true);
+    expect(source.returns()).toBe(2);
+    expect(receipt.status).toBe("empty");
+    expect(receipt.terminalCapture).toMatchObject({
+      kind: "captured",
+      capture: { present: false },
+    });
+    expect(source.store.value.get()).toBe(1);
+  } finally {
+    stopOld();
     source.graph.dispose();
   }
 });

@@ -4,6 +4,24 @@ import {
   Signal,
   afterPropagation,
   affects,
+  bindOperation,
+  bindStream,
+  inspectBoundAddress,
+  peekStore,
+  storeKey,
+  createBindingContext,
+  profileEffect,
+  predictionFor,
+  type BindingContext,
+  type BindingMutationOptions,
+  type BoundAddressStamp,
+  type BoundStreamSession,
+  type Graph,
+  type QueryStore,
+  type StoreIdentity,
+  type TargetPrediction,
+  type TypedTarget,
+  type ValueRevision,
   createGraph,
   defineContract,
   createMutation,
@@ -23,6 +41,10 @@ import {
   type Observer,
   withoutWrites,
 } from "aeolia";
+import type {
+  BindingContext as ContractBindingContext,
+  Graph as ContractGraph,
+} from "aeolia/contract";
 import { testBackend } from "aeolia/testing";
 
 const backend = testBackend();
@@ -256,3 +278,248 @@ void inputlessEffect;
 void requiredInputEffect;
 void unknownInputEffect;
 void typecheckOnly;
+
+function bindingTypesOnly(): void {
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "bound-consumer",
+      operations: { query, inputlessQuery, unknownInputQuery },
+    }),
+  });
+  const context = createBindingContext(graph);
+  const binding = bindOperation(graph, query, {
+    context,
+    profile: {},
+    fetch: async (input) => ({ label: input.id }),
+    value: { initial: { label: "loading" }, equals: (left, right) => left.label === right.label },
+  });
+  const handle: QueryStore<{ label: string }> = binding.member({ id: "one" });
+  // @ts-expect-error Available metadata is read-only.
+  handle.available.set(true);
+  const capture = peekStore(handle);
+  // @ts-expect-error Changed and absent captures do not expose a value.
+  void capture.value;
+  if (capture.kind === "stable") {
+    const revision: ValueRevision = capture.valueRevision;
+    // @ts-expect-error Numeric values cannot fabricate native revision provenance.
+    const fabricated: ValueRevision = 1;
+    if (capture.present) {
+      const label: string = capture.value.label;
+      void label;
+    }
+    void [revision, fabricated];
+  }
+  const identity: StoreIdentity = handle.identity;
+  const completed: Promise<{ label: string }> = handle.ready;
+  const ticket = binding.target(handle)!;
+  const same: TypedTarget<typeof query, { label: string }> | undefined = ticket.forBinding(binding);
+  // @ts-expect-error The native definition still requires its object input.
+  binding.member("one");
+  // @ts-expect-error Initial values describe the completed profile value.
+  binding.member({ id: "one" }, { initial: { id: "raw" } });
+  // @ts-expect-error A raw query store has a different value association.
+  binding.target(graph.api.query({ id: "one" }));
+  // @ts-expect-error Invariant ticket values cannot be widened to unknown.
+  const widened: TypedTarget<typeof query, unknown> = ticket;
+  const ping = bindOperation(graph, inputlessQuery, {
+    context,
+    profile: {},
+    fetch: async () => "pong",
+  });
+  ping.member();
+  ping.member(queryOptions({ initial: "waiting" }), { revalidateAfterMs: 1 });
+  const unknown = bindOperation(graph, unknownInputQuery, {
+    context,
+    profile: {},
+    fetch: async () => 1,
+  });
+  unknown.member(undefined, {});
+  // @ts-expect-error Unknown remains input-bearing after binding.
+  unknown.member();
+  void [identity, completed, same, widened];
+}
+
+void bindingTypesOnly;
+
+function mutationBindingTypesOnly(): void {
+  const query = createQuery({
+    name: "typed.query",
+    key: (input: { readonly id: string }) => input.id,
+    fetch: async (input) => ({ id: input.id }),
+  });
+  const save = createMutation({
+    name: "typed.save",
+    run: async (input: { readonly id: string }) => input.id,
+    affects: [affects(query, { select: (input: { readonly id: string }) => input })],
+  });
+  const ping = createMutation({ name: "typed.ping", run: async () => 1, affects: [] });
+  const unknown = createMutation({
+    name: "typed.unknown",
+    run: async (input: unknown) => input,
+    affects: [],
+  });
+  const union = createMutation({
+    name: "typed.union",
+    run: async (input: void | string) => input,
+    affects: [],
+  });
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "typed-mutation",
+      operations: { query, save, ping, unknown, union },
+    }),
+  });
+  const context = createBindingContext(graph);
+  const native = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+  const labels = bindOperation(graph, query, {
+    context,
+    profile: {},
+    fetch: async (input) => input.id,
+  });
+  const numbers = bindOperation(graph, query, {
+    context,
+    profile: {},
+    fetch: async (input) => input.id.length,
+  });
+  const label = labels.member({ id: "one" });
+  const numeric = numbers.member({ id: "one" });
+  const override: TargetPrediction<typeof save> = predictionFor(
+    save,
+    numbers.target(numeric)!,
+    (current, input) => (current ?? 0) + input.id.length,
+  );
+  // @ts-expect-error The ticket fixes the output; a producer cannot widen it to string.
+  predictionFor(save, numbers.target(numeric)!, () => "wrong");
+  // @ts-expect-error The producer receives the original mutation's native input.
+  predictionFor(save, numbers.target(numeric)!, (_value, input: string) => input.length);
+  // @ts-expect-error Invariant targets cannot be widened into unknown-valued targets.
+  const widened: TypedTarget<typeof query, unknown> = numbers.target(numeric)!;
+  const effect = profileEffect(save, 0, query, {
+    prepare: (phase) =>
+      phase.existing(phase.selectedInput).map((target) => {
+        const nativeValue = target.forBinding(native);
+        if (nativeValue !== undefined) return phase.original(nativeValue);
+        const text = target.forBinding(labels);
+        if (text !== undefined) {
+          // @ts-expect-error An attached string completion is not the original native object value.
+          phase.original(text);
+          // @ts-expect-error A typed prediction producer cannot return a different output type.
+          phase.predict(text, () => 1);
+          return phase.predict(text, (_current, input) => input.id);
+        }
+        return phase.prepare(target);
+      }),
+    settle: (phase) =>
+      phase
+        .existing(phase.selectedInput)
+        .map((target) => phase.selected(target, phase.selectedInput)),
+  });
+  const binding = bindOperation(graph, save, {
+    context,
+    profile: {},
+    effects: [effect],
+    run: async (input, call) => ({ receipt: await save.run(input, call) }),
+  });
+  const result: Promise<{ receipt: string }> = binding.member(
+    { id: "one" },
+    { optimistic: [override] },
+  );
+  // @ts-expect-error Completed mutation output is not the original raw string result.
+  const raw: Promise<string> = binding.member({ id: "one" });
+  // @ts-expect-error Original native input remains required.
+  binding.member();
+  // @ts-expect-error Logical-key optimistic maps are not identity-addressed instructions.
+  binding.member({ id: "one" }, { optimistic: new Map() });
+  const inputless = bindOperation(graph, ping, {
+    context,
+    profile: {},
+    effects: [],
+    run: async () => ({ pong: true }),
+  });
+  const options = queryOptions<BindingMutationOptions<typeof ping>>({ optimistic: [] });
+  inputless.member();
+  inputless.member(options, { optimistic: [] });
+  const required = bindOperation(graph, unknown, {
+    context,
+    profile: {},
+    effects: [],
+    run: unknown.run,
+  });
+  required.member(undefined, {});
+  // @ts-expect-error Unknown input does not gain inputless forms.
+  required.member();
+  const voidUnion = bindOperation(graph, union, {
+    context,
+    profile: {},
+    effects: [],
+    run: union.run,
+  });
+  voidUnion.member();
+  voidUnion.member("value");
+  voidUnion.member(undefined, {});
+  void [label, result, raw, widened];
+}
+
+void mutationBindingTypesOnly;
+
+function boundStreamConsumer(): void {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "typed-stream", operations: { stream, query } }),
+  });
+  const context = createBindingContext(graph);
+  const binding = bindStream(graph, stream, graph.api.stream, { context });
+  const inspected = inspectBoundAddress(binding, storeKey("events/one"));
+  if (inspected.kind === "stable") {
+    const stamp: BoundAddressStamp = inspected.stamp;
+    inspectBoundAddress(binding, storeKey("events/one"), { expected: stamp });
+    if (inspected.state === "empty") {
+      const source = binding.member({ id: "one" }, { expectEmpty: inspected.condition });
+      const session: BoundStreamSession<{ readonly id: string }> = binding.session(source);
+      session.detached.then((receipt) => {
+        if (receipt.terminalCapture.kind === "captured") {
+          const capture = receipt.terminalCapture.capture;
+          if (capture.kind === "stable" && capture.present) {
+            const id: string = capture.value.id;
+            void id;
+          }
+        }
+      });
+      // @ts-expect-error The raw member has no empty-condition contract.
+      graph.api.stream({ id: "one" }, { expectEmpty: inspected.condition });
+      // @ts-expect-error The query member has no empty-condition contract.
+      graph.api.query({ id: "one" }, { expectEmpty: inspected.condition });
+      const boundQuery = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+      // @ts-expect-error A bound query retains its existing query options.
+      boundQuery.member({ id: "one" }, { expectEmpty: inspected.condition });
+    }
+  }
+  // @ts-expect-error Binding retains the original required input.
+  binding.member({ id: 1 });
+  // @ts-expect-error Stream binding requires the original stream member association.
+  bindStream(graph, stream, graph.api.query, { context });
+  // @ts-expect-error Empty conditions cannot be fabricated structurally.
+  binding.member({ id: "one" }, { expectEmpty: {} });
+  graph.dispose();
+}
+
+void boundStreamConsumer;
+
+function publicRetirementTypes(
+  graph: Graph,
+  context: BindingContext,
+  contractGraph: ContractGraph,
+  contractContext: ContractBindingContext,
+): void {
+  const rootGraphRetirement: Promise<void> = graph.retire();
+  const rootContextRetirement: Promise<void> = context.retire();
+  const contractGraphRetirement: Promise<void> = contractGraph.retire();
+  const contractContextRetirement: Promise<void> = contractContext.retire();
+  void [
+    rootGraphRetirement,
+    rootContextRetirement,
+    contractGraphRetirement,
+    contractContextRetirement,
+  ];
+}
+
+void publicRetirementTypes;

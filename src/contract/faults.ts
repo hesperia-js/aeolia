@@ -50,6 +50,6 @@ export function assertGraphOpen<C extends Contract>(state: GraphRuntimeState<C>)
 }
 
 export function assertStoreOpen<T>(runtime: StoreRuntime<T>): void {
-  if (runtime.disposed || runtime.graph.__runtime.disposed)
+  if (runtime.disposed || runtime.graph.__runtime.disposed || runtime.binding?.context.disposed)
     throw new Fault("disposed", [runtime.key as string]);
 }

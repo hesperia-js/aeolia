@@ -8,7 +8,7 @@ import type {
 import { __internal as reactiveInternal } from "../reactive.ts";
 import { addSignalAbort } from "../utils.ts";
 import { Fault } from "../fault.ts";
-import { assertStoreOpen, reportContinuationError } from "./faults.ts";
+import { AbortError, assertStoreOpen, reportContinuationError } from "./faults.ts";
 import {
   isCurrentRequest,
   createCaller,
@@ -17,7 +17,9 @@ import {
   writeElapsedStatuses,
 } from "./status.ts";
 import { interact, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
-import { issue, recordLanding, retirePredictions } from "./store-state.ts";
+import { issue, nextGeneration, recordLanding, retirePredictions } from "./store-state.ts";
+
+import { beginBindingAddress, changeBoundAddress, endBindingAddress } from "./registry.ts";
 import {
   beginPhysicalWork,
   canReplacePhysicalCarrier,
@@ -28,12 +30,27 @@ import {
 } from "./retirement.ts";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const nativeApply = Reflect.apply;
+
+function bindingContextClosed<T>(runtime: StoreRuntime<T>): boolean {
+  return runtime.binding?.context.disposed === true;
+}
 
 export function finishRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   if (request.settled) return false;
   request.settled = true;
-  request.removeCallerAbort();
-  request.removeRequestAbort?.();
+  changeBoundAddress(runtime);
+  let cleanupFailed = false;
+  let cleanupError: unknown;
+  for (const remove of [request.removeCallerAbort, request.removeRequestAbort]) {
+    if (remove === undefined) continue;
+    try {
+      remove();
+    } catch (error) {
+      if (!cleanupFailed) cleanupError = error;
+      cleanupFailed = true;
+    }
+  }
   request.removeRequestAbort = undefined;
   runtime.graph.__runtime.activeControllers.delete(request.controller);
   runtime.requests.delete(request);
@@ -43,6 +60,7 @@ export function finishRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest
     request.generation === runtime.generation &&
     request.resetEpoch === runtime.graph.__runtime.resetEpoch;
   if (current) runtime.lastSettledAt = Date.now();
+  if (cleanupFailed) throw cleanupError;
   return current;
 }
 
@@ -138,10 +156,11 @@ export function startQuery<T>(
   force: boolean,
   abortSignal?: AbortSignal,
   automaticRecovery = false,
+  expectedIncarnation?: object,
 ): Promise<void> {
   return (
-    startQueryRequest(runtime, caller, force, abortSignal, automaticRecovery)?.promise ??
-    Promise.resolve()
+    startQueryRequest(runtime, caller, force, abortSignal, automaticRecovery, expectedIncarnation)
+      ?.promise ?? Promise.resolve()
   );
 }
 
@@ -151,14 +170,37 @@ export function startQueryRequest<T>(
   force: boolean,
   abortSignal?: AbortSignal,
   automaticRecovery = false,
+  expectedIncarnation?: object,
 ): QueryRequest | undefined {
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
   const state = runtime.graph.__runtime;
-  const acquisition = beginPhysicalWork(state.retirement, "acquisition");
+  const owner = runtime.binding?.context.retirement ?? state.retirement;
+  const acquisition = beginPhysicalWork(owner, "acquisition");
+  let admission: object | undefined;
   try {
     const resetEpoch = state.resetEpoch;
+    const entryIncarnation =
+      runtime.binding === undefined ? undefined : (expectedIncarnation ?? runtime.incarnation);
+    if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation)
+      return undefined;
+    if (
+      runtime.binding !== undefined &&
+      (force || isCurrentRequest(runtime) === undefined) &&
+      (force || !runtime.recoveryDisarmed)
+    )
+      nextGeneration(runtime.generation);
+    admission = beginBindingAddress(runtime.binding, String(runtime.key));
+    // Effects supply their ticket before interaction can collect or replace the entry.
     interact(state);
+    if (runtime.binding !== undefined) {
+      assertStoreOpen(runtime);
+      if (
+        state.resetEpoch !== resetEpoch ||
+        (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation)
+      )
+        return undefined;
+    }
     if (!force) {
       const existing = isCurrentRequest(runtime);
       if (existing != null) {
@@ -175,24 +217,62 @@ export function startQueryRequest<T>(
       runtime.activeRequest.superseded = true;
       runtime.activeRequest.controller.abort();
       if (state.resetEpoch !== resetEpoch || state.disposed) return undefined;
+      if (runtime.binding !== undefined) {
+        assertStoreOpen(runtime);
+        if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation)
+          return undefined;
+      }
     }
+    if (runtime.binding !== undefined) nextGeneration(runtime.generation);
     if (runtime.timer != null) {
       clearTimeout(runtime.timer);
       runtime.timer = undefined;
     }
+    if (runtime.binding !== undefined) {
+      assertStoreOpen(runtime);
+      if (state.resetEpoch !== resetEpoch) return undefined;
+    }
+    const incarnation = runtime.incarnation ?? (runtime.incarnation = {});
     const controller = new AbortController();
     const unlinkCallerAbort = addSignalAbort(
       abortSignal,
       controller,
-      (remove) => physicalCleanup(state.retirement, remove),
-      () => !state.disposed && state.resetEpoch === resetEpoch,
+      (remove) => physicalCleanup(owner, remove),
+      () =>
+        !state.disposed &&
+        !runtime.disposed &&
+        runtime.binding?.context.disposed !== true &&
+        state.resetEpoch === resetEpoch &&
+        runtime.incarnation === incarnation,
     );
-    const removeCallerAbort = (): void => physicalCleanup(state.retirement, unlinkCallerAbort);
-    if (state.resetEpoch !== resetEpoch || state.disposed) {
-      removeCallerAbort();
+    const removeCallerAbort = (): void => physicalCleanup(owner, unlinkCallerAbort);
+    if (
+      runtime.disposed ||
+      state.disposed ||
+      runtime.binding?.context.disposed === true ||
+      state.resetEpoch !== resetEpoch ||
+      runtime.incarnation !== incarnation
+    ) {
+      try {
+        removeCallerAbort();
+      } catch (error) {
+        if (runtime.binding !== undefined) assertStoreOpen(runtime);
+        throw error;
+      }
+      if (runtime.binding !== undefined) assertStoreOpen(runtime);
       return undefined;
     }
-    const generation = issue(runtime);
+    let generation: number;
+    try {
+      generation = issue(runtime);
+    } catch (error) {
+      try {
+        removeCallerAbort();
+      } catch (cleanupError) {
+        reportContinuationError(state, cleanupError);
+      }
+      throw error;
+    }
     const source: QuerySource<T> = { query: caller.query, input: caller.input };
     let resolveOutcome!: QueryRequest["resolveOutcome"];
     const outcome = new Promise<QueryOutcome>((resolve) => {
@@ -245,7 +325,20 @@ export function startQueryRequest<T>(
       setupError = error;
       setupFailed = true;
     }
-    if (state.resetEpoch !== resetEpoch || state.disposed) {
+    if (
+      state.resetEpoch !== resetEpoch ||
+      state.disposed ||
+      runtime.disposed ||
+      bindingContextClosed(runtime)
+    ) {
+      if (runtime.binding !== undefined)
+        settleQueryFailure(
+          runtime,
+          request,
+          state.disposed || runtime.disposed || runtime.binding.context.disposed
+            ? new Fault("disposed", [String(runtime.key)])
+            : new AbortError("Query request was superseded before dispatch."),
+        );
       if (setupFailed) reportContinuationError(state, setupError);
       return request;
     }
@@ -260,26 +353,53 @@ export function startQueryRequest<T>(
       )
         settleQueryFailure(runtime, request, controller.signal.reason);
     };
-    controller.signal.addEventListener("abort", onRequestAbort, { once: true });
     request.removeRequestAbort = () =>
-      physicalCleanup(state.retirement, () =>
-        controller.signal.removeEventListener("abort", onRequestAbort),
-      );
+      physicalCleanup(owner, () => controller.signal.removeEventListener("abort", onRequestAbort));
+    try {
+      controller.signal.addEventListener("abort", onRequestAbort, { once: true });
+    } catch (error) {
+      try {
+        finishRequest(runtime, request);
+      } catch (cleanupError) {
+        reportContinuationError(state, cleanupError);
+      }
+      throw error;
+    }
     if (controller.signal.aborted) onRequestAbort();
-    if (request.resetEpoch !== state.resetEpoch || runtime.disposed) return request;
-    const original = beginPhysicalWork(state.retirement, "query");
+    if (
+      request.resetEpoch !== state.resetEpoch ||
+      runtime.disposed ||
+      bindingContextClosed(runtime)
+    ) {
+      if (runtime.binding !== undefined)
+        settleQueryFailure(
+          runtime,
+          request,
+          runtime.disposed || runtime.binding.context.disposed
+            ? new Fault("disposed", [String(runtime.key)])
+            : new AbortError("Query request was superseded before dispatch."),
+        );
+      return request;
+    }
+    const original = beginPhysicalWork(owner, "query");
     let fetched: unknown;
     let fetchedReturned = false;
     let acknowledged = true;
     let result: Promise<T>;
     try {
-      const options = { abortSignal: controller.signal, graph: state.graph.id, key: runtime.key };
+      const options = {
+        abortSignal: controller.signal,
+        graph: state.graph.id,
+        key: runtime.key,
+      };
       const settledBeforeFetchRead = request.settled;
       const activeBeforeFetchRead = runtime.activeRequest;
       const fetch = caller.query.fetch;
       if (
         state.disposed ||
         runtime.disposed ||
+        bindingContextClosed(runtime) ||
+        runtime.incarnation !== incarnation ||
         runtime.activeRequest !== activeBeforeFetchRead ||
         request.settled !== settledBeforeFetchRead ||
         (settledBeforeFetchRead
@@ -292,7 +412,7 @@ export function startQueryRequest<T>(
         finishPhysicalWork(original);
         return request;
       }
-      fetched = Reflect.apply(fetch, caller.query, [caller.input, options]);
+      fetched = nativeApply(fetch, caller.query, [caller.input, options]);
       fetchedReturned = true;
       original.original = fetched;
       result = normalizePhysicalPromise(fetched as T | PromiseLike<T>);
@@ -307,29 +427,38 @@ export function startQueryRequest<T>(
       rejected.reject(error);
       result = rejected.promise;
     }
-    const observer = result.then;
-    if (!canReplacePhysicalCarrier(result, observer)) acknowledged = false;
-    request.promise = Reflect.apply(observer, result, [
-      (value: T) => {
-        try {
-          settleQuerySuccess(runtime, request, value);
-        } finally {
-          if (acknowledged) finishPhysicalWork(original);
-        }
-      },
-      (error: unknown) => {
-        try {
-          settleQueryFailure(runtime, request, error);
-        } finally {
-          if (acknowledged) finishPhysicalWork(original);
-        }
-      },
-    ]) as Promise<void>;
+    try {
+      const observer = result.then;
+      if (!canReplacePhysicalCarrier(result, observer)) acknowledged = false;
+      request.promise = nativeApply(observer, result, [
+        (value: T) => {
+          try {
+            settleQuerySuccess(runtime, request, value);
+          } finally {
+            if (acknowledged) finishPhysicalWork(original);
+          }
+        },
+        (error: unknown) => {
+          try {
+            settleQueryFailure(runtime, request, error);
+          } finally {
+            if (acknowledged) finishPhysicalWork(original);
+          }
+        },
+      ]) as Promise<void>;
+    } catch (error) {
+      original.original = fetched;
+      throw error;
+    }
     if (original.active) original.continuation = request.promise;
     if (setupFailed) throw setupError;
     return request;
   } finally {
-    finishPhysicalWork(acquisition);
+    try {
+      endBindingAddress(runtime.binding, String(runtime.key), admission);
+    } finally {
+      finishPhysicalWork(acquisition);
+    }
   }
 }
 

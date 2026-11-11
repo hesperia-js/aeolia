@@ -9,6 +9,9 @@ export {
   queryOptions,
   project,
   storeKey,
+  bindOperation,
+  createBindingContext,
+  peekStore,
 } from "./contract/index.ts";
 export type {
   Affected,
@@ -42,6 +45,9 @@ export type {
   StoreDefinition,
   CreateStoreInput,
   StoreKey,
+  StoreIdentity,
+  StoreCapture,
+  ValueRevision,
   StoreNames,
   StoreOptions,
   StorePatterns,
@@ -51,6 +57,15 @@ export type {
   StreamStatus,
   StreamStore,
   ValueOptions,
+} from "./contract/index.ts";
+export type {
+  BindingContext,
+  BoundQueryMember,
+  ExistingTarget,
+  QueryBinding,
+  QueryBindingConfiguration,
+  QueryBindingHandle,
+  TypedTarget,
 } from "./contract/index.ts";
 export { Fault, onFault } from "./fault.ts";
 export type { FaultKind, Unsubscribe } from "./fault.ts";
@@ -83,3 +98,37 @@ export type {
   SignalOptions,
   WritableSignal,
 } from "./reactive.ts";
+
+export { profileEffect, predictionFor } from "./contract/mutation-binding.ts";
+export type {
+  BindingMutationOptions,
+  BrandedBindingMutationOptions,
+  BoundMutationMember,
+  EffectContext,
+  MutationBinding,
+  MutationBindingConfiguration,
+  PreparedEffect,
+  PrepareEffectContext,
+  ProfileEffect,
+  SettledEffect,
+  SettleEffectContext,
+  TargetPrediction,
+} from "./contract/mutation-binding.ts";
+
+export { bindStream } from "./contract/stream-binding.ts";
+export type {
+  BoundStreamMember,
+  BoundStreamSession,
+  BoundStreamValueOptions,
+  StreamBinding,
+  StreamBindingHandle,
+  StreamDetachment,
+  StreamSessionIdentity,
+  StreamTerminalCapture,
+} from "./contract/stream-binding.ts";
+export { inspectBoundAddress } from "./contract/binding-address.ts";
+export type {
+  BoundAddressEmpty,
+  BoundAddressInspection,
+  BoundAddressStamp,
+} from "./contract/binding-address.ts";

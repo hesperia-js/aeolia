@@ -6,6 +6,8 @@ import {
   createStream,
   createMutation,
   affects,
+  bindOperation,
+  createBindingContext,
   defineContract,
   project,
   subscribe,
@@ -15,13 +17,16 @@ import {
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
+let ownsFakeTimers = false;
 beforeEach(() => {
   jest.useFakeTimers();
+  ownsFakeTimers = true;
   jest.setSystemTime(100);
 });
 afterEach(() => {
-  jest.clearAllTimers();
+  if (ownsFakeTimers) jest.clearAllTimers();
   jest.useRealTimers();
+  ownsFakeTimers = false;
 });
 async function flush(): Promise<void> {
   await Promise.resolve();
@@ -2580,5 +2585,312 @@ it("joins original queries after cancellation and prior void graph disposal", as
     if (!cancelledResolved) backend.resolve(cancelledCall, 42);
     if (!disposedResolved && disposedCall !== undefined) backend.resolve(disposedCall, 84);
     graph.dispose();
+  }
+});
+
+async function expectPending(promise: Promise<unknown>): Promise<void> {
+  jest.useRealTimers();
+  ownsFakeTimers = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      promise.then(
+        () => "settled",
+        () => "settled",
+      ),
+      new Promise<"pending">((resolve) => {
+        timer = setTimeout(() => resolve("pending"), 0);
+      }),
+    ]);
+    expect(result).toBe("pending");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function expectSettled(promise: Promise<unknown>): Promise<void> {
+  jest.useRealTimers();
+  ownsFakeTimers = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      promise.then(
+        () => "settled",
+        () => "rejected",
+      ),
+      new Promise<"pending">((resolve) => {
+        timer = setTimeout(() => resolve("pending"), 0);
+      }),
+    ]);
+    expect(result).toBe("settled");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+it("retires a context skipped by prior write-restricted graph disposal", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-skipped-context", operations: {} }),
+  });
+  const context = createBindingContext(graph);
+  let disposalThrew = false;
+  let disposalCause: unknown;
+  let retirementOutcome:
+    | Promise<
+        { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }
+      >
+    | undefined;
+  try {
+    expect(context.active.get()).toBe(true);
+    try {
+      withoutWrites(() => graph.dispose());
+    } catch (cause) {
+      disposalThrew = true;
+      disposalCause = cause;
+    }
+    expect(disposalThrew).toBe(true);
+    expect(context.active.get()).toBe(true);
+
+    const retirement = graph.retire();
+    retirementOutcome = retirement.then(
+      () => ({ kind: "fulfilled" as const }),
+      (cause: unknown) => ({ kind: "rejected" as const, cause }),
+    );
+    expect(graph.retire()).toBe(retirement);
+    expect(context.active.get()).toBe(false);
+
+    const outcome = retirementOutcome;
+    if (outcome === undefined) throw new Error("Expected the cached retirement outcome");
+    const result = await outcome;
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") throw new Error("Expected the retained disposal failure");
+    expect(result.cause).toBe(disposalCause);
+  } finally {
+    try {
+      context.dispose();
+    } finally {
+      graph.dispose();
+      if (retirementOutcome !== undefined) await retirementOutcome;
+    }
+  }
+});
+
+it("refuses retirement in the same write-restricted scope as a failed disposal", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-disposal-retry", operations: {} }),
+  });
+  const context = createBindingContext(graph);
+  let disposalCause: unknown;
+  let retirementCause: unknown;
+  let refusedPromise: Promise<void> | undefined;
+  try {
+    withoutWrites(() => {
+      try {
+        graph.dispose();
+      } catch (cause) {
+        disposalCause = cause;
+      }
+      try {
+        refusedPromise = graph.retire();
+        void refusedPromise.catch(() => undefined);
+      } catch (cause) {
+        retirementCause = cause;
+      }
+    });
+    expect(disposalCause).toBeInstanceOf(Fault);
+    expect((disposalCause as Fault).kind).toBe("write-forbidden");
+    expect(retirementCause).toBeInstanceOf(Fault);
+    expect((retirementCause as Fault).kind).toBe("write-forbidden");
+    expect(refusedPromise).toBeUndefined();
+    expect(context.active.get()).toBe(true);
+
+    const retirement = graph.retire();
+    expect(graph.retire()).toBe(retirement);
+    expect(context.active.get()).toBe(false);
+    await expect(retirement).rejects.toBe(disposalCause);
+  } finally {
+    context.dispose();
+    graph.dispose();
+    await refusedPromise?.catch(() => undefined);
+  }
+});
+
+it("retires one binding context without cancelling or joining other scopes", async () => {
+  type Scope = "first" | "second" | "raw";
+  type Input = { readonly scope: Scope };
+  const gates: Record<Scope, ReturnType<typeof Promise.withResolvers<number>>> = {
+    first: Promise.withResolvers<number>(),
+    second: Promise.withResolvers<number>(),
+    raw: Promise.withResolvers<number>(),
+  };
+  const signals: Partial<Record<Scope, AbortSignal>> = {};
+  const query = createQuery({
+    name: "context-retirement.query",
+    key: (input: Input) => input.scope,
+    fetch: (input: Input, options) => {
+      signals[input.scope] = options.abortSignal;
+      return gates[input.scope].promise;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "context-retirement", operations: { query } }),
+  });
+  const firstContext = createBindingContext(graph);
+  const secondContext = createBindingContext(graph);
+  const first = bindOperation(graph, query, {
+    context: firstContext,
+    profile: {},
+    fetch: query.fetch,
+  });
+  const second = bindOperation(graph, query, {
+    context: secondContext,
+    profile: {},
+    fetch: query.fetch,
+  });
+  const firstReady = first.member({ scope: "first" }).ready.then(
+    () => undefined,
+    () => undefined,
+  );
+  const secondReady = second.member({ scope: "second" }).ready.then(
+    () => undefined,
+    () => undefined,
+  );
+  const rawReady = graph.api.query({ scope: "raw" }).ready.then(
+    () => undefined,
+    () => undefined,
+  );
+  try {
+    expect(signals.first).toBeDefined();
+    expect(signals.second).toBeDefined();
+    expect(signals.raw).toBeDefined();
+    firstContext.dispose();
+    const retirement = firstContext.retire();
+    expect(signals.first!.aborted).toBe(true);
+    expect(signals.second!.aborted).toBe(false);
+    expect(signals.raw!.aborted).toBe(false);
+    await expectPending(retirement);
+    gates.first.resolve(1);
+    await expectSettled(retirement);
+  } finally {
+    gates.first.resolve(1);
+    gates.second.resolve(2);
+    gates.raw.resolve(3);
+    await Promise.all([firstReady, secondReady, rawReady]);
+    graph.dispose();
+  }
+});
+
+it("drains later contexts when context.active reenters graph retirement and joins each original", async () => {
+  type Scope = "first" | "second";
+  type Input = { readonly scope: Scope };
+  const originals: Record<Scope, ReturnType<typeof Promise.withResolvers<number>>> = {
+    first: Promise.withResolvers<number>(),
+    second: Promise.withResolvers<number>(),
+  };
+  const signals: Partial<Record<Scope, AbortSignal>> = {};
+  const aborts: Record<Scope, number> = { first: 0, second: 0 };
+  const closures: Record<Scope, number> = { first: 0, second: 0 };
+  const query = createQuery({
+    name: "context-phase-retirement.query",
+    key: (input: Input) => input.scope,
+    fetch: (input: Input, options) => {
+      signals[input.scope] = options.abortSignal;
+      options.abortSignal.addEventListener("abort", () => {
+        aborts[input.scope] += 1;
+      });
+      return originals[input.scope].promise;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "context-phase-retirement", operations: { query } }),
+  });
+  const firstContext = createBindingContext(graph);
+  const secondContext = createBindingContext(graph);
+  let retirement: Promise<void> | undefined;
+  let retirementOutcome:
+    | Promise<
+        { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }
+      >
+    | undefined;
+  let firstReady: Promise<void> | undefined;
+  let secondReady: Promise<void> | undefined;
+  let stopFirst = (): void => undefined;
+  let stopSecond = (): void => undefined;
+  const startRetirement = (): void => {
+    if (retirement !== undefined) return;
+    retirement = graph.retire();
+    retirementOutcome = retirement.then(
+      () => ({ kind: "fulfilled" as const }),
+      (cause: unknown) => ({ kind: "rejected" as const, cause }),
+    );
+  };
+  try {
+    const first = bindOperation(graph, query, {
+      context: firstContext,
+      profile: {},
+      fetch: query.fetch,
+    });
+    const second = bindOperation(graph, query, {
+      context: secondContext,
+      profile: {},
+      fetch: query.fetch,
+    });
+    firstReady = first.member({ scope: "first" }).ready.then(
+      () => undefined,
+      () => undefined,
+    );
+    secondReady = second.member({ scope: "second" }).ready.then(
+      () => undefined,
+      () => undefined,
+    );
+    stopFirst = subscribe(firstContext.active, (active) => {
+      if (active) return;
+      closures.first += 1;
+      startRetirement();
+    });
+    stopSecond = subscribe(secondContext.active, (active) => {
+      if (!active) closures.second += 1;
+    });
+    if (signals.first === undefined || signals.second === undefined)
+      throw new Error("Expected both context queries to start");
+
+    graph.dispose();
+
+    const retirementPromise = retirement;
+    const outcome = retirementOutcome;
+    if (retirementPromise === undefined || outcome === undefined)
+      throw new Error("Expected context closure to reenter graph retirement");
+    expect(graph.retire()).toBe(retirementPromise);
+    expect(firstContext.active.get()).toBe(false);
+    expect(secondContext.active.get()).toBe(false);
+    expect(closures).toEqual({ first: 1, second: 1 });
+    expect(aborts).toEqual({ first: 1, second: 1 });
+    expect(signals.first.aborted).toBe(true);
+    expect(signals.second.aborted).toBe(true);
+    await Promise.all([firstReady, secondReady]);
+    await expectPending(retirementPromise);
+
+    originals.first.resolve(1);
+    await expectPending(retirementPromise);
+    originals.second.resolve(2);
+    const result = await outcome;
+    expect(result.kind).toBe("fulfilled");
+    if (result.kind !== "fulfilled") throw new Error("Expected both originals to retire cleanly");
+  } finally {
+    originals.first.resolve(1);
+    originals.second.resolve(2);
+    try {
+      graph.dispose();
+    } finally {
+      stopFirst();
+      stopSecond();
+      const finalRetirement = retirement ?? graph.retire();
+      await finalRetirement.then(
+        () => undefined,
+        () => undefined,
+      );
+      if (firstReady !== undefined) await firstReady;
+      if (secondReady !== undefined) await secondReady;
+    }
   }
 });

@@ -193,8 +193,10 @@ function checkGraph(node: Node<unknown>, frame: ComputationFrame | undefined): v
   }
 }
 
+let nativeReadDepth = 0;
+
 function notifyRead(node: Node<unknown>, operation: "get" | "peek"): void {
-  if (stalenessWalkDepth > 0) return;
+  if (stalenessWalkDepth > 0 || nativeReadDepth > 0) return;
   if (node.readObservers.size === 0) return;
   for (const observer of node.readObservers) observer(operation);
 }
@@ -716,34 +718,43 @@ function invokeStateEquals<T>(node: SignalNode<T>, a: T, b: T): boolean {
 }
 
 export function writeNode<T>(node: SignalNode<T>, value: T): void {
+  writeState(node, value);
+}
+
+function writeState<T>(
+  node: SignalNode<T>,
+  value: T,
+  current: () => boolean = () => true,
+  commit: () => void = () => undefined,
+): boolean {
   ensureWritesAllowed(node as Node<unknown>);
   if (canonicalNotificationDepth > 0 || observerNotificationDepth > 0)
     throw watcherWriteFault(node as Node<unknown>);
+  const equal = invokeStateEquals(node, node.value, value);
+  if (!current()) return false;
+  commit();
+  if (equal) return true;
   if (helperNotificationDepth > 0) {
-    if (!invokeStateEquals(node, node.value, value)) {
-      node.value = value;
-      node.token += 1;
-      propagation.pendingSeeds.add(node as Node<unknown>);
-    }
-    return;
+    node.value = value;
+    node.token += 1;
+    propagation.pendingSeeds.add(node as Node<unknown>);
+    return true;
   }
   if (subscriptionDeliveryDepth > 0) {
-    if (!invokeStateEquals(node, node.value, value)) {
-      node.value = value;
-      node.token += 1;
-      if (propagation.batchDepth > 0) propagation.batchSeeds.add(node as Node<unknown>);
-      else propagation.pendingSeeds.add(node as Node<unknown>);
-    }
-    return;
+    node.value = value;
+    node.token += 1;
+    if (propagation.batchDepth > 0) propagation.batchSeeds.add(node as Node<unknown>);
+    else propagation.pendingSeeds.add(node as Node<unknown>);
+    return true;
   }
-  if (invokeStateEquals(node, node.value, value)) return;
   node.value = value;
   node.token += 1;
   if (propagation.batchDepth > 0) {
     propagation.batchSeeds.add(node as Node<unknown>);
-    return;
+    return true;
   }
   beginPropagation([node as Node<unknown>]);
+  return true;
 }
 
 function removeWatchRecord(node: Node<unknown>, record: WatchRecord): void {
@@ -1377,6 +1388,34 @@ export interface ReactiveGraphBinding {
  * application API.
  */
 export const __internal = Object.freeze({
+  /** Read the existing computed without outer tracking or retention callbacks. */
+  nativePeek: <T>(readable: Readable<T>, current: () => boolean = () => true): T => {
+    const node = nodeFor(readable);
+    nativeReadDepth += 1;
+    try {
+      return readNode(node, false);
+    } finally {
+      nativeReadDepth -= 1;
+      // Reentrant equality can leave an obsolete result beside successor tokens.
+      // Cold reads ignore marked when those tokens match, so invalidate the cached run.
+      if (node.kind === "computed" && !current()) {
+        node.hasRun = false;
+        node.marked = true;
+      }
+    }
+  },
+
+  /** Commit native bookkeeping after equality and before the guarded storage. */
+  guardedWrite: <T>(
+    source: WritableSignal<T>,
+    value: T,
+    current: () => boolean,
+    commit: () => void,
+  ): boolean => {
+    const node = nodeFor(source);
+    if (node.kind !== "signal") throw new TypeError("Expected a Signal.State");
+    return writeState(node, value, current, commit);
+  },
   /** Reject forbidden managed writes before their non-signal bookkeeping changes. */
   assertWritesAllowed: (readable: Readable<unknown>): void => {
     const node = nodeFor(readable);

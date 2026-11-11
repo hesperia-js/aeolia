@@ -3,7 +3,8 @@ import { adopt, snapshot } from "../../src/realm.ts";
 import { createGraph } from "../../src/contract/index.ts";
 import { Fault } from "../../src/fault.ts";
 import { affects, createMutation, createQuery, defineContract } from "../../src/contract/index.ts";
-import { subscribe, watch, withoutWrites } from "../../src/reactive.ts";
+import { subscribe } from "../../src/index.ts";
+import { watch, withoutWrites } from "../../src/reactive.ts";
 import { testBackend } from "../../src/testing.ts";
 
 beforeEach(() => {
@@ -41,6 +42,75 @@ function graphFor(
 }
 
 describe("QueryStore.ready", () => {
+  it("does not replay a raw query on reset for an available-only observer", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("reset-available", { initial: 7 });
+    const stop = subscribe(store.available, () => undefined);
+    let reset: Promise<void> | undefined;
+    try {
+      expect(backend.calls).toHaveLength(0);
+      reset = graph.reset();
+      void reset.catch(() => undefined);
+      expect(backend.calls).toHaveLength(0);
+      await expect(reset).resolves.toBeUndefined();
+      expect(store.available.get()).toBe(false);
+    } finally {
+      stop();
+      graph.dispose();
+      await reset?.catch(() => undefined);
+    }
+  });
+
+  it("replays an empty raw query on reset for a store subscriber", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("reset-empty-subscriber");
+    const stop = subscribe(store, () => undefined);
+    let reset: Promise<void> | undefined;
+    try {
+      expect(store.available.get()).toBe(false);
+      expect(backend.calls).toHaveLength(1);
+      reset = graph.reset();
+      void reset.catch(() => undefined);
+      expect(backend.calls).toHaveLength(2);
+      backend.resolve(backend.calls[1]!, 9);
+      await expect(reset).resolves.toBeUndefined();
+      expect(store.value.get()).toBe(9);
+    } finally {
+      stop();
+      graph.dispose();
+      await reset?.catch(() => undefined);
+    }
+  });
+
+  it("starts recovery when a later initial seed follows a failed post-reset query", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    try {
+      await graph.reset();
+      const failed = graph.api.query("seed-after-failure", { revalidateAfterMs: 60_000 });
+      const firstReady = failed.ready;
+      const failure = new Error("offline after reset");
+      backend.reject(backend.calls[0]!, failure);
+      await expect(firstReady).rejects.toBe(failure);
+      expect(failed.error.get()).toBe(failure);
+
+      const seeded = graph.api.query("seed-after-failure", {
+        initial: 7,
+        revalidateAfterMs: 60_000,
+      });
+      expect(seeded.value.get()).toBe(7);
+      expect(backend.calls).toHaveLength(2);
+      expect(seeded.status.get()).toBe("revalidating");
+      const recovered = seeded.ready;
+      backend.resolve(backend.calls[1]!, 8);
+      await expect(recovered).resolves.toBe(8);
+    } finally {
+      graph.dispose();
+    }
+  });
+
   it("is lazy, waits through stale state, and resolves initial or undefined values", async () => {
     const backend = testBackend();
     const graph = graphFor(backend);

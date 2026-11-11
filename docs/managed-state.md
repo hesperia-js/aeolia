@@ -301,3 +301,282 @@ cross that boundary.
 
 This state layer is still being stabilized. Its current integration suite is a
 behavioral baseline, not a compatibility promise for a published 1.0 API.
+
+## Retiring a binding context
+
+Use `await context.retire()` to close one binding context and wait for its
+original bound queries, mutations, streams and cleanup. It leaves raw graph
+operations and other contexts running. Graph retirement includes its contexts.
+
+Context retirement closes admission before cleanup, caches the same promise
+for repeated and reentrant calls, and retains owned cleanup failures. Earlier
+`context.dispose()` does not discard that completion. Logical stream detachment
+can precede physical iterator cleanup.
+
+## Context-bound query profiles
+
+Use `createBindingContext(graph)` and `bindOperation(graph, query, configuration)`
+when an existing graph needs a separate query representation or fixed application
+environment. Both helpers are exported by `aeolia` and `aeolia/contract`.
+Registration checks the exact query declaration in the graph's contract. It does
+not compute a key, acquire a store or call the backend.
+Here, `userQuery` is an existing query on `graph` that accepts `{ id: string }`
+and returns a user with a string `name`.
+
+```ts
+import { bindOperation, createBindingContext } from "aeolia";
+
+const context = createBindingContext(graph);
+const labels = bindOperation(graph, userQuery, {
+  context,
+  profile: {},
+  fetch: async (input, options) => {
+    const user = await userQuery.fetch(input, options);
+    return { label: user.name };
+  },
+});
+const user = labels.member({ id: "cedar" });
+const label = await user.ready;
+```
+
+The context represents one fixed environment generation, such as one security
+context. Keep a shared context alive independently of individual components.
+Use a new context when that environment changes. Aeolia does not infer security
+identity from headers or callback closures.
+
+The native address includes the context, original query, exact opaque profile
+object and original logical key. Calls through the same binding/key share value,
+request and errors. Different profiles, original queries or contexts remain
+separate even when their logical keys are equal. A second registration of the
+same context/query/profile throws `TypeError`, including an equivalent-looking
+configuration. Retain and reuse the original binding.
+
+`Store.key` remains the original logical key. `Store.identity` identifies the
+actual physical entry across caller wrappers, reset and idle collection. It is
+opaque and cannot be used as a snapshot address or current-lifetime permission.
+Raw `graph.api` members and `graph.at(key)` retain their raw namespace; no string
+prefix is reserved, and a raw handle does not identify a bound profile.
+
+The binding callback receives the original native input and request options.
+Its fulfilled value lands through the normal native request owner, including
+refresh and reset refresh. A rejected completion preserves the prior value and
+uses native query failure/readiness behavior. Value defaults describe the
+completed value; raw query equality is not inherited. The original snapshot
+default and freshness window remain in effect unless configured otherwise.
+Conflicting explicit initial defaults are rejected rather than silently replaced.
+The fixed binding initial is installed when each entry is first configured.
+Ordinary callers joining during or after reset do not reapply it. An explicit
+caller initial remains a reseed subject to the native reset restrictions.
+Inputless and branded options follow the same rules as raw query members.
+
+`binding.target(handle)` captures a typed ticket without reading a value,
+retaining the entry or starting work. It requires a genuine query handle from
+that exact binding. It returns `undefined` for an inactive or collected entry;
+foreign or fabricated handles throw `TypeError`. `ticket.forBinding(binding)`
+checks the original association and incarnation without retention. After reset,
+an old ticket stays stale and a fresh explicit target call can use the retained
+handle's new cleared incarnation before a reset request succeeds. Collection
+does not revive an entry through either operation. Normal member acquisition,
+explicit revalidation or a local write can establish a fresh incarnation with the
+same physical identity.
+A current acquired incarnation has a ticket while its request is pending or
+failed; it does not need a successful landing. Readiness inspection of an inactive
+collected handle does not establish that authority, including across reset.
+
+Bound call options are captured before key computation. If reading those options
+revokes the binding context, the call fails before invoking the authored key or
+backend callback.
+
+`context.dispose()` first revokes admission and all its entry tickets, then
+aborts only its pending requests and clears its entries. Old value/readiness
+handles report the native disposed fault. Raw entries and other contexts remain
+usable. Disposal is idempotent. `context.active` is nonretaining lifecycle
+metadata; observing it does not keep query values alive or activate requests.
+Graph disposal also retires its contexts.
+
+Version 1 `snapshot(graph)` rejects a selected committed bound entry with an
+encoding fault because its raw-key format cannot represent the address.
+Profiles configured with `snapshot: false` are excluded normally; they do not
+prevent eligible raw entries from being exported. Version 1 adoption continues to
+address only raw entries.
+
+## Context-bound mutation effects
+
+Bind a mutation when its callback completes a different result or its effects
+must reach context-bound query profiles. Use the original mutation definition
+and one `profileEffect` descriptor for every original effect position, in order.
+Registration captures callbacks without computing keys, acquiring stores or
+running selectors. Re-registering the same context, definition and profile token
+throws `TypeError`, even with equivalent callbacks.
+
+```ts
+import { bindOperation, predictionFor, profileEffect } from "aeolia";
+
+// userQuery and rename are original declarations in graph's contract.
+// names is an existing QueryBinding for the same context and original userQuery.
+const effect = profileEffect(rename, 0, userQuery, {
+  prepare: (phase) =>
+    phase.existing(phase.selectedInput).map((target) => {
+      const name = target.forBinding(names);
+      return name === undefined
+        ? phase.prepare(target)
+        : phase.predict(name, (_current, input) => ({ label: input.name }));
+    }),
+  settle: (phase) =>
+    phase
+      .existing(phase.selectedInput)
+      .map((target) => phase.selected(target, phase.selectedInput)),
+});
+const saving = bindOperation(graph, rename, {
+  context,
+  profile: {},
+  effects: [effect],
+  run: async (input, call) => ({ receipt: await rename.run(input, call) }),
+});
+const current = names.target(existingNameHandle);
+const options =
+  current === undefined
+    ? {}
+    : {
+        optimistic: [predictionFor(rename, current, (_value, input) => ({ label: input.name }))],
+      };
+await saving.member({ id: "one", name: "Cedar" }, options);
+```
+
+The resolver owns any input validation/transformation before calling
+`phase.existing`. That operation finds existing active profiles for this context,
+original query and logical key. It starts no query and does not retain or revive
+an entry. Raw entries, other contexts and other original queries are excluded.
+Each phase invokes the original selector once per effect. Settlement discovers
+its population afresh, so an entry acquired during the mutation receives its
+settled effect without receiving earlier optimistic work.
+
+Preparation completes every selector/resolver and checks every returned
+instruction before publishing predictions or dispatching the run callback.
+`prepare` records membership without choosing a producer. `original` requests
+the exact original effect's native-value producer through a compatible typed
+ticket. A transformed completion uses a separately typed `predict` producer.
+Neither constructor evaluates a producer. Native prediction evaluation remains
+synchronous: a throw, forbidden reactive read or capacity fault is diagnosed and
+that prediction is omitted. Other valid targets and the mutation can continue.
+
+`predictionFor` supplies a per-invocation override by physical store identity.
+It takes precedence over the matching original or declared producer and does
+not fall back after a predictor diagnostic. Equal logical keys can have distinct
+overrides. Duplicate identities, fabricated handles, wrong mutation associations
+and foreign contexts throw `TypeError` before publication or dispatch. An override
+does not add an unrelated target to the original effect's membership.
+
+Tickets capture one incarnation without a liveness pin. An expired target is
+omitted without acquisition. Reset never retargets an old instruction. A fresh
+explicit `binding.target(handle)` call on a retained active handle can construct
+a current instruction, including before a reset request lands. An inactive or
+collected handle returns `undefined`; normal query acquisition or explicit
+retained-handle revalidation remains separate.
+
+At settlement, `selected(target, input)` refreshes with the freshly validated
+selector input and `current(target)` uses that target's current validated source.
+Both retain its bound completion callback and the original effect's `on` policy.
+An invalidate effect refreshes only a value-live store; a revalidate effect
+starts its ordinary native refresh. Refresh completion is not awaited by the
+mutation. Individual resolution/application failures preserve their original
+causes and use the existing continuation diagnostic channels; independent
+settled effects continue before the successful mutation result is returned.
+
+The context and graph own cancellation before preparation callbacks or waits.
+Caller cancellation, `graph.cancelPending()`, reset and context/graph disposal
+can prevent pre-dispatch work. Once run has dispatched, an aborted transport
+signal alone does not suppress a callback's successful completion or effects.
+Reset, graph disposal and context retirement still prevent obsolete effects
+from reaching another lifetime. `EffectContext.signal` is a cancellation hint,
+not the sole post-success authority check. Rejected run/output completion
+removes that mutation's predictions, applies no successful effects and does not
+replay a backend write. Raw `graph.api` mutation behavior is unchanged.
+
+## Bound stream sessions and native addresses
+
+A stream binding fixes a genuine original stream member to one binding context.
+Registration is dormant: it computes no key, creates no store and opens no source.
+The binding is memoized for the exact graph, context, original declaration and raw
+member. The authored key remains unchanged. Equal keys in the raw namespace or
+another binding context identify separate physical entries.
+
+```ts
+import { bindStream, createBindingContext, inspectBoundAddress, storeKey } from "aeolia";
+
+// events is the original declaration registered at graph.api.events.
+const context = createBindingContext(graph);
+const binding = bindStream(graph, events, graph.api.events, { context });
+const address = inspectBoundAddress(binding, storeKey("events/one"));
+if (address.kind === "stable" && address.state === "empty") {
+  const source = binding.member({ id: "one" }, { expectEmpty: address.condition });
+  const session = binding.session(source);
+  const receipt = await session.detached;
+  // receipt belongs to this exact native opening.
+}
+```
+
+An ordinary member call joins the current session or opens a fresh one. Each
+returned wrapper fixes its value, availability, status, pending and error facets,
+subscriptions, writes and shared projections to the session it actually joined.
+The session identity is assigned before authored source or signal callouts. Two
+wrappers joining A return the same metadata object. A later B has a different
+session identity and can reuse the same physical store identity.
+
+`binding.session(source)` uses the exact returned wrapper. It remains available
+after synchronous source failure, pre-abort, reset or disposal during opening,
+and after detachment. It reads metadata without touching idle time, retaining the
+source or performing I/O. Inheriting from a wrapper or supplying a wrapper from
+another binding throws `TypeError`. Value access still checks context and graph
+eligibility; disposal uses the native `Fault` channel.
+
+Retirement first revokes A's publication and acquisition authority, then takes one
+native visible capture before destructive clearing. The detachment promise
+resolves after this capture and A's logical clear/status work have been sealed or
+revoked. It does not wait for `iterator.return()` or transport cleanup. The receipt
+contains the original native end status and reason, and a tagged
+`terminalCapture`: either `{ kind: "captured", capture }` or
+`{ kind: "fault", cause }`. A captured result can itself be `changed`. Faults keep
+the original thrown cause, including `undefined`; presence does not use the value
+as a sentinel, so a stable present `undefined` differs from absence. A receipt
+makes no RPC outcome or transport acknowledgement claim.
+
+After detachment, A's value facets read its sealed terminal record. They never
+read B's current cells. A cannot write into B, and an old updater is rejected
+before invocation. Old subscriptions and metadata waiters cannot retain B.
+A shared `project(A, policy)` also stays on A. Reset
+applies the projection's native reset policy and closes the bound projection;
+it does not attach it to another opening. An explicit fresh member call opens B
+without replaying A's value, initial seed or source carrier. Initial, equality and snapshot
+options still obey the native physical-entry conflict rules. Supplying an
+accepted initial explicitly can seed a fresh session. Raw stream reset and
+independent projection behavior retain their existing policies.
+
+`inspectBoundAddress(binding, key, { expected? })` accepts a genuine query or
+stream binding and an already-authored nonempty `StoreKey`. It invokes no member,
+key callback, acquisition, read subscription, transport or idle renewal. Inspecting
+a missing key can allocate scalar address metadata, but creates no store or store
+identity. Its stable result reports separate visible `present` and committed
+`basePresent` facts. An address is occupied while it has visible/base data, a
+native active or draining operation, a finite query attempt, or a retiring stream.
+An opening session can be occupied with both presence flags false.
+
+A stable empty result additionally supplies an opaque, non-reserving condition.
+The condition belongs to that exact inspected binding and key, whether the
+binding is a query or a stream. Only the same stream binding's member can consume
+its stream-origin condition through `expectEmpty`. A query-origin condition has
+no query consumer and cannot authorize stream admission. The stream member
+validates its condition after authored pre-acquisition callbacks and immediately
+before the first native mutation.
+Stale, already-used, crossed or occupied conditions throw `TypeError` before
+clear, create, join or open. A condition does not reserve the address, force
+replacement or join an existing session. An ordinary call without a condition can
+open B after A retires, clearing the previous session state first.
+
+Every inspection includes an opaque address-local stamp. Passing a stale genuine
+stamp returns `{ kind: "changed" }`; a fabricated or crossed stamp throws
+`TypeError`. Acquisition, native state changes, collection and reset permanently
+invalidate old facts even when the address later appears empty again. Disposed
+contexts throw `Fault`. Raw stream and query option types do not expose
+`expectEmpty`; their existing runtime treatment of unknown extra fields remains
+unchanged. They provide no conditional acquisition guarantee.

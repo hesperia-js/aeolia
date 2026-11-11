@@ -5,10 +5,17 @@ import { assertGraphOpen, reportContinuationError } from "./faults.ts";
 import { writeAllStatuses } from "./status.ts";
 import type { StoreRuntime, StreamSession } from "./runtime.ts";
 import { publishStreamEvent } from "./stream-events.ts";
+import { nextValueRevision } from "./identity.ts";
+import { Fault } from "../fault.ts";
+import type { StreamDetachment, StreamTerminalCapture } from "./stream-binding.ts";
+import { beginBindingAddress, captureStoreRuntime, endBindingAddress } from "./registry.ts";
 import {
   beginPhysicalWork,
   finishPhysicalWork,
+  normalizePhysicalPromise,
+  observePhysicalWork,
   physicalCleanup,
+  recordCleanupFailure,
   returnPhysicalIterator,
 } from "./retirement.ts";
 
@@ -86,6 +93,18 @@ export function popCollectionCandidate(
 }
 
 export function isLive<T>(runtime: StoreRuntime<T>): boolean {
+  if (runtime.binding?.kind === "stream") {
+    const session = runtime.stream;
+    return (
+      session !== undefined &&
+      !session.ended &&
+      session.bound?.phase === "active" &&
+      !session.bound.binding.context.disposed &&
+      session.resetEpoch === runtime.graph.__runtime.resetEpoch &&
+      runtime.incarnation === session.bound.incarnation &&
+      (session.bound.liveReadables > 0 || session.listeners.size > 0)
+    );
+  }
   return (
     runtime.liveReadableCount > 0 ||
     runtime.readyWaiterCount > 0 ||
@@ -98,6 +117,7 @@ function collectionCandidateEligible<T>(runtime: StoreRuntime<T>): boolean {
     !runtime.disposed &&
     !runtime.declared &&
     !runtime.dropped &&
+    runtime.boundRetirement === undefined &&
     !isLive(runtime) &&
     runtime.requests.size === 0 &&
     reactiveInternal.signalValue(runtime.predictionStack).length === 0
@@ -158,7 +178,51 @@ export function interact<C extends Contract>(state: GraphRuntimeState<C>): void 
 }
 
 export function setStreamStatus<T>(runtime: StoreRuntime<T>, status: StreamStatus): void {
+  const bound = runtime.stream?.bound;
   runtime.streamStatusCell.set(status);
+  if (
+    bound?.phase === "active" &&
+    !bound.session.ended &&
+    runtime.stream?.token === bound.session.token
+  )
+    bound.lifecycle.update((version) => version + 1);
+}
+
+export function returnStreamIterator<T>(
+  session: StreamSession<T>,
+  iterator: AsyncIterator<T>,
+  swallowCallFailure: boolean,
+): void {
+  const work = beginPhysicalWork(session.physical.owner, "stream-return");
+  let hasOriginal = false;
+  try {
+    let close: AsyncIterator<T>["return"];
+    try {
+      close = iterator.return;
+    } catch (cause) {
+      recordCleanupFailure(work, cause);
+      throw cause;
+    }
+    if (typeof close !== "function") return;
+    let original: unknown;
+    try {
+      original = close.call(iterator);
+    } catch (cause) {
+      recordCleanupFailure(work, cause);
+      if (!swallowCallFailure) throw cause;
+      return;
+    }
+    hasOriginal = true;
+    work.original = original;
+    try {
+      observePhysicalWork(work, normalizePhysicalPromise(original), true, original);
+    } catch (cause) {
+      // The returned original remains unacknowledged if normalization or attachment fails.
+      if (!swallowCallFailure) throw cause;
+    }
+  } finally {
+    if (!hasOriginal) finishPhysicalWork(work);
+  }
 }
 
 export function endStream<T>(
@@ -168,6 +232,7 @@ export function endStream<T>(
   reason?: unknown,
   options?: { readonly abortReason?: unknown; readonly deferCleanup?: boolean },
 ): (() => void) | undefined {
+  if (session.bound !== undefined) return endBoundStream(runtime, session, status, reason, options);
   if (session.ended) return;
   const state = runtime.graph.__runtime;
   const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
@@ -258,6 +323,152 @@ export function endStream<T>(
   cleanup();
 }
 
+function endBoundStream<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+  status: "empty" | "closed" | "failed",
+  reason: unknown,
+  options?: { readonly abortReason?: unknown; readonly deferCleanup?: boolean },
+): (() => void) | undefined {
+  const bound = session.bound!;
+  if (bound.phase !== "active") return;
+  const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
+  const state = runtime.graph.__runtime;
+  const retirement = { token: {}, epoch: state.resetEpoch };
+  bound.retirement = retirement;
+  bound.phase = "retiring";
+  bound.liveReadables = 0;
+  session.ended = true;
+  runtime.boundRetirement = bound;
+  runtime.transitioning = true;
+  const addressOperation = beginBindingAddress(bound.binding, String(runtime.key));
+  let terminalCapture: StreamTerminalCapture<T>;
+  try {
+    terminalCapture = Object.freeze({
+      kind: "captured",
+      capture: captureStoreRuntime(runtime, bound),
+    });
+  } catch (cause) {
+    terminalCapture = Object.freeze({ kind: "fault", cause });
+  }
+  const iterator = session.iterator;
+  const removeCallerAbort = session.removeCallerAbort;
+  const removeControllerAbort = session.removeControllerAbort;
+  session.iterator = undefined;
+  session.removeCallerAbort = undefined;
+  session.removeControllerAbort = undefined;
+  state.activeControllers.delete(session.controller);
+  const owns = (): boolean =>
+    runtime.boundRetirement === bound &&
+    bound.retirement === retirement &&
+    runtime.streamToken === session.token &&
+    state.resetEpoch === retirement.epoch;
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    const failures: unknown[] = [];
+    const attempt = (action: () => void, tracked = true): void => {
+      try {
+        if (tracked) physicalCleanup(session.physical.owner, action);
+        else action();
+      } catch (cause) {
+        failures.push(cause);
+      }
+    };
+    if (owns() && runtime.stream === session)
+      attempt(() =>
+        publishStreamEvent(runtime, session, {
+          kind: "close",
+          failed: status === "failed",
+          reason,
+        }),
+      );
+    session.listeners.clear();
+    if (runtime.stream === session) runtime.stream = undefined;
+    if (removeCallerAbort !== undefined) attempt(removeCallerAbort, false);
+    if (removeControllerAbort !== undefined) attempt(removeControllerAbort, false);
+    attempt(() => session.controller.abort(options?.abortReason));
+    if (iterator !== undefined)
+      attempt(() => returnStreamIterator(session, iterator, false), false);
+    if (owns() && !runtime.disposed && !state.disposed && !bound.binding.context.disposed) {
+      attempt(() =>
+        reactiveInternal.batch(() => {
+          if (!owns()) return;
+          if (status === "failed") {
+            runtime.failing = true;
+            runtime.invalidated = true;
+            runtime.errorCell.set(reason);
+            if (!owns()) return;
+            writeAllStatuses(runtime);
+          } else if (status === "empty") {
+            runtime.failing = false;
+            runtime.invalidated = false;
+            runtime.errorCell.set(undefined);
+          }
+          if (owns()) runtime.streamStatusCell.set(status);
+        }),
+      );
+    }
+    // All destructive native tails run before this deferred seal/release; physical cleanup is separate.
+    queueMicrotask(() => {
+      if (bound.phase !== "retiring" || bound.retirement !== retirement) {
+        finishPhysicalWork(cleanupWork);
+        return;
+      }
+      if (terminalCapture.kind === "captured") {
+        if (state.disposed || bound.binding.context.disposed)
+          terminalCapture = Object.freeze({
+            kind: "fault",
+            cause: new Fault("disposed", [String(runtime.key)]),
+          });
+        else if (!owns())
+          terminalCapture = Object.freeze({
+            kind: "captured",
+            capture: Object.freeze({ kind: "changed" }),
+          });
+      }
+      const receipt: StreamDetachment<T> = Object.freeze({
+        session: bound.handle.identity,
+        status,
+        reason,
+        terminalCapture,
+      });
+      bound.receipt = receipt;
+      bound.phase = "detached";
+      try {
+        physicalCleanup(session.physical.owner, () =>
+          bound.lifecycle.update((version) => version + 1),
+        );
+      } catch (cause) {
+        reportContinuationError(state, cause);
+      }
+      queueMicrotask(() => {
+        try {
+          physicalCleanup(session.physical.owner, () => {
+            if (runtime.boundRetirement === bound) {
+              const owned = owns();
+              runtime.boundRetirement = undefined;
+              if (owned) runtime.transitioning = false;
+            }
+            endBindingAddress(bound.binding, String(runtime.key), addressOperation);
+            updateCollectionCandidate(runtime);
+            scheduleSweep(state);
+          });
+        } catch (cause) {
+          reportContinuationError(state, cause);
+        } finally {
+          bound.resolveDetached(receipt);
+          finishPhysicalWork(cleanupWork);
+        }
+      });
+    });
+    for (const failure of failures) reportContinuationError(state, failure);
+  };
+  if (options?.deferCleanup) return cleanup;
+  cleanup();
+}
+
 export function dropStore<T>(runtime: StoreRuntime<T>): void {
   if (
     runtime.disposed ||
@@ -268,45 +479,63 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
     runtime.predictionStack.peek().length > 0
   )
     return;
-  const streamToken = runtime.streamToken;
-  const resetEpoch = runtime.graph.__runtime.resetEpoch;
-  const current = (): boolean =>
-    runtime.streamToken === streamToken &&
-    runtime.graph.__runtime.resetEpoch === resetEpoch &&
-    !runtime.graph.__runtime.disposed &&
-    !runtime.disposed;
-  if (runtime.stream != null) endStream(runtime, runtime.stream, "empty");
-  if (!current() || isLive(runtime) || runtime.requests.size > 0) return;
-  if (runtime.timer != null) {
-    clearTimeout(runtime.timer);
-    runtime.timer = undefined;
+  const addressDrop = beginBindingAddress(runtime.binding, String(runtime.key));
+  try {
+    const streamToken = runtime.streamToken;
+    const revision = nextValueRevision(runtime.valueRevision);
+    let valueRevision = runtime.valueRevision;
+    const resetEpoch = runtime.graph.__runtime.resetEpoch;
+    let incarnation = runtime.incarnation;
+    const current = (): boolean =>
+      runtime.streamToken === streamToken &&
+      runtime.graph.__runtime.resetEpoch === resetEpoch &&
+      !runtime.graph.__runtime.disposed &&
+      !runtime.disposed &&
+      runtime.incarnation === incarnation &&
+      runtime.valueRevision === valueRevision;
+    if (runtime.stream != null) endStream(runtime, runtime.stream, "empty");
+    if (!current() || isLive(runtime) || runtime.requests.size > 0) return;
+    if (runtime.timer != null) {
+      clearTimeout(runtime.timer);
+      runtime.timer = undefined;
+    }
+    reactiveInternal.batch(() => {
+      runtime.incarnation = undefined;
+      incarnation = undefined;
+      runtime.valueRevision = revision;
+      valueRevision = revision;
+      runtime.source = undefined;
+      runtime.streamSource = undefined;
+      runtime.onReadableActivation = undefined;
+      runtime.refreshOnActivation = false;
+      runtime.baseAvailable = false;
+      runtime.hasAcceptedLanding = false;
+      runtime.transferEligible = true;
+      runtime.failing = false;
+      runtime.recoveryDisarmed = false;
+      runtime.invalidated = false;
+      runtime.lastLandingAt = undefined;
+      runtime.lastSettledAt = undefined;
+      runtime.errorCell.set(undefined);
+      if (!current()) return;
+      runtime.presence.set(false);
+      if (!current()) return;
+      runtime.committed.set(undefined);
+      if (!current()) return;
+      runtime.predictionStack.set([]);
+      if (!current()) return;
+      runtime.streamStatusCell.set("empty");
+      if (!current()) return;
+      writeAllStatuses(runtime);
+      if (!current()) return;
+      runtime.callers.length = 0;
+      runtime.dropped = true;
+      runtime.lastInteraction = Date.now();
+      updateCollectionCandidate(runtime);
+    });
+  } finally {
+    endBindingAddress(runtime.binding, String(runtime.key), addressDrop);
   }
-  runtime.source = undefined;
-  runtime.streamSource = undefined;
-  runtime.onReadableActivation = undefined;
-  runtime.refreshOnActivation = false;
-  runtime.hasCommitted = false;
-  runtime.failing = false;
-  runtime.recoveryDisarmed = false;
-  runtime.invalidated = false;
-  runtime.lastLandingAt = undefined;
-  runtime.lastSettledAt = undefined;
-  runtime.errorCell.set(undefined);
-  if (!current()) return;
-  runtime.presence.set(false);
-  if (!current()) return;
-  runtime.committed.set(undefined);
-  if (!current()) return;
-  runtime.predictionStack.set([]);
-  if (!current()) return;
-  runtime.streamStatusCell.set("empty");
-  if (!current()) return;
-  writeAllStatuses(runtime);
-  if (!current()) return;
-  runtime.callers.length = 0;
-  runtime.dropped = true;
-  runtime.lastInteraction = Date.now();
-  updateCollectionCandidate(runtime);
 }
 
 export function collectExpired<C extends Contract>(state: GraphRuntimeState<C>): void {
