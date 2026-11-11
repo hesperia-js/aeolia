@@ -60,9 +60,15 @@ function resolveMutationTarget(
   resetEpoch = state.resetEpoch,
 ): MutationTarget | undefined {
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
-  const queryInput = affected.select(input);
+  const select = affected.select;
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
-  const key = storeKey(affected.query.key(queryInput));
+  const queryInput = nativeApply(select, affected, [input]);
+  if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
+  const query = affected.query;
+  if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
+  const keyForInput = query.key;
+  if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
+  const key = storeKey(nativeApply(keyForInput, query, [queryInput]));
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const runtime = state.stores.get(String(key));
   return {
@@ -148,7 +154,16 @@ export function runMutation<I, R>(
       const declared = target.affected.optimistic as
         | ((current: unknown, input: unknown) => unknown)
         | undefined;
-      const predictor = (options?.optimistic?.get(target.key) ?? declared) as
+      if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
+      const optimistic = options?.optimistic;
+      if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
+      let supplied: ((current: unknown, input: unknown) => unknown) | undefined;
+      if (optimistic !== undefined) {
+        const get = optimistic.get;
+        if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
+        supplied = nativeApply(get, optimistic, [target.key]);
+      }
+      const predictor = (supplied ?? declared) as
         | ((current: unknown, input: unknown) => unknown)
         | undefined;
       if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
@@ -170,7 +185,12 @@ export function runMutation<I, R>(
     if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
 
     const controller = new AbortController();
-    const removeAbort = addSignalAbort(options?.abortSignal, controller);
+    const removeAbort = addSignalAbort(
+      options?.abortSignal,
+      controller,
+      (remove) => physicalCleanup(state.retirement, remove),
+      () => isCurrentMutationEpoch(state, resetEpoch),
+    );
     if (!isCurrentMutationEpoch(state, resetEpoch)) {
       physicalCleanup(state.retirement, removeAbort);
       return superseded();
@@ -179,9 +199,18 @@ export function runMutation<I, R>(
     let runResult: unknown;
     let runReturned = false;
     let returned: Promise<R>;
-    sourceStarted = true;
     try {
-      runResult = definition.run(input, { abortSignal: controller.signal, graph: state.graph.id });
+      const run = definition.run;
+      if (!isCurrentMutationEpoch(state, resetEpoch)) {
+        physicalCleanup(state.retirement, removeAbort);
+        state.activeControllers.delete(controller);
+        return superseded();
+      }
+      sourceStarted = true;
+      runResult = nativeApply(run, definition, [
+        input,
+        { abortSignal: controller.signal, graph: state.graph.id },
+      ]);
       runReturned = true;
       acquisition.original = runResult;
       returned = normalizePhysicalPromise(runResult as R | PromiseLike<R>);

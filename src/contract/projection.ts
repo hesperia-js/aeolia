@@ -429,7 +429,9 @@ async function consume<T, V>(
   if (iterator === undefined) return;
   try {
     while (isCurrentGeneration(runtime, controller, generation)) {
-      const result = await iterator.next();
+      const next = iterator.next;
+      if (!isCurrentGeneration(runtime, controller, generation)) return;
+      const result = await Reflect.apply(next, iterator, []);
       if (!isCurrentGeneration(runtime, controller, generation)) return;
       if (result.done) {
         finish(runtime, false);
@@ -517,7 +519,9 @@ function openIndependent<T, V>(
     const generation = source.generation;
     let key: ReturnType<typeof storeKey>;
     try {
-      key = storeKey(stream.key(input));
+      const keyForInput = stream.key;
+      if (!isCurrentGeneration(runtime, controller, generation)) return;
+      key = storeKey(Reflect.apply(keyForInput, stream, [input]));
     } catch (error) {
       if (!isCurrentGeneration(runtime, controller, generation)) return;
       if (propagateKeyError) {
@@ -542,7 +546,9 @@ function openIndependent<T, V>(
     };
     let iterable: AsyncIterable<T>;
     try {
-      iterable = stream.open(input, options);
+      const open = stream.open;
+      if (!isCurrentGeneration(runtime, controller, generation)) return;
+      iterable = Reflect.apply(open, stream, [input, options]);
       if (!isCurrentGeneration(runtime, controller, generation)) return;
       const iterator = iterable[Symbol.asyncIterator]();
       if (!isCurrentGeneration(runtime, controller, generation)) {

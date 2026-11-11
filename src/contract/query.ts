@@ -97,7 +97,9 @@ export function makeQueryStore<T>(
   assertGraphOpen(state);
   const window = asWindow(options?.revalidateAfterMs, query.revalidateAfterMs);
   assertGraphOpen(state);
-  const key = storeKey(query.key(input));
+  const keyForInput = query.key;
+  assertGraphOpen(state);
+  const key = storeKey(Reflect.apply(keyForInput, query, [input]));
   const runtime = getOrCreateStore(state, key) as StoreRuntime<T>;
   configureKeyedValue(runtime, query, options);
   assertGraphOpen(state);

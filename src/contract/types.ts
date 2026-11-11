@@ -704,32 +704,70 @@ export interface MutationOptions {
   readonly optimistic?: ReadonlyMap<StoreKey, (current: unknown, input: unknown) => unknown>;
 }
 
-function isOptimisticMap(value: unknown): value is NonNullable<MutationOptions["optimistic"]> {
+function isOptimisticMap(
+  value: unknown,
+  afterRead?: () => void,
+): value is NonNullable<MutationOptions["optimistic"]> {
   if (!isObject(value)) return false;
-  const map = value as Partial<ReadonlyMap<unknown, unknown>>;
-  if (
-    typeof map.size !== "number" ||
-    !Number.isInteger(map.size) ||
-    map.size < 0 ||
-    typeof map.get !== "function" ||
-    typeof map.has !== "function" ||
-    typeof map.forEach !== "function" ||
-    typeof map.entries !== "function" ||
-    typeof map.keys !== "function" ||
-    typeof map.values !== "function" ||
-    typeof map[Symbol.iterator] !== "function"
-  )
-    return false;
-  for (const entry of value as Iterable<unknown>) {
-    if (
-      !Array.isArray(entry) ||
-      entry.length !== 2 ||
-      !isStoreKey(entry[0]) ||
-      typeof entry[1] !== "function"
-    )
-      return false;
+  const read = (target: object, key: PropertyKey): unknown => {
+    const result: unknown = Reflect.get(target, key);
+    afterRead?.();
+    return result;
+  };
+  const size = read(value, "size");
+  if (typeof size !== "number" || !Number.isInteger(size) || size < 0) return false;
+  for (const key of ["get", "has", "forEach", "entries", "keys", "values"] as const) {
+    if (typeof read(value, key) !== "function") return false;
   }
-  return true;
+  const factory = read(value, Symbol.iterator);
+  if (typeof factory !== "function") return false;
+  const iterator: unknown = Reflect.apply(factory, value, []);
+  if (!isObject(iterator)) throw new TypeError("The optimistic map iterator is not an object.");
+  let needsClose = true;
+  const close = (): void => {
+    if (!needsClose) return;
+    needsClose = false;
+    const closeMethod: unknown = Reflect.get(iterator, "return");
+    if (closeMethod === undefined || closeMethod === null) return;
+    const result: unknown = Reflect.apply(
+      closeMethod as (...args: never[]) => unknown,
+      iterator,
+      [],
+    );
+    if (!isObject(result))
+      throw new TypeError("The optimistic map iterator return is not an object.");
+  };
+  try {
+    afterRead?.();
+    const next = read(iterator, "next");
+    for (;;) {
+      const step: unknown = Reflect.apply(next as (...args: never[]) => unknown, iterator, []);
+      afterRead?.();
+      if (!isObject(step))
+        throw new TypeError("The optimistic map iterator result is not an object.");
+      if (read(step, "done")) {
+        needsClose = false;
+        return true;
+      }
+      const entry = read(step, "value");
+      if (
+        !Array.isArray(entry) ||
+        read(entry, "length") !== 2 ||
+        !isStoreKey(read(entry, 0)) ||
+        typeof read(entry, 1) !== "function"
+      ) {
+        close();
+        return false;
+      }
+    }
+  } catch (error) {
+    try {
+      close();
+    } catch {
+      // A validation failure keeps its original cause.
+    }
+    throw error;
+  }
 }
 
 const mutationOptionChecks = Object.entries({

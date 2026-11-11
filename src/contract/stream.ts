@@ -49,7 +49,9 @@ export async function consumeStream<T>(
   if (iterator === undefined) return;
   try {
     while (!session.ended) {
-      const result = await iterator.next();
+      const next = iterator.next;
+      if (!isCurrentSession(runtime, session)) return;
+      const result = await Reflect.apply(next, iterator, []);
       if (!isCurrentSession(runtime, session)) return;
       if (result.done) {
         endStream(runtime, session, "closed");
@@ -91,7 +93,12 @@ export function openStream<T>(
   try {
     const resetEpoch = state.resetEpoch;
     const controller = new AbortController();
-    const removeSignalAbort = addSignalAbort(abortSignal, controller);
+    const removeSignalAbort = addSignalAbort(
+      abortSignal,
+      controller,
+      (remove) => physicalCleanup(state.retirement, remove),
+      () => !state.disposed && state.resetEpoch === resetEpoch,
+    );
     let callerAttached = true;
     const removeAbort = (): void => {
       if (!callerAttached) return;
@@ -145,26 +152,34 @@ export function openStream<T>(
     }
     let iterable: AsyncIterable<T>;
     try {
-      iterable = stream.open(input, {
-        abortSignal: controller.signal,
-        graph: state.graph.id,
-        key,
-        reportGap: () => {
-          if (!isCurrentSession(runtime, session)) return;
-          publishStreamEvent(runtime, session, { kind: "gap" });
-          if (!isCurrentSession(runtime, session)) return;
-          if (!session.emitted) return;
-          runtime.invalidated = true;
-          try {
-            reactiveInternal.batch(() => {
-              writeAllStatuses(runtime);
-              if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "stale");
-            });
-          } catch (error) {
-            if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
-          }
+      const open = stream.open;
+      if (!isCurrentSession(runtime, session)) {
+        removeAbort();
+        return;
+      }
+      iterable = Reflect.apply(open, stream, [
+        input,
+        {
+          abortSignal: controller.signal,
+          graph: state.graph.id,
+          key,
+          reportGap: () => {
+            if (!isCurrentSession(runtime, session)) return;
+            publishStreamEvent(runtime, session, { kind: "gap" });
+            if (!isCurrentSession(runtime, session)) return;
+            if (!session.emitted) return;
+            runtime.invalidated = true;
+            try {
+              reactiveInternal.batch(() => {
+                writeAllStatuses(runtime);
+                if (isCurrentSession(runtime, session)) setStreamStatus(runtime, "stale");
+              });
+            } catch (error) {
+              if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
+            }
+          },
         },
-      });
+      ]);
     } catch (error) {
       removeAbort();
       failStream(runtime, session, error);
@@ -229,7 +244,9 @@ export function streamMember<T>(
   if (options !== undefined && !isValueOptions(options, () => assertGraphOpen(state)))
     throw new TypeError("Invalid stream options.");
   assertGraphOpen(state);
-  const key = storeKey(stream.key(input));
+  const keyForInput = stream.key;
+  assertGraphOpen(state);
+  const key = storeKey(Reflect.apply(keyForInput, stream, [input]));
   const runtime = getOrCreateStore(state, key) as StoreRuntime<T>;
   configureKeyedValue(runtime, stream, options);
   assertGraphOpen(state);

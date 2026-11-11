@@ -36,10 +36,28 @@ export function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 export function addSignalAbort(
   signalToWatch: AbortSignal | undefined,
   controller: AbortController,
+  cleanupFailedRegistration: (remove: () => void) => void,
+  isCurrent: () => boolean,
 ): () => void {
   if (signalToWatch === undefined) return () => undefined;
   const abort = (): void => controller.abort();
-  if (signalToWatch.aborted) controller.abort();
-  else signalToWatch.addEventListener("abort", abort, { once: true });
-  return () => signalToWatch.removeEventListener("abort", abort);
+  const remove = (): void => signalToWatch.removeEventListener("abort", abort);
+  const aborted = signalToWatch.aborted;
+  if (!isCurrent()) return () => undefined;
+  if (aborted) controller.abort();
+  else {
+    const add = signalToWatch.addEventListener;
+    if (!isCurrent()) return () => undefined;
+    try {
+      Reflect.apply(add, signalToWatch, ["abort", abort, { once: true }]);
+    } catch (error) {
+      try {
+        cleanupFailedRegistration(remove);
+      } catch {
+        // The owner records cleanup failure separately from registration failure.
+      }
+      throw error;
+    }
+  }
+  return remove;
 }

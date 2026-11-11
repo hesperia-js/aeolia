@@ -181,7 +181,12 @@ export function startQueryRequest<T>(
       runtime.timer = undefined;
     }
     const controller = new AbortController();
-    const unlinkCallerAbort = addSignalAbort(abortSignal, controller);
+    const unlinkCallerAbort = addSignalAbort(
+      abortSignal,
+      controller,
+      (remove) => physicalCleanup(state.retirement, remove),
+      () => !state.disposed && state.resetEpoch === resetEpoch,
+    );
     const removeCallerAbort = (): void => physicalCleanup(state.retirement, unlinkCallerAbort);
     if (state.resetEpoch !== resetEpoch || state.disposed) {
       removeCallerAbort();
@@ -269,7 +274,20 @@ export function startQueryRequest<T>(
     let result: Promise<T>;
     try {
       const options = { abortSignal: controller.signal, graph: state.graph.id, key: runtime.key };
-      fetched = caller.query.fetch(caller.input, options);
+      const fetch = caller.query.fetch;
+      if (
+        state.disposed ||
+        runtime.disposed ||
+        runtime.activeRequest !== request ||
+        request.settled ||
+        request.superseded ||
+        request.generation !== runtime.generation ||
+        request.resetEpoch !== state.resetEpoch
+      ) {
+        finishPhysicalWork(original);
+        return request;
+      }
+      fetched = Reflect.apply(fetch, caller.query, [caller.input, options]);
       fetchedReturned = true;
       original.original = fetched;
       result = normalizePhysicalPromise(fetched as T | PromiseLike<T>);
