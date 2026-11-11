@@ -1027,6 +1027,7 @@ for (const trigger of ["options", "seed", "signal"] as const) {
       expect(retirement).toBeDefined();
       expect(opens).toBe(0);
       if (trigger === "signal") expect(removes).toBe(1);
+      if (retirement === undefined) throw new Error("Expected retirement during stream setup.");
       await retirement;
       expect(graph.retire()).toBe(retirement);
       if (callError !== undefined) expect(callError).toMatchObject({ kind: "disposed" });
@@ -1118,7 +1119,7 @@ it("does not resolve a mutation target after its selector retires the graph", as
     }),
   });
   try {
-    const result = graph.api.mutate();
+    const result = graph.api.mutate(undefined);
     void result.catch(() => undefined);
     expect(retirement).toBeDefined();
     expect(keys).toBe(0);
