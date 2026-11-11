@@ -249,15 +249,20 @@ export interface ValueOptions<T> {
 
 type OptionChecks = readonly (readonly [
   string,
-  (value: unknown, afterRead?: () => void) => boolean,
+  (value: unknown, afterRead?: () => void, cleanup?: (action: () => void) => void) => boolean,
 ])[];
 
-function matchesOptions(value: unknown, checks: OptionChecks, afterRead?: () => void): boolean {
+function matchesOptions(
+  value: unknown,
+  checks: OptionChecks,
+  afterRead?: () => void,
+  cleanup?: (action: () => void) => void,
+): boolean {
   if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
   return checks.every(([field, check]) => {
     const option: unknown = Reflect.get(value, field);
     afterRead?.();
-    return option === undefined || check(option, afterRead);
+    return option === undefined || check(option, afterRead, cleanup);
   });
 }
 
@@ -707,6 +712,7 @@ export interface MutationOptions {
 function isOptimisticMap(
   value: unknown,
   afterRead?: () => void,
+  cleanup?: (action: () => void) => void,
 ): value is NonNullable<MutationOptions["optimistic"]> {
   if (!isObject(value)) return false;
   const read = (target: object, key: PropertyKey): unknown => {
@@ -730,15 +736,19 @@ function isOptimisticMap(
   const close = (): void => {
     if (!needsClose) return;
     needsClose = false;
-    const closeMethod: unknown = Reflect.get(iterator, "return");
-    if (closeMethod === undefined || closeMethod === null) return;
-    const result: unknown = Reflect.apply(
-      closeMethod as (...args: never[]) => unknown,
-      iterator,
-      [],
-    );
-    if (!isObject(result))
-      throw new TypeError("The optimistic map iterator return is not an object.");
+    const action = (): void => {
+      const closeMethod: unknown = Reflect.get(iterator, "return");
+      if (closeMethod === undefined || closeMethod === null) return;
+      const result: unknown = Reflect.apply(
+        closeMethod as (...args: never[]) => unknown,
+        iterator,
+        [],
+      );
+      if (!isObject(result))
+        throw new TypeError("The optimistic map iterator return is not an object.");
+    };
+    if (cleanup === undefined) action();
+    else cleanup(action);
   };
   try {
     afterRead?.();
@@ -759,7 +769,12 @@ function isOptimisticMap(
         !isStoreKey(read(entry, 0)) ||
         typeof read(entry, 1) !== "function"
       ) {
-        close();
+        try {
+          close();
+        } catch (error) {
+          // An owned close failure cannot replace the invalid-options result.
+          if (cleanup === undefined) throw error;
+        }
         return false;
       }
     }
@@ -782,8 +797,9 @@ const mutationOptionChecks = Object.entries({
 export function isMutationOptions(
   value: unknown,
   afterRead?: () => void,
+  cleanup?: (action: () => void) => void,
 ): value is MutationOptions {
-  return matchesOptions(value, mutationOptionChecks, afterRead);
+  return matchesOptions(value, mutationOptionChecks, afterRead, cleanup);
 }
 
 /** Recognizes the options-only call form, including malformed option values. */
