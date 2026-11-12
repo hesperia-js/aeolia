@@ -215,6 +215,7 @@ export function returnStreamIterator<T>(
   iterator: AsyncIterator<T>,
   swallowCallFailure: boolean,
   suppliedClose?: AsyncIterator<T>["return"],
+  options?: { readonly routeRecordedGetterFailureToRetirement?: boolean },
 ): void {
   const work = beginPhysicalWork(session.physical.owner, "stream-return");
   registerTransferWork(session, work);
@@ -226,6 +227,7 @@ export function returnStreamIterator<T>(
       close = suppliedClose ?? iterator.return;
     } catch (cause) {
       recordCleanupFailure(work, cause);
+      if (options?.routeRecordedGetterFailureToRetirement) return;
       throw cause;
     }
     if (typeof close !== "function") return;

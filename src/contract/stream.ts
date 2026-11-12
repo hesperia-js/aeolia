@@ -676,7 +676,9 @@ function driveStreamSource<T>(
     }
     if (!isCurrentSession(runtime, session)) {
       try {
-        returnStreamIterator(session, iterator, true);
+        returnStreamIterator(session, iterator, true, undefined, {
+          routeRecordedGetterFailureToRetirement: true,
+        });
       } finally {
         removeAbort();
       }
