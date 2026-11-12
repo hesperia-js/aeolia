@@ -595,17 +595,28 @@ must prove that boundary. Imported values remain subject to normal collection.
 Adoption and address inspection do not pin them. If collection happens before
 the first claim, the session cannot reclaim the value.
 
-Native generations use safe integers. Requests and authoritative writes check
-that they can issue their generation before changing readable state or
-dispatching work. Snapshot adoption checks every validated row's generation
-before its commit batch; a safe-limit refusal at that preflight leaves readable
-entries unchanged. An authored equality callback can reenter during commit, and
-completed writes from that callback keep their own authority. Reset preflights
-every store's clearing generation and any selected query refresh before changing
-the graph epoch. If reset refuses at that preflight, it does not clear values,
-advance `graph.resetVersion`, or start refreshes. Aeolia does not wrap, clamp, or
-renumber exhausted counters, and it supplies no automatic recovery from
-exhaustion. Incoming value revisions remain provenance, not a cross-graph clock.
+Native generations use safe integers.
+
+Version 1 snapshot adoption prepares every valid row and checks each row's
+required local generation before publishing any row. Equality comparisons that
+invoke a store's configured callback run during preparation. The callback gets
+the previous and proposed values for that comparison, and it can reenter the
+graph. Callback failures retain the store's existing `equals` Fault handling.
+If reentrant work during preparation invalidates an outer row, version 1
+adoption fails before it publishes its rows. If a comparator's child write
+exhausts a later row's safe generation, adoption throws `RangeError` before
+publishing any row. The child write remains committed with its own value and
+generation. After all version 1 rows publish, Aeolia sends any prepared
+query-progress interruption. Progress observers can then reenter and change the
+rows. These guarantees describe version 1; version 2 follows a separate
+sequential entry path.
+
+Reset preflights every store's clearing generation and any selected query
+refresh before changing the graph epoch. If reset refuses at that preflight, it
+does not clear values, advance `graph.resetVersion`, or start refreshes. Aeolia
+does not wrap, clamp, or renumber exhausted counters, and it supplies no
+automatic recovery from exhaustion. Incoming value revisions remain
+provenance, not a cross-graph clock.
 
 ## Required cached-state transfer
 

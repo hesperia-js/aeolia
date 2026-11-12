@@ -133,7 +133,7 @@ import type { ObservationLease, PreparedObservationTransfer } from "./observatio
 import { storeSubscribe } from "../subscribe.ts";
 import { armStoreTimer, finishRequest, startQuery } from "./query-request.ts";
 import { hasQueryOptionsBrand } from "./query-options.ts";
-import { configureKeyedValue, nextGeneration, prepareAdoptionIssue } from "./store-state.ts";
+import { configureKeyedValue, issue, nextGeneration, prepareAdoptionIssue } from "./store-state.ts";
 import { boundAddressOccupied } from "./binding-address.ts";
 import { writeAllStatuses } from "./status.ts";
 import { drainResetCleanups, resetGraph } from "./reset.ts";

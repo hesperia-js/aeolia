@@ -169,7 +169,7 @@ function watcherReadFault(node: Node<unknown>): Fault {
   return new Fault("watcher-read", [node.name]);
 }
 
-function watcherWriteFault(node: Node<unknown>): Fault {
+function watcherWriteFault<T>(node: Node<T>): Fault {
   return new Fault("watcher-write", [node.name]);
 }
 

@@ -811,6 +811,22 @@ export function snapshot(graph: Graph, options?: SnapshotOptionsV2): Snapshot | 
  * response therefore cannot overwrite an adopted value. Adopted values are
  * committed values, not optimistic predictions.
  *
+ * For version 1, Aeolia prepares every valid entry before publishing any of
+ * them. Equality comparisons that invoke a configured store callback run
+ * during preparation, before publication. The callback receives the previous
+ * and proposed values for that comparison, and it can reenter the graph.
+ * Callback failures retain the store's existing `equals` Fault handling. If
+ * reentrant work during preparation invalidates an outer entry, adoption fails
+ * before publishing its rows. If a comparator's child write exhausts a later
+ * row's safe generation, adoption throws `RangeError` before publishing any
+ * row. The child write remains committed with its own value and generation.
+ *
+ * After it publishes every version 1 entry, Aeolia sends any prepared
+ * query-progress interruption through the native query-progress authority.
+ * Progress observers can reenter and change adopted entries. These preparation
+ * and publication guarantees apply to version 1. Version 2 uses a separate
+ * sequential entry path.
+ *
  * @param graph - The open graph that receives the decoded committed values.
  * @param value - A snapshot envelope. Its runtime metadata is validated even
  * when the TypeScript value was obtained from an untrusted boundary.
@@ -818,6 +834,7 @@ export function snapshot(graph: Graph, options?: SnapshotOptionsV2): Snapshot | 
  * @throws {@link Fault} With kind `snapshot` for an unsupported envelope or
  * kind `disposed` when the graph is closed. Store configuration and reactive
  * propagation failures raised while committing valid entries are rethrown.
+ * @throws `RangeError` when a version 1 entry cannot issue a safe local generation.
  *
  * @example
  * ```ts
