@@ -319,10 +319,11 @@ describe("realm snapshots and adoption", () => {
     let inOuter = false;
     let comparatorCalls = 0;
     let childAttempted = false;
-    let childOutcome:
+    type ChildOutcome =
       | { readonly kind: "not-called" }
       | { readonly kind: "returned" }
-      | { readonly kind: "threw"; readonly error: unknown } = { kind: "not-called" };
+      | { readonly kind: "threw"; readonly error: unknown };
+    const childOutcomes: ChildOutcome[] = [];
     let writeLater = (_value: number): void => {
       throw new Error("The later Store has not been created");
     };
@@ -336,9 +337,9 @@ describe("realm snapshots and adoption", () => {
           childAttempted = true;
           try {
             writeLater(99);
-            childOutcome = { kind: "returned" };
+            childOutcomes.push({ kind: "returned" });
           } catch (error) {
-            childOutcome = { kind: "threw", error };
+            childOutcomes.push({ kind: "threw", error });
           }
         }
         return Object.is(previous, proposed);
@@ -360,7 +361,7 @@ describe("realm snapshots and adoption", () => {
           later: { value: 2, generation: Number.MAX_SAFE_INTEGER - 2, age: 0 },
         },
       } as never);
-      const before = snapshot(graph, { version: 1 });
+      const before = snapshot(graph);
       expect(before.entries.first?.value).toBe(1);
       expect(Number(before.entries.later?.generation)).toBe(Number.MAX_SAFE_INTEGER - 1);
       expect(before.entries.later?.value).toBe(2);
@@ -388,8 +389,8 @@ describe("realm snapshots and adoption", () => {
       }
 
       const outerComparatorCalls = comparatorCalls;
-      const outerChildOutcome = childOutcome;
-      const after = snapshot(graph, { version: 1 });
+      const outerChildOutcome: ChildOutcome = childOutcomes[0] ?? { kind: "not-called" };
+      const after = snapshot(graph);
       const observed = {
         outer: outerOutcome,
         comparatorCalls: outerComparatorCalls,

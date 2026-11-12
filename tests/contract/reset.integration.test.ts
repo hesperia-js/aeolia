@@ -171,7 +171,7 @@ describe("Graph.reset", () => {
       const store = graph.at("value");
       expect(store.value.get()).toBe(7);
 
-      const generation = Number(snapshot(graph, { version: 1 }).entries.value?.generation);
+      const generation = Number(snapshot(graph).entries.value?.generation);
       expect(generation).toBe(Number.MAX_SAFE_INTEGER);
       expect(() => graph.reset()).toThrow(RangeError);
       expect(graph.resetVersion.get()).toBe(0);
