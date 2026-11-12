@@ -668,12 +668,7 @@ function driveStreamSource<T>(
     }
     let iterator: AsyncIterator<T>;
     try {
-      const iteratorFactory = iterable[Symbol.asyncIterator];
-      if (!isCurrentSession(runtime, session)) {
-        removeAbort();
-        return;
-      }
-      iterator = Reflect.apply(iteratorFactory, iterable, []);
+      iterator = iterable[Symbol.asyncIterator]();
     } catch (cause) {
       removeAbort();
       failStream(runtime, session, cause);
