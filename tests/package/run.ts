@@ -18,6 +18,12 @@ import { chromium } from "playwright";
 
 const root = resolve(import.meta.dir, "../..");
 const chromeExecutablePath = process.env.AEOLIA_CHROME_EXECUTABLE_PATH;
+const expectedChromeVersion = process.env.AEOLIA_CHROME_EXPECTED_VERSION;
+if (
+  expectedChromeVersion !== undefined &&
+  (!expectedChromeVersion.trim() || chromeExecutablePath === undefined)
+)
+  throw new Error("AEOLIA_CHROME_EXPECTED_VERSION requires an explicit Chrome executable");
 if (chromeExecutablePath !== undefined) {
   if (!chromeExecutablePath.trim() || !isAbsolute(chromeExecutablePath))
     throw new Error("AEOLIA_CHROME_EXECUTABLE_PATH must be a nonempty absolute path");
@@ -551,6 +557,14 @@ try {
       ? chromium.launch()
       : chromium.launch({ executablePath: chromeExecutablePath }));
     try {
+      const actualChromeVersion = browser.version();
+      console.log("Chrome runtime version: " + actualChromeVersion);
+      if (expectedChromeVersion !== undefined)
+        assert.equal(
+          actualChromeVersion,
+          expectedChromeVersion,
+          "Unexpected Chrome runtime version",
+        );
       const runBrowserConsumer = async (path: string, development: boolean): Promise<void> => {
         const page = await browser.newPage();
         const errors: string[] = [];
@@ -577,7 +591,7 @@ try {
           assert.deepEqual(errors, [], "Browser errors during the packed consumer workflow");
           console.log(
             "PASS packed consumer workflow: Chromium " +
-              browser.version() +
+              actualChromeVersion +
               " (" +
               (development ? "development" : "default") +
               ")",

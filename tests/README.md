@@ -45,7 +45,9 @@ system dependencies. The command can run inside a container, but does not create
 To use a specific compatible Chrome executable for the package check, set
 `AEOLIA_CHROME_EXECUTABLE_PATH` to its absolute path. If the variable is set,
 the runner rejects an empty, relative, missing, or non-file path. A launch failure
-is reported without falling back to Playwright's installed Chromium.
+is reported without falling back to Playwright's installed Chromium. To require an
+exact browser runtime version, set `AEOLIA_CHROME_EXPECTED_VERSION` alongside the
+executable path. The runner checks the version before either browser workflow.
 
 `test:package` builds Aeolia, runs the existing export and runtime-name checks,
 packs an archive, and installs it in a fresh directory under the operating system's
