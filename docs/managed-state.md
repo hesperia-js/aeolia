@@ -1235,6 +1235,19 @@ An incomplete source landing, a failed required reducer, or projections at
 different event boundaries also cannot form one resumable group. Do not split
 the projections into separate readers or refold the prefix to make the group fit.
 
+When a checkpoint is not yet resumable, `observePositionedStoreCaptureState(checkpoint)`
+returns a native `Readable` that can signal when the session's capture state
+changes. Subscribe with `subscribe`: the initial notice is delivered
+synchronously. A `changed` notice has an opaque revision and means the caller
+should capture the actual source and required projections again. It is not a
+currentness, resumability, transfer, or publication receipt. Recheck the new
+checkpoint before using it.
+
+The terminal notices are `closed`, `invalidated`, and `failed`; a `failed`
+notice retains the original `cause`, including `undefined`. A terminal notice
+remains sticky for that observation. Unsubscribing releases the observation and
+its deadline task without retaining, reopening, or stopping the shared source.
+
 The native group eligibility check also reads the source Store's actual prediction
 state. Any live optimistic prediction on that Store makes the group cut ineligible,
 even when the predicted value equals the current value. The checkpoint contains

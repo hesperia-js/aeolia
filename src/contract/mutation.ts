@@ -183,12 +183,7 @@ export function runMutation<I, R>(
   let admission: TransferAdmission | undefined;
   try {
     const resetEpoch = state.resetEpoch;
-    admission = beginTransferAdmission(
-      state,
-      definition,
-      undefined,
-      input,
-    );
+    admission = beginTransferAdmission(state, definition, undefined, input);
     const dispatch = beginTransferDispatch(
       state.graph,
       definition,

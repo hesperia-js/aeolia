@@ -13,6 +13,7 @@ export {
   project,
   projectPositioned,
   capturePositionedStore,
+  observePositionedStoreCaptureState,
   isPositionedStoreCheckpointCurrent,
   preparePositionedStoreRestore,
   capturePositionedProjection,
@@ -40,6 +41,7 @@ export type {
 export type {
   AccumulatePolicy,
   PositionedRestoration,
+  PositionedStoreCaptureNotice,
   PositionedStreamAccess,
   Projection,
   ProjectionPolicy,

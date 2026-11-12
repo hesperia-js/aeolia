@@ -12,6 +12,7 @@ import {
   subscribe,
   capturePositionedProjection,
   capturePositionedStore,
+  observePositionedStoreCaptureState,
   isPositionedCheckpointCurrent,
   isPositionedStoreCheckpointCurrent,
   preparePositionedStoreRestore,
@@ -26,6 +27,7 @@ import {
   type PositionedStoreRestoration,
   type PositionedFoldReceipt,
   type StreamStore,
+  type PositionedStoreCaptureNotice,
   type PositionedStreamSource,
   type RequiredTransferCodec,
   type ClosedEncodedValue,
@@ -49,6 +51,32 @@ function until<T>(readable: Readable<T>, matches: (value: T) => boolean): Promis
     if (matches(value)) ready.resolve();
   });
   return ready.promise.finally(stop);
+}
+
+function waitForCaptureNotice(
+  readable: Readable<PositionedStoreCaptureNotice>,
+  matches: (notice: PositionedStoreCaptureNotice) => boolean,
+): Promise<PositionedStoreCaptureNotice> {
+  let stop: (() => void) | undefined;
+  const pending = new Promise<PositionedStoreCaptureNotice>((resolve) => {
+    stop = subscribe(readable, (notice) => {
+      if (matches(notice)) resolve(notice);
+    });
+  });
+  return pending.finally(() => stop?.());
+}
+
+function waitForCaptureChange(
+  readable: Readable<PositionedStoreCaptureNotice>,
+  afterRevision: object,
+): Promise<Extract<PositionedStoreCaptureNotice, { readonly kind: "changed" }>> {
+  return waitForCaptureNotice(
+    readable,
+    (notice) => notice.kind !== "changed" || notice.revision !== afterRevision,
+  ).then((notice) => {
+    if (notice.kind !== "changed") throw new Error("The positioned capture became terminal");
+    return notice;
+  });
 }
 
 function setup() {
@@ -549,6 +577,80 @@ it("restores shared folds over one dormant source Store without replaying the la
   }
 });
 
+it("captures a nonresumable empty cut while the actual first next is pending", async () => {
+  type Event = { readonly position: number; readonly value: number };
+  let nextCalls = 0;
+  let returnCalls = 0;
+  let finishNext: ((result: IteratorResult<Event>) => void) | undefined;
+  let markNextStarted: (() => void) | undefined;
+  const firstNextStarted = new Promise<void>((resolve) => {
+    markNextStarted = resolve;
+  });
+  const stream = createPositionedStream<void, number, string, number, object>({
+    name: "pending-first-next-capture",
+    key: () => "pending-first-next-capture/one",
+    source: {
+      open: (): AsyncIterable<Event> => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => {
+              nextCalls += 1;
+              markNextStarted?.();
+              return new Promise<IteratorResult<Event>>((resolve) => {
+                finishNext = resolve;
+              });
+            },
+            return: () => {
+              returnCalls += 1;
+              finishNext?.({ done: true, value: undefined });
+              return Promise.resolve({ done: true as const, value: undefined });
+            },
+          };
+        },
+      }),
+      initialBoundary: () => ({ available: false }),
+      validateReader: () => false,
+      isReaderCurrent: () => false,
+      acknowledge: () => undefined,
+      releaseReader: () => undefined,
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "pending-first-next-capture",
+      operations: { events: stream },
+    }),
+  });
+  const source = graph.api.events();
+  const projection = project(source, {
+    kind: "reduce",
+    initial: 0,
+    step: (sum: number, value: number) => sum + value,
+  });
+
+  try {
+    await firstNextStarted;
+    expect(nextCalls).toBe(1);
+    expect(finishNext).toBeDefined();
+    const checkpoint = capturePositionedStore(source, [projection] as const);
+    expect(checkpoint.present).toBe(false);
+    expect(checkpoint.hasPosition).toBe(false);
+    expect(Object.hasOwn(checkpoint, "latest")).toBe(false);
+    expect(checkpoint.resumable).toBe(false);
+    expect(isPositionedStoreCheckpointCurrent(checkpoint)).toBe(true);
+
+    const captureState = observePositionedStoreCaptureState(checkpoint);
+    const notices: PositionedStoreCaptureNotice[] = [];
+    const stop = subscribe(captureState, (notice) => notices.push(notice));
+    expect(notices[0]?.kind).toBe("changed");
+    expect(nextCalls).toBe(1);
+    stop();
+    expect(returnCalls).toBe(0);
+  } finally {
+    graph.dispose();
+  }
+});
+
 it("resumes a genuine initial boundary without inventing an Event or fold receipt", async () => {
   type Event = { readonly position: number; readonly value: number };
   type Reservation = {
@@ -562,7 +664,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     readonly options: object;
     readonly reader: object | undefined;
   };
-  const makeProvider = () => {
+  const makeProvider = (expiresIn = 60_000) => {
     const reservations = new WeakMap<object, Reservation>();
     const readerEmitters = new WeakMap<object, (event: Event) => void>();
     const releases = new WeakMap<object, number>();
@@ -657,7 +759,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
           after,
           seed,
           controller: new AbortController(),
-          expiresAt: providerClockNow() + 60_000,
+          expiresAt: providerClockNow() + expiresIn,
         });
         return reader;
       },
@@ -723,6 +825,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
   let reader: object | undefined;
   let capturePublished = false;
   let adoptionPublished = false;
+  let switchedToRealTimers = false;
 
   try {
     const source = sourceGraph.api.events(undefined);
@@ -744,6 +847,25 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     expect(checkpoint.values).toStrictEqual([10]);
     expect(checkpoint.resumable).toBe(true);
     expect(isPositionedStoreCheckpointCurrent(checkpoint)).toBe(true);
+
+    const initialCaptureState = observePositionedStoreCaptureState(checkpoint);
+    const firstCaptureNotices: PositionedStoreCaptureNotice[] = [];
+    const secondCaptureNotices: PositionedStoreCaptureNotice[] = [];
+    const stopFirstCapture = subscribe(initialCaptureState, (notice) =>
+      firstCaptureNotices.push(notice),
+    );
+    const stopSecondCapture = subscribe(initialCaptureState, (notice) =>
+      secondCaptureNotices.push(notice),
+    );
+    expect(firstCaptureNotices).toHaveLength(1);
+    const firstCaptureNotice = firstCaptureNotices[0];
+    if (firstCaptureNotice === undefined) throw new Error("The first capture notice is missing");
+    expect(firstCaptureNotice.kind).toBe("changed");
+    expect(secondCaptureNotices).toStrictEqual([firstCaptureNotice]);
+    stopFirstCapture();
+    expect(secondCaptureNotices).toHaveLength(1);
+    stopSecondCapture();
+    expect(providerA.trace).toStrictEqual(["open", "boundary", "pull"]);
 
     const seed = {
       boundary: { kind: "initial" as const, after: 5 },
@@ -876,6 +998,16 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     expect(providerB.trace.indexOf("boundary")).toBeLessThan(providerB.trace.indexOf("pull"));
     expect(providerB.acknowledgements).toHaveLength(0);
 
+    const deadlineCheckpoint = capturePositionedStore(receiverClaim.store, [
+      receiverClaim.restoration.projections[0]!,
+    ] as const);
+    const cancelledDeadline = observePositionedStoreCaptureState(deadlineCheckpoint);
+    const timersBefore = jest.getTimerCount();
+    const stopDeadline = subscribe(cancelledDeadline, () => undefined);
+    expect(jest.getTimerCount()).toBe(timersBefore + 1);
+    stopDeadline();
+    expect(jest.getTimerCount()).toBe(timersBefore);
+
     const suffixFold = until(
       receiverClaim.restoration.projections[0]!.value,
       (value) => value === 12,
@@ -892,39 +1024,188 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     expect(providerB.acknowledgements[0]!.reader).toBe(reader);
     expect(Object.is(providerB.acknowledgements[0]!.receipt, receipt)).toBe(true);
 
+    const targetCheckpoint = capturePositionedStore(receiverClaim.store, [
+      receiverClaim.restoration.projections[0]!,
+    ] as const);
+    const targetCaptureState = observePositionedStoreCaptureState(targetCheckpoint);
+    const firstTargetNotices: PositionedStoreCaptureNotice[] = [];
+    let insideSeedWrite = false;
+    let reenteredDuringWrite = false;
+    let targetSeedRevision: object | undefined;
+    const stopFirstTarget = subscribe(targetCaptureState, (notice) => {
+      firstTargetNotices.push(notice);
+      if (firstTargetNotices.length === 1 && notice.kind === "changed") {
+        targetSeedRevision = notice.revision;
+        insideSeedWrite = true;
+        receiverClaim.store.set(99);
+        insideSeedWrite = false;
+      } else if (insideSeedWrite) reenteredDuringWrite = true;
+    });
+    if (targetSeedRevision === undefined)
+      throw new Error("The target capture did not synchronously seed its observer");
+    const secondTargetNotices: PositionedStoreCaptureNotice[] = [];
+    const stopSecondTarget = subscribe(targetCaptureState, (notice) =>
+      secondTargetNotices.push(notice),
+    );
+    const targetChange = await waitForCaptureChange(targetCaptureState, targetSeedRevision);
+    expect(targetChange.kind).toBe("changed");
+    expect(reenteredDuringWrite).toBe(false);
+    expect(firstTargetNotices).toHaveLength(2);
+    expect(secondTargetNotices).toStrictEqual(firstTargetNotices);
+
+    stopFirstTarget();
+    const secondTargetChange = waitForCaptureChange(targetCaptureState, targetChange.revision);
+    receiverClaim.store.set(100);
+    await secondTargetChange;
+    expect(firstTargetNotices).toHaveLength(2);
+    expect(secondTargetNotices).toHaveLength(3);
+    expect(providerB.openings).toHaveLength(1);
+    expect(providerB.trace).not.toContain("return");
+
+    stopSecondTarget();
+    jest.useRealTimers();
+    switchedToRealTimers = true;
+
+    const expiringProvider = makeProvider(2_000);
+    const expiringDefinition = createPositionedStream<void, number, string, number, object>({
+      name: "shared-initial-boundary",
+      key: () => "shared-initial-boundary/one",
+      snapshot: false,
+      source: expiringProvider.source,
+    });
+    const expiringGraph = createGraph({
+      contract: defineContract({
+        namespace,
+        operations: { events: expiringDefinition },
+      }),
+    });
+    const expiringReader = expiringProvider.reserve(5, seed);
+    let expiringClaim:
+      | {
+          readonly store: StreamStore<number>;
+          readonly restoration: PositionedStoreRestoration<number, readonly [number]>;
+          readonly retired: Promise<void>;
+          discard(): void;
+        }
+      | undefined;
+    let expiringAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+    let expiringAdoptionPublished = false;
+    let stopExpiration: (() => void) | undefined;
+    try {
+      const expiringTransferClaim = preparePassiveTransferClaim(
+        expiringGraph,
+        expiringGraph.api.events,
+        undefined,
+        undefined,
+        { policies: [policy] as const, seed, reader: expiringReader },
+      );
+      expiringClaim = expiringTransferClaim;
+      const expiringTargetValue = computed(() =>
+        expiringTransferClaim.restoration.projections[0]!.value.get(),
+      );
+      expiringAdoption = prepareRequiredTransferAdoption(capture!.image, {
+        graphs: [expiringGraph],
+        sources: [{ slot: "s0", claim: expiringTransferClaim }],
+        positioned: [{ slot: "p0", claim: expiringTransferClaim, seed }],
+        reactive: [
+          {
+            slot: capture!.image.roots[0]!,
+            target: expiringTargetValue,
+            construction: captureReactiveConstruction(expiringTargetValue),
+          },
+        ],
+        codec,
+        mappedStateWrites: [],
+      });
+      const expiringCommit = expiringAdoption.seal();
+      if (expiringCommit === undefined)
+        throw new Error("The expiring reader adoption did not seal");
+      expiringCommit.publish();
+      expiringAdoptionPublished = true;
+      expiringCommit.notifications.deliver();
+      await Promise.all([expiringAdoption.retired, expiringTransferClaim.retired]);
+
+      expiringTransferClaim.restoration.activate();
+      const expiringCheckpoint = capturePositionedStore(expiringTransferClaim.store, [
+        expiringTransferClaim.restoration.projections[0]!,
+      ] as const);
+      expect(expiringCheckpoint.present).toBe(false);
+      expect(expiringCheckpoint.resumable).toBe(true);
+      const expiringState = observePositionedStoreCaptureState(expiringCheckpoint);
+      const expirationNotices: PositionedStoreCaptureNotice[] = [];
+      const expired = waitForCaptureNotice(
+        expiringState,
+        (notice) => notice.kind === "invalidated",
+      );
+      stopExpiration = subscribe(expiringState, (notice) => expirationNotices.push(notice));
+      expect(expirationNotices[0]?.kind).toBe("changed");
+      expect(await expired).toStrictEqual({ kind: "invalidated" });
+      expect(expirationNotices[expirationNotices.length - 1]?.kind).toBe("invalidated");
+      expect(expiringProvider.openings).toHaveLength(1);
+      expect(expiringProvider.trace).not.toContain("return");
+    } finally {
+      stopExpiration?.();
+      if (!expiringAdoptionPublished) {
+        expiringAdoption?.discard();
+        expiringClaim?.discard();
+      } else expiringClaim?.restoration.discard();
+      if (expiringAdoption !== undefined)
+        await expiringAdoption.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      if (expiringClaim !== undefined) {
+        await expiringClaim.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+        await expiringClaim.restoration.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      } else if (expiringProvider.releaseCount(expiringReader) === 0) {
+        expiringProvider.source.releaseReader(undefined, expiringReader);
+      }
+      expiringGraph.dispose();
+    }
+
     receiverClaim.restoration.discard();
     await receiverClaim.restoration.retired;
     expect(providerB.releaseCount(targetReader)).toBe(1);
   } finally {
-    if (!capturePublished) capture?.discard();
-    if (!adoptionPublished) {
-      adoption?.discard();
-      claim?.discard();
-    } else claim?.restoration.discard();
-    sourceProjection?.close();
-    sourceGraph.dispose();
-    targetGraph.dispose();
-    if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
-      providerB.source.releaseReader(undefined, reader);
-    if (capture !== undefined)
-      await capture.retired.then(
-        () => undefined,
-        () => undefined,
-      );
-    if (adoption !== undefined)
-      await adoption.retired.then(
-        () => undefined,
-        () => undefined,
-      );
-    if (claim !== undefined) {
-      await claim.retired.then(
-        () => undefined,
-        () => undefined,
-      );
-      await claim.restoration.retired.then(
-        () => undefined,
-        () => undefined,
-      );
+    try {
+      if (!capturePublished) capture?.discard();
+      if (!adoptionPublished) {
+        adoption?.discard();
+        claim?.discard();
+      } else claim?.restoration.discard();
+      sourceProjection?.close();
+      sourceGraph.dispose();
+      targetGraph.dispose();
+      if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
+        providerB.source.releaseReader(undefined, reader);
+      if (capture !== undefined)
+        await capture.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      if (adoption !== undefined)
+        await adoption.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      if (claim !== undefined) {
+        await claim.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+        await claim.restoration.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      }
+    } finally {
+      if (switchedToRealTimers) jest.useFakeTimers();
     }
   }
 });
@@ -944,6 +1225,51 @@ it("retains a stream for a projection then collects after its final listener clo
     await Promise.resolve();
     jest.advanceTimersByTime(10);
     expect(backend.calls[0]!.aborted).toBe(true);
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("preserves an undefined failure from a required positioned projection", async () => {
+  const backend = testBackend();
+  const name = "required-projection-failure";
+  const stream = createPositionedStream<void, number, string, number, object>({
+    name,
+    key: () => "required-projection-failure/one",
+    source: {
+      open: backend.stream<void, { readonly position: number; readonly value: number }>(name),
+      initialBoundary: () => ({ available: true, after: 0 }),
+      validateReader: () => false,
+      isReaderCurrent: () => false,
+      acknowledge: () => undefined,
+      releaseReader: () => undefined,
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: name, operations: { events: stream } }),
+  });
+  const source = graph.api.events();
+  const projection = project(source, {
+    kind: "reduce",
+    initial: 0,
+    step: (): number => {
+      throw undefined;
+    },
+  });
+  const checkpoint = capturePositionedStore(source, [projection] as const);
+  const captureState = observePositionedStoreCaptureState(checkpoint);
+
+  try {
+    expect(checkpoint.present).toBe(false);
+    const failed = waitForCaptureNotice(captureState, (notice) => notice.kind === "failed");
+    backend.emit(name, { position: 1, value: 2 });
+    const notice = await failed;
+    expect(notice).toStrictEqual({ kind: "failed", cause: undefined });
+    expect(projection.status.get()).toBe("failed");
+    expect(projection.error.get()).toBeUndefined();
+    expect(projection.value.get()).toBe(0);
+    expect(source.value.get()).toBe(2);
+    expect(source.status.get()).toBe("live");
   } finally {
     graph.dispose();
   }

@@ -219,6 +219,7 @@ export async function consumeStream<T>(
           };
         } else positioned.diverged = true;
         positioned.dispatch = undefined;
+        noteTransferChange(positioned);
       }
     }
   } catch (error) {
@@ -1614,7 +1615,16 @@ export function createPositionedStoreSession<T>(
       },
     };
     if (!detached) changeBoundAddress(runtime);
-    configureKeyedValue(runtime, definition, options, session.bound, false, false, undefined, !detached);
+    configureKeyedValue(
+      runtime,
+      definition,
+      options,
+      session.bound,
+      false,
+      false,
+      undefined,
+      !detached,
+    );
     if (construction !== undefined && !construction.legacy)
       materializePositionedStoreInitial(runtime);
     if (setup.kind === "ordinary") {

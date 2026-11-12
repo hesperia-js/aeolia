@@ -405,9 +405,6 @@ export function getOrCreateStore<T>(
   return runtime;
 }
 
-/** Establish current authority only after the native owner accepts acquisition. */
-export function admitStore<T>(runtime: StoreRuntime<T>): void {
-  assertStoreOpen(runtime);
 /** Establish a fresh off-graph incarnation without collection or address effects. */
 export function admitDetachedStore<T>(runtime: StoreRuntime<T>): object {
   assertStoreOpen(runtime);

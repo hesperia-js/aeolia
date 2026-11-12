@@ -20,7 +20,6 @@ import {
 } from "../../src/contract/index.ts";
 import { Fault } from "../../src/fault.ts";
 import { computed, subscribe, withoutWrites } from "../../src/reactive.ts";
-import { adopt } from "../../src/realm.ts";
 import { testBackend } from "../../src/testing.ts";
 import {
   adopt,

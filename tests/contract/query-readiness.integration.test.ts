@@ -555,6 +555,28 @@ describe("QueryStore.ready", () => {
     graph.dispose();
   });
 
+  it("counts a failed query-member retry as the shared automatic recovery", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const first = graph.api.query("member-recovery", { revalidateAfterMs: 1 });
+    const initialFailure = new Error("initial offline");
+    backend.reject(backend.calls[0]!, initialFailure);
+    await flush();
+    expect(first.status.get()).toBe("failed");
+
+    const second = graph.api.query("member-recovery");
+    expect(backend.calls).toHaveLength(2);
+    const recoveryFailure = new Error("recovery offline");
+    backend.reject(backend.calls[1]!, recoveryFailure);
+    await flush();
+    expect(second.status.get()).toBe("failed");
+
+    const third = graph.api.query("member-recovery");
+    expect(backend.calls).toHaveLength(2);
+    expect(third.status.get()).toBe("failed");
+    graph.dispose();
+  });
+
   it("keeps explicit fetch acquisition inside shared automatic recovery limits", async () => {
     const backend = testBackend();
     const queryDefinition = createQuery({ ...query(backend), acquisition: "fetch" });

@@ -446,6 +446,9 @@ export function endStream<T>(
   noteTransferChange(runtime);
   noteTransferChange(session);
   session.ended = true;
+  if (session.positioned !== undefined)
+    session.positioned.captureTerminal =
+      status === "failed" ? { kind: "failed", cause: reason } : { kind: "closed" };
   closePositionedStoreSession(runtime, session);
   const iterator = session.iterator;
   const removeCallerAbort = session.removeCallerAbort;
@@ -563,6 +566,9 @@ function endBoundStream<T>(
   bound.phase = "retiring";
   bound.liveReadables = 0;
   session.ended = true;
+  if (session.positioned !== undefined)
+    session.positioned.captureTerminal =
+      status === "failed" ? { kind: "failed", cause: reason } : { kind: "closed" };
   closePositionedStoreSession(runtime, session);
   runtime.boundRetirement = bound;
   runtime.transitioning = true;

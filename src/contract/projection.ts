@@ -37,7 +37,7 @@ import {
 } from "./registry.ts";
 import { Fault } from "../fault.ts";
 import { isObject } from "../utils.ts";
-import { __internal as reactiveInternal, signal } from "../reactive.ts";
+import { __internal as reactiveInternal, Signal, signal } from "../reactive.ts";
 import type { Readable } from "../reactive.ts";
 import { assertGraphOpen, assertStoreOpen, reportContinuationError } from "./faults.ts";
 import {
@@ -87,6 +87,7 @@ import {
   beginTransferAdmission,
   finishTransferAdmission,
   noteTransferChange,
+  observePositionedTransferChanges,
   registerTransferProjection,
   registerTransferWork,
   transferEpochCurrent,
@@ -509,7 +510,8 @@ function stopSource<T>(source: ProjectionSource<T>, reason?: unknown): (() => vo
         throw new AggregateError(failures, "Several projection cleanup operations failed");
     } finally {
       finishPhysicalWork(cleanupWork);
-    }  };
+    }
+  };
 }
 
 function registerTerminalReset<V>(
@@ -654,7 +656,6 @@ function finish<T, V>(
   source = runtime.source,
   abortReason?: unknown,
 ): void {
-
   if (runtime.positioned !== undefined) {
     finishPositioned(runtime, failed, reason, source, abortReason);
     return;
@@ -1071,8 +1072,11 @@ function finishPositioned<T, V>(
     noteTransferChange(positioned.binding.handle);
   positioned.transitioning = true;
   if (positioned.storeGroup !== undefined && positioned.storeParticipant !== undefined) {
+    noteTransferChange(positioned.storeGroup);
+    noteTransferChange(positioned.storeParticipant);
     if (failed) {
       positioned.storeParticipant.failed = true;
+      positioned.storeParticipant.failure = { cause: reason };
       positioned.storeGroup.diverged = true;
     } else positioned.storeGroup.participants.delete(positioned.storeParticipant);
   }
@@ -1238,6 +1242,8 @@ function acceptPositioned<T, V>(
           Object.is(event.position, position) &&
           Object.is(event.latest, item)
         ) {
+          noteTransferChange(group);
+          noteTransferChange(participant);
           participant.event = event;
           participant.anchor = event.identity;
         }
@@ -1547,6 +1553,7 @@ function makeSharedProjection<T, V>(
           ...(group.continuation === undefined ? {} : { anchor: group.continuation.token }),
           failed: false,
         };
+        noteTransferChange(group);
         group.participants.add(participant);
         runtime.positioned!.storeGroup = group;
         runtime.positioned!.storeParticipant = participant;
@@ -1977,6 +1984,234 @@ export function capturePositionedStore<Event, const Projections extends readonly
   }) as PositionedStoreCheckpoint<Event, PositionedStoreProjectionValues<Projections>>;
   positionedStoreCheckpointByHandle.set(checkpoint as object, capture);
   return checkpoint;
+}
+
+/** A non-authoritative indication that a positioned Store capture should be rechecked. */
+export type PositionedStoreCaptureNotice =
+  | { readonly kind: "changed"; readonly revision: object }
+  | { readonly kind: "closed" }
+  | { readonly kind: "invalidated" }
+  | { readonly kind: "failed"; readonly cause: unknown };
+
+/**
+ * Observes changes to the native session named by an authentic Store checkpoint.
+ *
+ * A changed notice schedules a fresh capture; it does not establish currentness,
+ * resumability, transfer, or publication. The initial notice is delivered
+ * synchronously by subscribe. Later notices are delivered after native changes
+ * settle. Terminal notices remain sticky and failure retains the original cause.
+ * Observation does not retain, open, or stop the source. Unsubscribing removes
+ * the registration and its reader deadline task.
+ *
+ * @param checkpoint - Exact checkpoint returned by capturePositionedStore.
+ * @returns An Aeolia readable for this native session's capture-state notices.
+ * @throws TypeError if the checkpoint is not authentic.
+ */
+export function observePositionedStoreCaptureState<Event, Values extends readonly unknown[]>(
+  checkpoint: PositionedStoreCheckpoint<Event, Values>,
+): Readable<PositionedStoreCaptureNotice> {
+  if (checkpoint === null || typeof checkpoint !== "object")
+    throw new TypeError("An authentic positioned Store checkpoint is required");
+  const capture = positionedStoreCheckpointByHandle.get(checkpoint as object);
+  if (capture === undefined)
+    throw new TypeError("An authentic positioned Store checkpoint is required");
+  return createPositionedCaptureState({
+    source: new WeakRef(capture.source),
+    runtime: new WeakRef(capture.runtime),
+    session: new WeakRef(capture.session),
+    group: new WeakRef(capture.group),
+    graphEpoch: capture.graphEpoch,
+    projections: capture.projections.map((item) => ({
+      handle: new WeakRef(item.handle),
+      runtime: new WeakRef(item.runtime),
+      participant: new WeakRef(item.participant),
+    })),
+  });
+}
+
+interface PositionedCaptureObservation {
+  readonly source: WeakRef<object>;
+  readonly runtime: WeakRef<StoreRuntime<unknown>>;
+  readonly session: WeakRef<StreamSession<unknown>>;
+  readonly group: WeakRef<PositionedStoreSessionState<unknown>>;
+  readonly graphEpoch: number;
+  readonly projections: readonly {
+    readonly handle: WeakRef<object>;
+    readonly runtime: WeakRef<ProjectionRuntime<unknown, unknown>>;
+    readonly participant: WeakRef<PositionedStoreParticipant>;
+  }[];
+}
+
+function createPositionedCaptureState(
+  refs: PositionedCaptureObservation,
+): Readable<PositionedStoreCaptureNotice> {
+  let active = false;
+  let generation = 0;
+  let queued = false;
+  let stopChanges: (() => void) | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let terminal: PositionedStoreCaptureNotice | undefined;
+  const changed = (): PositionedStoreCaptureNotice => ({ kind: "changed", revision: {} });
+  const currentNotice = (): PositionedStoreCaptureNotice => {
+    if (terminal !== undefined) return terminal;
+    const source = refs.source.deref();
+    const runtime = refs.runtime.deref();
+    const session = refs.session.deref();
+    const group = refs.group.deref();
+    if (
+      source === undefined ||
+      runtime === undefined ||
+      session === undefined ||
+      group === undefined
+    )
+      return (terminal = { kind: "invalidated" });
+    if (group.captureTerminal !== undefined) return (terminal = group.captureTerminal);
+    try {
+      assertStoreHandlePublished(source);
+    } catch {
+      return (terminal = { kind: "invalidated" });
+    }
+    const graphState = runtime.graph.__runtime;
+    const lifetime = group.preparation?.lifetime;
+    if (
+      runtimeByStore.get(source) !== runtime ||
+      group.runtime !== runtime ||
+      runtime.stream !== session ||
+      session.ended ||
+      session.positioned !== group ||
+      group.phase === "closed" ||
+      graphState.disposed ||
+      runtime.disposed ||
+      runtime.binding?.context.disposed === true ||
+      graphState.resetEpoch !== refs.graphEpoch ||
+      (lifetime !== undefined && !lifetime.currentAt(readerLifetimeNow()))
+    )
+      return (terminal = { kind: "invalidated" });
+    for (const item of refs.projections) {
+      const handle = item.handle.deref();
+      const projection = item.runtime.deref();
+      const participant = item.participant.deref();
+      if (handle === undefined || projection === undefined || participant === undefined)
+        return (terminal = { kind: "invalidated" });
+      const positioned = projection.positioned;
+      if (participant.failed)
+        return (terminal =
+          participant.failure === undefined
+            ? { kind: "invalidated" }
+            : { kind: "failed", cause: participant.failure.cause });
+      if (positioned?.tuple.status === "failed")
+        return (terminal = { kind: "failed", cause: positioned.tuple.error });
+      if (
+        positionedProjectionByHandle.get(handle) !== projection ||
+        positioned === undefined ||
+        positioned.storeGroup !== group ||
+        positioned.storeParticipant !== participant ||
+        !group.participants.has(participant) ||
+        positioned.tuple.status === "closed"
+      )
+        return (terminal = { kind: "invalidated" });
+    }
+    return changed();
+  };
+  const detach = (): void => {
+    stopChanges?.();
+    stopChanges = undefined;
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+  };
+  const deliver = (): void => {
+    const notice = currentNotice();
+    if (notice.kind !== "changed") detach();
+    let deliveryFailed = false;
+    let deliveryError: unknown;
+    try {
+      cell.set(notice);
+    } catch (error) {
+      deliveryFailed = true;
+      deliveryError = error;
+    }
+    try {
+      if (notice.kind === "changed" && timer === undefined) scheduleDeadline();
+    } catch (error) {
+      if (!deliveryFailed) throw error;
+      const state = refs.runtime.deref()?.graph.__runtime;
+      if (state !== undefined) {
+        try {
+          reportContinuationError(state, error);
+        } catch {
+          // Preserve the subscriber failure if reporting the deadline failure also fails.
+        }
+      }
+    }
+    if (deliveryFailed) throw deliveryError;
+  };
+  const schedule = (): void => {
+    if (!active || queued || terminal !== undefined) return;
+    queued = true;
+    const scheduledGeneration = generation;
+    queueMicrotask(() => {
+      if (!active || generation !== scheduledGeneration) return;
+      queued = false;
+      try {
+        deliver();
+      } catch (error) {
+        const state = refs.runtime.deref()?.graph.__runtime;
+        if (state !== undefined) reportContinuationError(state, error);
+      }
+    });
+  };
+  const scheduleDeadline = (): void => {
+    const expiresAt = refs.group.deref()?.preparation?.lifetime?.expiresAt;
+    if (!active || terminal !== undefined || expiresAt === undefined || timer !== undefined) return;
+    const delay = expiresAt - readerLifetimeNow();
+    if (delay <= 0) {
+      schedule();
+      return;
+    }
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        if (!active || terminal !== undefined) return;
+        if (readerLifetimeNow() < expiresAt) scheduleDeadline();
+        else schedule();
+      },
+      Math.min(Math.ceil(delay), 2_147_483_647),
+    );
+  };
+  const cell = signal<PositionedStoreCaptureNotice>(changed(), {
+    [Signal.subtle.watched]() {
+      active = true;
+      generation += 1;
+      const runtime = refs.runtime.deref();
+      const session = refs.session.deref();
+      const group = refs.group.deref();
+      const targets: object[] = [];
+      if (runtime !== undefined) {
+        targets.push(runtime, runtime.graph.__runtime);
+        if (runtime.binding !== undefined) targets.push(runtime.binding, runtime.binding.context);
+      }
+      if (session !== undefined) targets.push(session);
+      if (group !== undefined) targets.push(group);
+      for (const item of refs.projections) {
+        const projection = item.runtime.deref();
+        const participant = item.participant.deref();
+        if (projection !== undefined) {
+          targets.push(projection);
+          if (projection.positioned !== undefined) targets.push(projection.positioned);
+        }
+        if (participant !== undefined) targets.push(participant);
+      }
+      stopChanges = observePositionedTransferChanges(targets, schedule);
+      deliver();
+    },
+    [Signal.subtle.unwatched]() {
+      active = false;
+      generation += 1;
+      queued = false;
+      detach();
+    },
+  });
+  return cell;
 }
 
 /**

@@ -38,6 +38,7 @@ import {
   subscribe,
   projectPositioned,
   project,
+  type ProjectionPolicy,
   capturePositionedProjection,
   capturePositionedStore,
   isPositionedStoreCheckpointCurrent,
@@ -48,6 +49,7 @@ import {
   acknowledgePositionedFold,
   observeQueryProgress,
   observeStore,
+  observePositionedStoreCaptureState,
   peekStore,
   type ObservationLease,
   type ValueRevision,
@@ -77,6 +79,7 @@ import {
   type PositionedProjectionCheckpoint,
   type PositionedFoldReceipt,
   type PositionedRestoreSeed,
+  type PositionedStoreCaptureNotice,
   type PositionedStoreCheckpoint,
   type PositionedStoreRestoreSeed,
   type PositionedStoreRestoration,
@@ -85,6 +88,7 @@ import {
   type Readable,
   type StoreIdentity,
   type TypedTarget,
+  type Unsubscribe,
   snapshot,
   type AdoptionReport,
   type AdoptionReportV2,
@@ -122,10 +126,12 @@ import {
   type StreamSnapshotAddressV2,
   withoutWrites,
 } from "aeolia";
+import { observePositionedStoreCaptureState as observeContractPositionedStoreCaptureState } from "aeolia/contract";
 import type {
   BindingContext as ContractBindingContext,
   Graph as ContractGraph,
   QueryAcquisition as ContractQueryAcquisition,
+  PositionedStoreCaptureNotice as ContractPositionedStoreCaptureNotice,
   PositionedStoreCheckpoint as ContractPositionedStoreCheckpoint,
   PositionedStoreRestoreSeed as ContractPositionedStoreRestoreSeed,
   PositionedStoreRestoration as ContractPositionedStoreRestoration,
@@ -615,11 +621,6 @@ function typecheckOnly(): void {
     contract: defineContract({ namespace: "progress-types", operations: { progressQuery } }),
   });
   const progressStore = progressGraph.api.progressQuery("one");
-
-  const progressGraph = createGraph({
-    contract: defineContract({ namespace: "progress-types", operations: { progressQuery } }),
-  });
-  const progressStore = progressGraph.api.progressQuery("one");
   const progressOptions: QueryFetchOptions<Progress> = {
     abortSignal: new AbortController().signal,
     graph: progressGraph.id,
@@ -705,6 +706,67 @@ function typecheckOnly(): void {
     positionedStoreSource,
     positionedStoreViews,
   );
+
+  type PositionedStoreCaptureFailureCause = Extract<
+    PositionedStoreCaptureNotice,
+    { readonly kind: "failed" }
+  >["cause"];
+  type PositionedStoreCaptureChangedRevision = Extract<
+    PositionedStoreCaptureNotice,
+    { readonly kind: "changed" }
+  >["revision"];
+  const positionedStoreCaptureFailureCauseIsUnknown: Equal<
+    PositionedStoreCaptureFailureCause,
+    unknown
+  > = true;
+  const positionedStoreCaptureChangedRevisionIsObject: Equal<
+    PositionedStoreCaptureChangedRevision,
+    object
+  > = true;
+  const positionedStoreCaptureNoticeSubpathsMatch: Equal<
+    PositionedStoreCaptureNotice,
+    ContractPositionedStoreCaptureNotice
+  > = true;
+  const positionedStoreCaptureNotices: Readable<PositionedStoreCaptureNotice> =
+    observePositionedStoreCaptureState(positionedStoreCheckpoint);
+  const contractPositionedStoreCaptureNotices: Readable<ContractPositionedStoreCaptureNotice> =
+    observeContractPositionedStoreCaptureState(positionedStoreCheckpoint);
+  const positionedStoreCaptureNoticeObserver: (notice: PositionedStoreCaptureNotice) => void = (
+    notice,
+  ) => {
+    if (notice.kind === "changed") {
+      const revision: object = notice.revision;
+      // @ts-expect-error A native revision token is opaque and cannot be used as an event position.
+      const eventPosition: number = notice.revision;
+      void [revision, eventPosition];
+    } else if (notice.kind === "failed") {
+      const cause: unknown = notice.cause;
+      // @ts-expect-error An unknown failure cause must be narrowed before its fields are read.
+      const failureMessage: string = notice.cause.message;
+      void [cause, failureMessage];
+    } else {
+      const terminalKind: "closed" | "invalidated" = notice.kind;
+      void terminalKind;
+    }
+  };
+  const unsubscribePositionedStoreCapture: Unsubscribe = subscribe(
+    positionedStoreCaptureNotices,
+    positionedStoreCaptureNoticeObserver,
+  );
+  const unsubscribeContractPositionedStoreCapture: Unsubscribe = subscribe(
+    contractPositionedStoreCaptureNotices,
+    positionedStoreCaptureNoticeObserver,
+  );
+  // @ts-expect-error An ordinary Store does not carry a native positioned capture checkpoint.
+  observePositionedStoreCaptureState(declared);
+  void [
+    positionedStoreCaptureFailureCauseIsUnknown,
+    positionedStoreCaptureChangedRevisionIsObject,
+    positionedStoreCaptureNoticeSubpathsMatch,
+    unsubscribePositionedStoreCapture,
+    unsubscribeContractPositionedStoreCapture,
+  ];
+
   type PositionedStoreValues = readonly [{ total: number }, number];
   type CapturedPositionedStoreValues =
     typeof positionedStoreCheckpoint extends PositionedStoreCheckpoint<number, infer Values>
@@ -915,19 +977,32 @@ function typecheckOnly(): void {
     { token: "reader" },
   );
 
-  const progressStatus: QueryProgressStatus = progressStore.progress.get().status;
-  const progressSnapshot: QueryProgressSnapshot<Progress> = progressStore.progress.get();
-  const progressObservation: QueryProgressObservation<Progress> =
-    observeQueryProgress(progressStore);
-  const progressCapture: QueryProgressSnapshot<Progress> = progressObservation.capture();
-  const stopProgressEvents = progressObservation.subscribe(
-    (event: QueryProgressEvent<Progress>) => {
-      const current: QueryProgressSnapshot<Progress> = event.snapshot;
-      void current;
+  const positionedStoreDynamicPolicies: ProjectionPolicy<unknown, unknown>[] = [
+    {
+      kind: "reduce" as const,
+      initial: undefined,
+      step: (previous: unknown, event: unknown): unknown => [previous, event],
     },
+    positionedStoreAccumulatePolicy,
+  ];
+  const positionedStoreDynamicSeed: PositionedStoreRestoreSeed<number, number, readonly unknown[]> =
+    {
+      after: 4,
+      latest: 5,
+      values: [undefined, [1, 2]],
+    };
+  const inferredDynamicPositionedStoreRestoration = preparePositionedStoreRestore(
+    positionedMember,
+    { id: "fresh-dynamic-store" },
+    positionedStoreDynamicPolicies,
+    positionedStoreDynamicSeed,
+    { token: "reader" },
   );
-  // @ts-expect-error Projection policy belongs to the Hesperia view, not native progress state.
-  void progressStore.progress.get().project;
+  const dynamicPositionedStoreRestorationType: PositionedStoreRestoration<
+    number,
+    readonly unknown[]
+  > = inferredDynamicPositionedStoreRestoration;
+
   void addressedIsTyped;
   void declaredSurvivesWidePattern;
   void widenedPatternClaimsNothing;
@@ -937,7 +1012,6 @@ function typecheckOnly(): void {
   void progressStatus;
   void progressSnapshot;
   void progressCapture;
-  void stopProgressEvents;
   void finiteFetchResult;
   void legacyFetchResult;
   void progressFetchResult;
@@ -956,6 +1030,7 @@ function typecheckOnly(): void {
     restoredAccumulatedEvents,
     contractRestorationType,
     positionedStoreWithOptionsType,
+    dynamicPositionedStoreRestorationType,
     positionedRestoredSource,
     positionedRestoredTotal,
     positionedRestoredCount,

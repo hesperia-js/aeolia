@@ -23,7 +23,12 @@ import type {
 } from "./types.ts";
 import type { Fault, Unsubscribe } from "../fault.ts";
 import type { Computed, WritableSignal } from "../reactive.ts";
-import type { PhysicalWork, ResetCleanupScope, RetirementOwner, PreparedReaderLifetime } from "./retirement.ts";
+import type {
+  PhysicalWork,
+  ResetCleanupScope,
+  RetirementOwner,
+  PreparedReaderLifetime,
+} from "./retirement.ts";
 import type { BindingContext } from "./query-binding.ts";
 import type { BoundStreamSession, StreamDetachment } from "./stream-binding.ts";
 
@@ -142,6 +147,7 @@ export interface PositionedStoreParticipant {
   anchor?: object;
   event?: PositionedStoreEvent;
   failed: boolean;
+  failure?: { readonly cause: unknown };
 }
 
 export interface PositionedStoreReaderLease {
@@ -180,6 +186,9 @@ export interface PositionedStoreSessionState<T> {
   readonly member: object;
   readonly binding?: StreamBindingRuntime;
   phase: "dormant" | "active" | "closed";
+  captureTerminal?:
+    | { readonly kind: "closed" }
+    | { readonly kind: "failed"; readonly cause: unknown };
   nextOrdinal: number;
   /** Incoming provider boundary while next() is pending; never a completed capture cut. */
   pendingPosition?: unknown;

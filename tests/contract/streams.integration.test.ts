@@ -1,15 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import {
+  capturePositionedStore,
   createGraph,
+  createPositionedStream,
   defineContract,
   createStream,
   snapshot,
+  observePositionedStoreCaptureState,
+  project,
   subscribe,
   watch,
   type Graph,
   type StreamDefinition,
   type StreamStore,
   type ValueOptions,
+  type PositionedStoreCaptureNotice,
+  type Readable,
 } from "../../src/index.ts";
 import { testBackend, type TestBackend } from "../../src/testing.ts";
 import { __internal as graphInternal } from "../../src/contract/engine.ts";
@@ -29,6 +35,19 @@ async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function waitForCaptureNotice(
+  readable: Readable<PositionedStoreCaptureNotice>,
+  matches: (notice: PositionedStoreCaptureNotice) => boolean,
+): Promise<PositionedStoreCaptureNotice> {
+  let stop: (() => void) | undefined;
+  const pending = new Promise<PositionedStoreCaptureNotice>((resolve) => {
+    stop = subscribe(readable, (notice) => {
+      if (matches(notice)) resolve(notice);
+    });
+  });
+  return pending.finally(() => stop?.());
 }
 
 function streamGraph<T>(stream: StreamDefinition<void, T>): Graph {
@@ -507,4 +526,194 @@ describe("stream stores", () => {
     expect(runtime.generation).toBe(afterWrite + 1);
     graph.dispose();
   });
+
+  it("preserves close and falsy positioned source failures without another pull", async () => {
+    type Event = { readonly position: number; readonly value: number };
+    type Ending =
+      | { readonly kind: "closed" }
+      | { readonly kind: "failed"; readonly cause: unknown };
+    const endings: readonly Ending[] = [
+      { kind: "closed" },
+      { kind: "failed", cause: undefined },
+      { kind: "failed", cause: false },
+      { kind: "failed", cause: 0 },
+      { kind: "failed", cause: "" },
+    ];
+
+    for (const ending of endings) {
+      let resolveNext: ((result: IteratorResult<Event>) => void) | undefined;
+      let rejectNext: ((cause: unknown) => void) | undefined;
+      let nextCalls = 0;
+      const name = "capture-terminal";
+      const stream = createPositionedStream<void, number, string, number, object>({
+        name,
+        key: () => "capture-terminal/one",
+        source: {
+          open: (): AsyncIterable<Event> => ({
+            [Symbol.asyncIterator]() {
+              return {
+                next: () => {
+                  nextCalls += 1;
+                  return new Promise<IteratorResult<Event>>((resolve, reject) => {
+                    resolveNext = resolve;
+                    rejectNext = reject;
+                  });
+                },
+                return: () => Promise.resolve({ done: true as const, value: undefined }),
+              };
+            },
+          }),
+          initialBoundary: () => ({ available: true, after: 0 }),
+          validateReader: () => false,
+          isReaderCurrent: () => false,
+          acknowledge: () => undefined,
+          releaseReader: () => undefined,
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({ namespace: name, operations: { events: stream } }),
+      });
+      const source = graph.api.events();
+      const projection = project(source, {
+        kind: "reduce",
+        initial: 0,
+        step: (sum: number, value: number) => sum + value,
+      });
+      const checkpoint = capturePositionedStore(source, [projection] as const);
+      const captureState = observePositionedStoreCaptureState(checkpoint);
+
+      try {
+        expect(checkpoint.present).toBe(false);
+        const terminal = waitForCaptureNotice(
+          captureState,
+          (notice) => notice.kind === "closed" || notice.kind === "failed",
+        );
+        if (ending.kind === "closed") {
+          if (resolveNext === undefined) throw new Error("The source has no pending first next");
+          resolveNext({ done: true, value: undefined });
+        } else {
+          if (rejectNext === undefined) throw new Error("The source has no pending first next");
+          rejectNext(ending.cause);
+        }
+        const notice = await terminal;
+        expect(notice).toStrictEqual(ending);
+        expect(nextCalls).toBe(1);
+        expect(source.status.get()).toBe(ending.kind);
+        expect(source.error.get()).toBe(ending.kind === "failed" ? ending.cause : undefined);
+        expect(source.available.get()).toBe(false);
+        expect(projection.value.get()).toBe(0);
+      } finally {
+        graph.dispose();
+      }
+    }
+  });
+
+  it.each(["reset", "abort"] as const)(
+    "keeps a positioned capture closed through %s and explicit reentry",
+    async (mode) => {
+      type Event = { readonly position: number; readonly value: number };
+      type Session = {
+        nextCalls: number;
+        returnCalls: number;
+        resolveNext?: (result: IteratorResult<Event>) => void;
+      };
+      const sessions: Session[] = [];
+      const stream = createPositionedStream<void, number, string, number, object>({
+        name: "capture-reset-reentry",
+        key: () => "capture-reset-reentry/one",
+        source: {
+          open: (): AsyncIterable<Event> => {
+            const session: Session = { nextCalls: 0, returnCalls: 0 };
+            sessions.push(session);
+            return {
+              [Symbol.asyncIterator]() {
+                return {
+                  next: () => {
+                    session.nextCalls += 1;
+                    return new Promise<IteratorResult<Event>>((resolve) => {
+                      session.resolveNext = resolve;
+                    });
+                  },
+                  return: () => {
+                    session.returnCalls += 1;
+                    session.resolveNext?.({ done: true, value: undefined });
+                    return Promise.resolve({ done: true as const, value: undefined });
+                  },
+                };
+              },
+            };
+          },
+          initialBoundary: () => ({ available: true, after: 0 }),
+          validateReader: () => false,
+          isReaderCurrent: () => false,
+          acknowledge: () => undefined,
+          releaseReader: () => undefined,
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({
+          namespace: "capture-reset-reentry",
+          operations: { events: stream },
+        }),
+      });
+      const owner = new AbortController();
+      let stopFirst: (() => void) | undefined;
+      let stopLate: (() => void) | undefined;
+      let stopReopened: (() => void) | undefined;
+
+      try {
+        const first = graph.api.events(
+          undefined,
+          mode === "abort" ? { abortSignal: owner.signal } : undefined,
+        );
+        const firstProjection = project(first, {
+          kind: "reduce",
+          initial: 0,
+          step: (sum: number, value: number) => sum + value,
+        });
+        const firstCheckpoint = capturePositionedStore(first, [firstProjection] as const);
+        const firstState = observePositionedStoreCaptureState(firstCheckpoint);
+        const firstNotices: PositionedStoreCaptureNotice[] = [];
+        stopFirst = subscribe(firstState, (notice) => firstNotices.push(notice));
+        expect(firstNotices[0]?.kind).toBe("changed");
+        const terminal = waitForCaptureNotice(
+          firstState,
+          (notice) => notice.kind === "closed" || notice.kind === "invalidated",
+        );
+
+        if (mode === "reset") await graph.reset();
+        else owner.abort(new Error("owner stopped"));
+        const closed = await terminal;
+        expect(closed).toStrictEqual({ kind: "closed" });
+        expect(firstNotices.map((notice) => notice.kind)).toStrictEqual(["changed", "closed"]);
+
+        const lateNotices: PositionedStoreCaptureNotice[] = [];
+        stopLate = subscribe(firstState, (notice) => lateNotices.push(notice));
+        expect(lateNotices).toStrictEqual([closed]);
+
+        const reopened = graph.api.events();
+        const reopenedProjection = project(reopened, {
+          kind: "reduce",
+          initial: 0,
+          step: (sum: number, value: number) => sum + value,
+        });
+        const reopenedCheckpoint = capturePositionedStore(reopened, [reopenedProjection] as const);
+        const reopenedState = observePositionedStoreCaptureState(reopenedCheckpoint);
+        const reopenedNotices: PositionedStoreCaptureNotice[] = [];
+        stopReopened = subscribe(reopenedState, (notice) => reopenedNotices.push(notice));
+        expect(reopenedCheckpoint.sessionIdentity).not.toBe(firstCheckpoint.sessionIdentity);
+        expect(reopenedNotices[0]?.kind).toBe("changed");
+        expect(firstNotices.map((notice) => notice.kind)).toStrictEqual(["changed", "closed"]);
+        expect(sessions).toHaveLength(2);
+        expect(sessions[0]!.nextCalls).toBe(1);
+        expect(sessions[0]!.returnCalls).toBe(1);
+        expect(sessions[1]!.nextCalls).toBe(1);
+      } finally {
+        stopFirst?.();
+        stopLate?.();
+        stopReopened?.();
+        graph.dispose();
+      }
+    },
+  );
 });

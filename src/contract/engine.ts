@@ -10,7 +10,6 @@ import type {
   QueryStore,
   QueryProgressSnapshot,
   Store,
-  StreamStore,
   StoreAt,
   StoreDefinition,
   StoreOptions,
@@ -846,6 +845,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
       reportContinuationError(state, error);
     }
   };
+  noteTransferChange(context);
   context.disposed = true;
   if (!state.disposed)
     attempt(() =>
@@ -867,6 +867,7 @@ function disposeBindingContext(context: BindingContextRuntime): void {
   state.bindingContexts.delete(context);
   for (const runtime of stores) {
     retireQueryProgress(runtime);
+    if (!runtime.disposed) noteTransferChange(runtime);
     runtime.disposed = true;
     runtime.incarnation = undefined;
     state.stores.delete(runtime.identity);
@@ -987,6 +988,7 @@ function disposeGraph<C extends Contract>(
     if (progress === undefined) {
       progress = createGraphDisposalProgress(state);
       state.disposal = progress;
+      noteTransferChange(state);
       state.disposed = true;
     }
     progress.active = true;
@@ -1227,6 +1229,7 @@ function disposeGraphContents<C extends Contract>(
         }
         store.stream = undefined;
         retireQueryProgress(runtime as StoreRuntime<unknown>);
+        if (!runtime.disposed) noteTransferChange(runtime);
         runtime.disposed = true;
         runtime.incarnation = undefined;
         runtime.collectionIndex = -1;
@@ -1319,7 +1322,6 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     declaredStores: new Map(),
     faultObservers: new Set(),
     activeControllers: new Set(),
-    retirement: createRetirementOwner(),
     resetCleanupScopes: new Set(),
     projections: new Set(),
     collectionHeap: [],

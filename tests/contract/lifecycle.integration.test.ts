@@ -494,7 +494,6 @@ for (const { label, preAborted, mode } of [
   });
 }
 
-
 for (const preAborted of [false, true]) {
   it(`retains readables and late mutation effects (pre-aborted: ${preAborted})`, async () => {
     const backend = testBackend();
@@ -568,7 +567,6 @@ for (const preAborted of [false, true]) {
     expect(() => graph.cancelPending()).not.toThrow();
   });
 }
-
 
 it("retains prearmed freshness and collection timers after cancelling the entry work", async () => {
   const backend = testBackend();
@@ -2283,6 +2281,10 @@ it("removes query cancellation when retirement interrupts listener registration"
     expect(removes).toBe(1);
     await retirement;
   } finally {
+    graph.dispose();
+  }
+});
+
 it("retires a context skipped by prior write-restricted graph disposal", async () => {
   const graph = createGraph({
     contract: defineContract({ namespace: "retirement-skipped-context", operations: {} }),
@@ -3111,12 +3113,12 @@ it.each(["Error", "undefined"] as const)(
       }
       await ready;
       expect(readySettlements).toBe(1);
-      await expectRetirementPending(retirement);
+      await expectPending(retirement);
 
       projectionReturn.resolve({ done: true, value: undefined });
-      await expectRetirementPending(retirement);
+      await expectPending(retirement);
       projectionPull.resolve({ done: true, value: undefined });
-      await expectRetirementPending(retirement);
+      await expectPending(retirement);
       original.resolve(42);
 
       const result = await outcome;
@@ -3186,146 +3188,6 @@ it("joins original queries after cancellation and prior void graph disposal", as
     graph.dispose();
   }
 });
-
-        type: Parameters<AbortSignal["addEventListener"]>[0],
-        listener: Parameters<AbortSignal["addEventListener"]>[1],
-        options?: Parameters<AbortSignal["addEventListener"]>[2],
-      ) {
-        lifetime.signal.addEventListener(type, listener, options);
-      },
-      removeEventListener(
-        type: Parameters<AbortSignal["removeEventListener"]>[0],
-        listener: Parameters<AbortSignal["removeEventListener"]>[1],
-        options?: Parameters<AbortSignal["removeEventListener"]>[2],
-      ) {
-        lifetime.signal.removeEventListener(type, listener, options);
-        if (type !== "abort") return;
-        removalCalls += 1;
-        if (removalCalls === 1) reentrantRetirement = retireDuringRemoval?.();
-        throw cause;
-      },
-      dispatchEvent(event) {
-        return lifetime.signal.dispatchEvent(event);
-      },
-    };
-    const query = createQuery({
-      name: "prior-disposal.query",
-      key: () => "prior-disposal/query",
-      fetch: (_input: void, options) => {
-        fetchCalls += 1;
-        querySignal = options.abortSignal;
-        options.abortSignal.addEventListener("abort", () => {
-          queryAbortCalls += 1;
-        });
-        return original.promise;
-      },
-    });
-    const stream = createStream({
-      name: "prior-disposal.projection",
-      key: () => "prior-disposal/projection",
-      open: (): AsyncIterable<number> => ({
-        [Symbol.asyncIterator]() {
-          return {
-            next: () => {
-              pullStarted.resolve();
-              return projectionPull.promise;
-            },
-            return: () => {
-              returnCalls += 1;
-              return projectionReturn.promise;
-            },
-          };
-        },
-      }),
-    });
-    const graph = createGraph({
-      contract: defineContract({
-        namespace: "prior-disposal-retirement",
-        operations: { query, stream },
-      }),
-      abortSignal,
-    });
-    retireDuringRemoval = () => graph.retire();
-    let readySettlements = 0;
-    let ready: Promise<void> | undefined;
-    try {
-      const store = graph.api.query();
-      ready = store.ready.then(
-        () => {
-          readySettlements += 1;
-        },
-        () => {
-          readySettlements += 1;
-        },
-      );
-      const projection = project(graph, stream, undefined, { kind: "accumulate", max: 2 });
-      await pullStarted.promise;
-
-      let disposalThrew = false;
-      let disposalCause: unknown;
-      try {
-        graph.dispose();
-      } catch (caught) {
-        disposalThrew = true;
-        disposalCause = caught;
-      }
-      expect(disposalThrew).toBe(true);
-      expect(disposalCause).toBe(cause);
-
-      const retirement = graph.retire();
-      expect(reentrantRetirement).toBe(retirement);
-      const outcome = retirement.then(
-        () => ({ kind: "fulfilled" as const }),
-        (rejection: unknown) => ({ kind: "rejected" as const, cause: rejection }),
-      );
-      expect(graph.retire()).toBe(retirement);
-
-      expect(removalCalls).toBe(1);
-      expect(fetchCalls).toBe(1);
-      expect(querySignal?.aborted).toBe(true);
-      expect(queryAbortCalls).toBe(1);
-      expect(returnCalls).toBe(1);
-      expect(projection.status.get()).toBe("closed");
-      try {
-        graph.api.query();
-        throw new Error("Expected graph admission to be closed");
-      } catch (admissionCause) {
-        if (!(admissionCause instanceof Fault)) throw admissionCause;
-        expect(admissionCause.kind).toBe("disposed");
-      }
-      await ready;
-      expect(readySettlements).toBe(1);
-      await expectRetirementPending(retirement);
-
-      projectionReturn.resolve({ done: true, value: undefined });
-      await expectRetirementPending(retirement);
-      projectionPull.resolve({ done: true, value: undefined });
-      await expectRetirementPending(retirement);
-      original.resolve(42);
-
-      const result = await outcome;
-      expect(result.kind).toBe("rejected");
-      if (result.kind !== "rejected") throw new Error("Expected the retained cleanup failure");
-      expect(result.cause).toBe(cause);
-      expect(removalCalls).toBe(1);
-      expect(returnCalls).toBe(1);
-    } finally {
-      original.resolve(42);
-      projectionPull.resolve({ done: true, value: undefined });
-      projectionReturn.resolve({ done: true, value: undefined });
-      try {
-        graph.dispose();
-      } catch {
-        // Retirement retains the lifetime-removal cause.
-      }
-      await graph.retire().then(
-        () => undefined,
-        () => undefined,
-      );
-      await ready;
-    }
-  },
-);
 
 it("allows retirement after a write-restricted first attempt", async () => {
   const graph = createGraph({
