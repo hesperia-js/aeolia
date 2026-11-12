@@ -42,6 +42,13 @@ bun run test:package
 On Linux, `bunx playwright install --with-deps chromium` also installs the browser's
 system dependencies. The command can run inside a container, but does not create one.
 
+To use a specific Chrome executable for the package check, set
+`AEOLIA_CHROME_EXECUTABLE_PATH` to its absolute path. The runner rejects an empty,
+relative, missing, or non-file path. A launch failure does not fall back to
+Playwright's installed Chromium. To require an exact browser runtime version, set
+`AEOLIA_CHROME_EXPECTED_VERSION` alongside the executable path. The runner checks
+the version before the browser workflow.
+
 `test:package` builds Aeolia, runs the existing export and runtime-name checks,
 packs an archive, and installs it in a fresh directory under the operating system's
 temporary directory. To check an archive that has already been built, run
