@@ -314,13 +314,16 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
         runtime.progressReadableCount > 0 ||
         runtime.readyWaiterCount > 0 ||
         (runtime.stream?.listeners.size ?? 0) > 0;
-      if (!hasResetLiveness && !positionedReaderLive) continue;
-      if (runtime.source !== undefined)
+      if (
+        (hasResetLiveness || positionedReaderLive || runtime.metadataReadableCount > 0) &&
+        runtime.source !== undefined
+      )
         queries.push({
           runtime,
           caller: callerForSource(runtime, runtime.source),
         });
       if (
+        (hasResetLiveness || positionedReaderLive) &&
         runtime.readerScope === undefined &&
         runtime.binding?.kind !== "stream" &&
         runtime.streamSource !== undefined
