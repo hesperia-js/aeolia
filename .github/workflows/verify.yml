@@ -50,8 +50,8 @@ jobs:
             import { releaseVersion } from "./scripts/ci/check-release.ts";
             const branch = process.env.AEOLIA_HEAD_BRANCH;
             assert.ok(
-              /^(feature|fix)\/.+$/.test(branch) || branch.startsWith("release/"),
-              "Use feature/<name>, fix/<name>, or release/<VERSION> for repository branches",
+              /^(feature|fix|work)\/.+$/.test(branch) || branch.startsWith("release/"),
+              "Use feature/<name>, fix/<name>, work/<name>, or release/<VERSION> for repository branches",
             );
             if (branch.startsWith("release/")) {
               const { version } = releaseVersion(branch.slice("release/".length));
