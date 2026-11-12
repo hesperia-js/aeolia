@@ -21,6 +21,7 @@ import {
   affects,
   snapshot,
   subscribe,
+  observeQueryProgress,
   observeStore,
   peekStore,
   preparePassiveTransferClaim,
@@ -436,6 +437,142 @@ describe("realm snapshots and adoption", () => {
         },
       });
       expect(outerComparatorCalls).toBeGreaterThan(0);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("publishes every V1 row before query-progress observers can reenter", async () => {
+    let resolveRequest: ((value: number) => void) | undefined;
+    const query = createQuery<string, number, string, string>({
+      name: "realm.adoption-progress",
+      key: (input) => input,
+      fetch: () => new Promise<number>((resolve) => (resolveRequest = resolve)),
+    });
+    const sibling = createStore({ name: "sibling", initial: 1, snapshot: true });
+    const graph = createGraph({ contract: queryContract({ query, sibling }) });
+    let stop: (() => void) | undefined;
+    let ready: Promise<number> | undefined;
+
+    try {
+      const queryStore = graph.api.query("one");
+      const siblingStore = graph.api.sibling();
+      ready = queryStore.ready;
+      const observation = observeQueryProgress(queryStore);
+      const siblingValuesAtInterruption: unknown[] = [];
+      const childWrites: Array<"returned" | "threw"> = [];
+      const nestedAdoptions: string[][] = [];
+
+      stop = observation.subscribe(({ kind, snapshot }) => {
+        if (kind !== "lifecycle" || snapshot.status !== "interrupted") return;
+        siblingValuesAtInterruption.push(siblingStore.value.get());
+        try {
+          siblingStore.set(99);
+          childWrites.push("returned");
+        } catch {
+          childWrites.push("threw");
+        }
+        nestedAdoptions.push(
+          adopt(graph, {
+            version: 1,
+            namespace: "realm-tests",
+            encoding: "aeolia-tagged/1",
+            entries: { nested: { value: 7, generation: 0, age: 0 } },
+          } as never).adopted.map(String),
+        );
+      });
+
+      const report = adopt(graph, {
+        version: 1,
+        namespace: "realm-tests",
+        encoding: "aeolia-tagged/1",
+        entries: {
+          one: { value: 5, generation: 0, age: 0 },
+          sibling: { value: 3, generation: 0, age: 0 },
+        },
+      } as never);
+
+      expect(report.adopted.map(String)).toEqual(expect.arrayContaining(["one", "sibling"]));
+      expect(report.adopted).toHaveLength(2);
+      expect(siblingValuesAtInterruption).toEqual([3]);
+      expect(childWrites).toEqual(["returned"]);
+      expect(nestedAdoptions).toEqual([["nested"]]);
+      expect(queryStore.value.get()).toBe(5);
+      expect(siblingStore.value.get()).toBe(99);
+      expect(graph.at("nested").value.get()).toBe(7);
+    } finally {
+      stop?.();
+      resolveRequest?.(8);
+      await ready?.then(
+        () => undefined,
+        () => undefined,
+      );
+      graph.dispose();
+    }
+  });
+
+  it("leaves an earlier absent V1 entry unavailable when a later comparator exhausts generation", () => {
+    let inOuter = false;
+    const childWrites: Array<"returned" | "threw"> = [];
+    let writeLater = (_value: number): void => {
+      throw new Error("The later Store has not been created");
+    };
+    const trigger = createStore({
+      name: "trigger",
+      initial: 1,
+      snapshot: true,
+      equals: (previous, proposed) => {
+        if (inOuter && childWrites.length === 0) {
+          try {
+            writeLater(99);
+            childWrites.push("returned");
+          } catch {
+            childWrites.push("threw");
+          }
+        }
+        return Object.is(previous, proposed);
+      },
+    });
+    const later = createStore({ name: "later", initial: 2, snapshot: true });
+    const graph = createGraph({ contract: queryContract({ trigger, later }) });
+
+    try {
+      const triggerStore = graph.api.trigger();
+      const laterStore = graph.api.later();
+      writeLater = (value) => laterStore.set(value);
+      adopt(graph, {
+        version: 1,
+        namespace: "realm-tests",
+        encoding: "aeolia-tagged/1",
+        entries: {
+          later: { value: 2, generation: Number.MAX_SAFE_INTEGER - 2, age: 0 },
+        },
+      } as never);
+
+      try {
+        inOuter = true;
+        expect(() =>
+          adopt(graph, {
+            version: 1,
+            namespace: "realm-tests",
+            encoding: "aeolia-tagged/1",
+            entries: {
+              uncreated: { value: 5, generation: 0, age: 0 },
+              trigger: { value: 3, generation: 10, age: 0 },
+              later: { value: 4, generation: 0, age: 0 },
+            },
+          } as never),
+        ).toThrow(RangeError);
+      } finally {
+        inOuter = false;
+      }
+
+      const after = snapshot(graph);
+      expect(childWrites).toEqual(["returned"]);
+      expect(graph.at("uncreated").available.get()).toBe(false);
+      expect(triggerStore.value.get()).toBe(1);
+      expect(laterStore.value.get()).toBe(99);
+      expect(Number(after.entries.later?.generation)).toBe(Number.MAX_SAFE_INTEGER);
     } finally {
       graph.dispose();
     }

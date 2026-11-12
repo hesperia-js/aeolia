@@ -157,8 +157,9 @@ async function nextTurn(): Promise<void> {
 
 describe("Graph.reset", () => {
   it("preserves a raw store when reset cannot issue a safe generation", () => {
+    const value = createStore({ name: "value", initial: 0, snapshot: true });
     const graph = createGraph({
-      contract: defineContract({ namespace: "reset-generation", operations: {} }),
+      contract: defineContract({ namespace: "reset-generation", operations: { value } }),
     });
     try {
       const report = adopt(graph, {

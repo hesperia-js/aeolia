@@ -133,7 +133,7 @@ import type { ObservationLease, PreparedObservationTransfer } from "./observatio
 import { storeSubscribe } from "../subscribe.ts";
 import { armStoreTimer, finishRequest, startQuery } from "./query-request.ts";
 import { hasQueryOptionsBrand } from "./query-options.ts";
-import { configureKeyedValue, issue, nextGeneration } from "./store-state.ts";
+import { configureKeyedValue, nextGeneration, prepareAdoptionIssue } from "./store-state.ts";
 import { boundAddressOccupied } from "./binding-address.ts";
 import { writeAllStatuses } from "./status.ts";
 import { drainResetCleanups, resetGraph } from "./reset.ts";
@@ -464,54 +464,139 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
   };
 }
 
-function adoptRealmEntry(
+function adoptRealmEntries(
   graph: Graph,
-  key: string,
-  value: unknown,
-  foreignGeneration: number,
-  landingAt: number,
+  entries: readonly {
+    readonly key: string;
+    readonly value: unknown;
+    readonly generation: number;
+    readonly age: number;
+    readonly target: { current(): boolean };
+  }[],
+  now: number,
 ): void {
-  const state = (graph as GraphRuntime<any>).__runtime;
+  const state = graphRuntimeByGraph.get(graph);
+  if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
-  nextGeneration(0, foreignGeneration);
-  const definition = state.declaredStores.get(key) as StoreDefinition<unknown> | undefined;
-  const runtime = getOrCreateStore(state, storeKey(key), definition, undefined, false);
-  const revision = nextValueRevision(runtime.valueRevision);
-  reactiveInternal.assertWritesAllowed(runtime.committed);
-  issue(runtime, foreignGeneration);
-  const generation = runtime.generation;
-  const incarnation = runtime.incarnation;
-  const epoch = state.resetEpoch;
-  const previousRevision = runtime.valueRevision;
-  const landed = reactiveInternal.guardedWrite(
-    runtime.committed,
-    value,
-    () =>
-      !state.disposed &&
-      !runtime.disposed &&
-      runtime.incarnation === incarnation &&
-      state.resetEpoch === epoch &&
-      runtime.valueRevision === previousRevision &&
-      runtime.generation === generation,
-    () => {
-      if (runtime.incarnation === undefined) runtime.incarnation = {};
-      runtime.valueRevision = revision;
-      runtime.lastLandingAt = landingAt;
-      runtime.failing = false;
-      runtime.invalidated = false;
-      runtime.baseAvailable = true;
-      runtime.hasAcceptedLanding = true;
-      runtime.transferEligible = true;
-      runtime.transitioning = false;
-      runtime.errorCell.set(undefined);
-      runtime.presence.set(true);
-      runtime.dropped = false;
-    },
-  );
-  if (!landed) throw new Fault("snapshot", [key]);
-  touch(runtime);
-  writeAllStatuses(runtime);
-  armStoreTimer(runtime);
+  const detached: StoreRuntime<unknown>[] = [];
+  try {
+    reactiveInternal.batch(() => {
+      const rows = entries.map((entry) => {
+        const previous = state.stores.get(entry.key);
+        const definition = state.declaredStores.get(entry.key) as
+          | StoreDefinition<unknown>
+          | undefined;
+        const runtime =
+          previous ?? makeStore(state, storeKey(entry.key), definition, undefined, true);
+        if (previous === undefined) {
+          detached.push(runtime);
+          if (definition === undefined) {
+            runtime.incarnation = undefined;
+            runtime.dropped = true;
+          }
+          inheritTransferCoverage(runtime);
+        }
+        const configuration =
+          previous !== undefined && definition !== undefined && !runtime.configured
+            ? preparePassiveDeclaredStoreConfiguration(runtime, definition)
+            : undefined;
+        const seed = configuration !== undefined && !runtime.baseAvailable;
+        const initialRevision = seed
+          ? nextValueRevision(runtime.valueRevision)
+          : runtime.valueRevision;
+        nextValueRevision(initialRevision);
+        nextGeneration(runtime.generation, entry.generation);
+        reactiveInternal.assertWritesAllowed(runtime.committed);
+        return { entry, previous, runtime, definition, configuration, seed, initialRevision };
+      });
+      const validateRows = (): void => {
+        // An exhausted child must retain the safe-generation failure.
+        for (const row of rows) {
+          const current = state.stores.get(row.entry.key);
+          nextGeneration(current?.generation ?? 0, row.entry.generation);
+        }
+        for (const row of rows) {
+          if (
+            !row.entry.target.current() ||
+            state.stores.get(row.entry.key) !== row.previous ||
+            (row.configuration !== undefined && !row.configuration.current())
+          )
+            throw new Fault("snapshot", [row.entry.key]);
+        }
+      };
+      const prepared: Array<
+        (typeof rows)[number] & {
+          readonly write: { current(): boolean; publish(): void };
+        }
+      > = [];
+      validateRows();
+      for (const row of rows) {
+        const writes: Array<{
+          readonly value: unknown;
+          readonly equals?: (previous: unknown, proposed: unknown) => boolean;
+        }> = [];
+        if (row.seed)
+          writes.push({ value: row.definition!.initial, equals: row.configuration!.compare });
+        writes.push({
+          value: row.entry.value,
+          ...(row.configuration === undefined ? {} : { equals: row.configuration.compare }),
+        });
+        prepared.push({
+          ...row,
+          write: reactiveInternal.prepareAdoptionWrites(
+            row.runtime.committed,
+            writes,
+            validateRows,
+          ),
+        });
+        validateRows();
+        for (const prior of prepared)
+          if (!prior.write.current()) throw new Fault("snapshot", [prior.entry.key]);
+      }
+      const publications = prepared.map((row) => {
+        const runtime = row.runtime;
+        const issue = prepareAdoptionIssue(runtime, row.entry.generation);
+        const revision = nextValueRevision(row.initialRevision);
+        return { ...row, issue, revision };
+      });
+      for (const row of publications) {
+        const runtime = row.runtime;
+        if (row.previous === undefined) state.stores.set(row.entry.key, runtime);
+        row.configuration?.publish();
+        row.issue.publish();
+        if (runtime.incarnation === undefined) runtime.incarnation = {};
+        runtime.valueRevision = row.revision;
+        runtime.lastLandingAt = now - row.entry.age;
+        runtime.failing = false;
+        runtime.invalidated = false;
+        runtime.baseAvailable = true;
+        runtime.hasAcceptedLanding = true;
+        runtime.transferEligible = true;
+        runtime.transitioning = false;
+        runtime.dropped = false;
+      }
+      for (const row of publications) {
+        row.write.publish();
+        row.runtime.errorCell.set(undefined);
+        row.runtime.presence.set(true);
+      }
+      for (const row of publications) row.issue.notify();
+      for (const row of publications) {
+        touch(row.runtime);
+        writeAllStatuses(row.runtime);
+        armStoreTimer(row.runtime);
+      }
+    });
+  } finally {
+    for (const runtime of detached) {
+      if (state.stores.get(String(runtime.key)) === runtime) continue;
+      try {
+        cleanupDetachedPassiveStore(runtime);
+      } catch (error) {
+        reportContinuationError(state, error);
+      }
+    }
+  }
 }
 
 function graphAcquisition<T>(state: GraphRuntimeState<any>, action: () => T): T {
@@ -4001,7 +4086,7 @@ export const __internal = Object.freeze({
   reportContinuationError: reportGraphContinuationError,
   realmStores,
   realmNamespace,
-  adoptRealmEntry,
+  adoptRealmEntries,
   realmBinding,
   prepareRealmAdoption,
   prepareNativePassiveTransferClaim,

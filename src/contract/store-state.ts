@@ -53,6 +53,37 @@ export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation)
   return generation;
 }
 
+/** Prepare a V1 adoption authority change and its real progress interruption. */
+export function prepareAdoptionIssue<T>(
+  runtime: StoreRuntime<T>,
+  minimum: number,
+): {
+  publish(): void;
+  notify(): void;
+} {
+  const generation = nextGeneration(runtime.generation, minimum);
+  const owner = runtime.queryProgressAuthority;
+  const active = owner?.current.status === "active" ? owner.request : undefined;
+  const request = active ?? runtime.activeRequest;
+  const interrupt =
+    request !== undefined &&
+    !request.superseded &&
+    request.generation === runtime.generation &&
+    owner?.current.execution === request.progressIdentity &&
+    owner.current.status === "active"
+      ? request
+      : undefined;
+  return {
+    publish: () => {
+      noteTransferChange(runtime);
+      runtime.generation = generation;
+    },
+    notify: () => {
+      if (interrupt !== undefined) runtime.queryProgressAuthorityChange?.(interrupt);
+    },
+  };
+}
+
 export function recordLanding<T>(
   runtime: StoreRuntime<T>,
   value: T,

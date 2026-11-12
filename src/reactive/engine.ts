@@ -871,34 +871,38 @@ function writeState<T>(
     return false;
   }
   commit();
+  publishState(node, value, equal);
+  return true;
+}
+
+function publishState<T>(node: SignalNode<T>, value: T, equal: boolean): void {
   node.writeEpoch += 1;
   node.captureEpoch += 1;
   if (equal) {
     flushLinkedEvaluationSeeds();
-    return true;
+    return;
   }
   node.semanticEpoch += 1;
   if (helperNotificationDepth > 0) {
     node.value = value;
     node.token += 1;
     propagation.pendingSeeds.add(node as Node<unknown>);
-    return true;
+    return;
   }
   if (subscriptionDeliveryDepth > 0) {
     node.value = value;
     node.token += 1;
     if (propagation.batchDepth > 0) propagation.batchSeeds.add(node as Node<unknown>);
     else propagation.pendingSeeds.add(node as Node<unknown>);
-    return true;
+    return;
   }
   node.value = value;
   node.token += 1;
   if (propagation.batchDepth > 0) {
     propagation.batchSeeds.add(node as Node<unknown>);
-    return true;
+    return;
   }
   beginPropagation([node as Node<unknown>]);
-  return true;
 }
 
 function removeWatchRecord(node: Node<unknown>, record: WatchRecord): void {
@@ -2262,6 +2266,37 @@ export const __internal = Object.freeze({
     const node = nodeFor(source);
     if (node.kind !== "signal") throw new TypeError("Expected a Signal.State");
     return writeState(node, value, current, commit);
+  },
+  /** Prepare V1 adoption writes without publishing or repeating authored equality. */
+  prepareAdoptionWrites: <T>(
+    source: WritableSignal<T>,
+    writes: readonly {
+      readonly value: T;
+      readonly equals?: (previous: T, proposed: T) => boolean;
+    }[],
+    check: () => void,
+  ): { current(): boolean; publish(): void } => {
+    const node = nodeFor(source);
+    if (node.kind !== "signal") throw new TypeError("Expected a Signal.State");
+    ensureWritesAllowed(node);
+    if (canonicalNotificationDepth > 0 || observerNotificationDepth > 0)
+      throw watcherWriteFault(node);
+    const epoch = node.writeEpoch;
+    let value = node.value;
+    const prepared = writes.map((write) => {
+      const equal = invokeStateEquals(node, value, write.value, write.equals);
+      check();
+      if (!equal) value = write.value;
+      return { value: write.value, equal };
+    });
+    let published = false;
+    return {
+      current: () => !published && node.writeEpoch === epoch,
+      publish: () => {
+        published = true;
+        for (const write of prepared) publishState(node, write.value, write.equal);
+      },
+    };
   },
   /** Reject forbidden managed writes before their non-signal bookkeeping changes. */
   assertWritesAllowed: (readable: Readable<unknown>): void => {

@@ -903,18 +903,8 @@ export function adopt(
   check();
   for (const entry of pending) entry.target.validate(entry.generation);
   check();
-  reactiveInternal.batch(() => {
-    for (const entry of pending) {
-      graphInternal.adoptRealmEntry(
-        graph,
-        entry.key,
-        entry.value,
-        entry.generation,
-        now - entry.age,
-      );
-      adopted.push(entry.storeKey);
-    }
-  });
+  graphInternal.adoptRealmEntries(graph, pending, now);
+  for (const entry of pending) adopted.push(entry.storeKey);
   return Object.freeze({ adopted: Object.freeze(adopted), skipped: Object.freeze(skipped) });
 }
 
