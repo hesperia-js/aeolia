@@ -13,7 +13,6 @@ import {
   observePhysicalWork,
   observeUnreturnedPromise,
   retainResetCleanup,
-  physicalCleanup,
 } from "./retirement.ts";
 import type { ResetCleanupScope } from "./retirement.ts";
 import { noteTransferChange, registerTransferWork } from "./query-policy.ts";
@@ -55,12 +54,11 @@ function detachRequest<C extends Contract>(
   request.superseded = true;
   request.settled = true;
   interruptQueryProgress(runtime, request, reason, { authorityChanged: true });
-  const owner = runtime.binding?.context.retirement ?? state.retirement;
   const failures: unknown[] = [];
   for (const remove of [request.removeCallerAbort, request.removeRequestAbort]) {
     if (remove === undefined) continue;
     try {
-      physicalCleanup(owner, remove);
+      remove();
     } catch (cause) {
       failures.push(cause);
     }
