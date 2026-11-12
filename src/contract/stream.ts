@@ -149,10 +149,18 @@ export async function consumeStream<T>(
         endStream(runtime, session, "closed", reason, { abortReason: reason });
         return;
       }
+      const done = result.done;
+      if (!isCurrentSession(runtime, session)) return;
+      let positionedLatest: T | undefined;
+      if (!done && positioned !== undefined) {
+        positionedLatest = result.value;
+        if (!isCurrentSession(runtime, session)) return;
+      }
+      if (!done) nextGeneration(runtime.generation);
       noteTransferChange(runtime);
       noteTransferChange(session);
       if (positioned !== undefined) noteTransferChange(positioned);
-      if (result.done) {
+      if (done) {
         if (positioned !== undefined) {
           positioned.pendingPosition = undefined;
           positioned.hasPendingPosition = false;
@@ -172,7 +180,7 @@ export async function consumeStream<T>(
           identity: Object.freeze({}),
           ordinal: positioned.nextOrdinal++,
           position: hasPosition ? position : undefined,
-          latest: result.value,
+          latest: positionedLatest as T,
         };
         positioned.dispatch = event;
         positioned.diverged = !hasPosition;

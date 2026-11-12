@@ -862,34 +862,47 @@ export function adopt(
     ValidatedSnapshotEntry & {
       readonly key: string;
       readonly storeKey: StoreKey;
+      readonly target: ReturnType<typeof graphInternal.prepareRealmAdoption>;
     }
   > = [];
   const now = Date.now();
+  const check = (): void => {
+    if (!preparationCurrent()) throw snapshotFault([]);
+  };
 
   for (const key of Object.keys(entries)) {
     let storeKeyValue: StoreKey | undefined;
     try {
+      check();
       storeKeyValue = key.length === 0 ? undefined : (key as StoreKey);
       if (storeKeyValue === undefined) throw new DecodeFailure("empty store key");
+      const target = graphInternal.prepareRealmAdoption(graph, key);
       const entry = ownSnapshotEntry(entries[key]);
       const decoded = decodeValue(
         entry.value,
         "",
         new Map<string, unknown>(),
         new WeakSet<object>(),
+        check,
       );
+      check();
       pending.push({
         key,
         storeKey: storeKeyValue,
+        target,
         value: decoded,
         generation: entry.generation,
         age: entry.age,
       });
     } catch {
+      check();
       if (storeKeyValue != null) skipped.push(storeKeyValue);
     }
   }
 
+  check();
+  for (const entry of pending) entry.target.validate(entry.generation);
+  check();
   reactiveInternal.batch(() => {
     for (const entry of pending) {
       graphInternal.adoptRealmEntry(

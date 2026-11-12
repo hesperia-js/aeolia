@@ -49,8 +49,12 @@ it.each([false, true])(
       ).toThrow(RangeError);
 
       expect(callbacks).toBe(reenter ? 1 : 0);
-      if (reenter) expect(store.value.get()).toBe(101);
-      else expect(peekStore(store)).toEqual(before);
+      if (reenter) {
+        expect(store.value.get()).toBe(101);
+      } else {
+        expect(peekStore(store)).toEqual(before);
+        expect(store.value.get()).toBe(4);
+      }
       expect(Number(snapshot(target, { version: 2 }).entries[0]?.generation)).toBe(
         Number.MAX_SAFE_INTEGER,
       );

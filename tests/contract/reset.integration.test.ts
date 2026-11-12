@@ -104,6 +104,46 @@ it("preflights every reset generation before changing an earlier store or the gr
   }
 });
 
+it("preflights reset and its selected query refresh before clearing readable state", () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "reset-generation",
+    key: (_input: void) => "value",
+    fetch: backend.respond<void, number>("reset-generation"),
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "reset-generation-refresh", operations: { query } }),
+  });
+  const store = graph.api.query(undefined, { initial: 7 });
+  const stop = subscribe(store.available, () => undefined);
+  try {
+    expect(backend.calls).toHaveLength(0);
+    const encoded = snapshot(graph, { version: 2 });
+    adopt(
+      graph,
+      {
+        ...encoded,
+        entries: encoded.entries.map((row) => ({
+          ...row,
+          generation: Number.MAX_SAFE_INTEGER - 2,
+        })),
+      } as unknown as typeof encoded,
+      {},
+    );
+    const before = peekStore(store);
+    const epoch = graph.resetVersion.get();
+
+    expect(() => graph.reset()).toThrow(RangeError);
+    expect(backend.calls).toHaveLength(0);
+    expect(graph.resetVersion.get()).toBe(epoch);
+    expect(peekStore(store)).toEqual(before);
+    expect(store.value.get()).toBe(7);
+  } finally {
+    stop();
+    graph.dispose();
+  }
+});
+
 async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
@@ -116,7 +156,7 @@ async function nextTurn(): Promise<void> {
 }
 
 describe("Graph.reset", () => {
-  it("resets a raw store after adopting the maximum safe generation", async () => {
+  it("preserves a raw store when reset cannot issue a safe generation", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "reset-generation", operations: {} }),
     });
@@ -125,15 +165,49 @@ describe("Graph.reset", () => {
         version: 1,
         namespace: "reset-generation",
         encoding: "aeolia-tagged/1",
-        entries: { value: { value: 7, generation: Number.MAX_SAFE_INTEGER, age: 0 } },
+        entries: { value: { value: 7, generation: Number.MAX_SAFE_INTEGER - 1, age: 0 } },
       } as never);
       expect(report.adopted.map(String)).toEqual(["value"]);
       const store = graph.at("value");
       expect(store.value.get()).toBe(7);
 
-      await expect(graph.reset()).resolves.toBeUndefined();
-      expect(graph.resetVersion.get()).toBe(1);
-      expect(store.value.get()).toBeUndefined();
+      const generation = Number(snapshot(graph, { version: 1 }).entries.value?.generation);
+      expect(generation).toBe(Number.MAX_SAFE_INTEGER);
+      expect(() => graph.reset()).toThrow(RangeError);
+      expect(graph.resetVersion.get()).toBe(0);
+      expect(store.value.get()).toBe(7);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("preflights every valid V1 entry before adopting an earlier raw store", () => {
+    const left = createStore({ name: "left", initial: 10, snapshot: true });
+    const right = createStore({ name: "right", initial: 20, snapshot: true });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "v1-generation", operations: { left, right } }),
+    });
+    try {
+      const first = graph.api.left();
+      const second = graph.api.right();
+      const before = [peekStore(first), peekStore(second)];
+      const epoch = graph.resetVersion.get();
+
+      expect(() =>
+        adopt(graph, {
+          version: 1,
+          namespace: "v1-generation",
+          encoding: "aeolia-tagged/1",
+          entries: {
+            left: { value: 1, generation: 10, age: 0 },
+            right: { value: 2, generation: Number.MAX_SAFE_INTEGER, age: 0 },
+          },
+        } as never),
+      ).toThrow(RangeError);
+
+      expect([peekStore(first), peekStore(second)]).toEqual(before);
+      expect([first.value.get(), second.value.get()]).toEqual([10, 20]);
+      expect(graph.resetVersion.get()).toBe(epoch);
     } finally {
       graph.dispose();
     }

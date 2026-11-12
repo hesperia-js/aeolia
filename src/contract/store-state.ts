@@ -39,10 +39,7 @@ export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation)
   const owner = runtime.queryProgressAuthority;
   const activeProgressRequest = owner?.current.status === "active" ? owner.request : undefined;
   const request = activeProgressRequest ?? runtime.activeRequest;
-  const generation =
-    runtime.binding === undefined
-      ? ((Math.max(runtime.generation, minimum) + 1) as Generation)
-      : nextGeneration(runtime.generation, minimum);
+  const generation = nextGeneration(runtime.generation, minimum);
   noteTransferChange(runtime);
   runtime.generation = generation;
   if (

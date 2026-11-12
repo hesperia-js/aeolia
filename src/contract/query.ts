@@ -268,7 +268,7 @@ export function makeQueryStore<T, P = never>(
         )
           throw new TypeError("Invalid query revalidation options.");
         assertStoreOpen(runtime);
-        if (binding !== undefined) nextGeneration(runtime.generation);
+        nextGeneration(runtime.generation);
         addCaller(runtime, caller);
         const abortSignal = revalidateOptions?.abortSignal ?? caller.abortSignal;
         assertStoreOpen(runtime);

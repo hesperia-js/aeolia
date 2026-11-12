@@ -42,7 +42,7 @@ function graphFor(
 }
 
 describe("QueryStore.ready", () => {
-  it("does not replay a raw query on reset for an available-only observer", async () => {
+  it("refreshes a raw query on reset for an available-only observer", async () => {
     const backend = testBackend();
     const graph = graphFor(backend);
     const store = graph.api.query("reset-available", { initial: 7 });
@@ -52,9 +52,11 @@ describe("QueryStore.ready", () => {
       expect(backend.calls).toHaveLength(0);
       reset = graph.reset();
       void reset.catch(() => undefined);
-      expect(backend.calls).toHaveLength(0);
+      expect(backend.calls).toHaveLength(1);
+      backend.resolve(backend.calls[0]!, 8);
       await expect(reset).resolves.toBeUndefined();
-      expect(store.available.get()).toBe(false);
+      expect(store.available.get()).toBe(true);
+      expect(store.value.get()).toBe(8);
     } finally {
       stop();
       graph.dispose();

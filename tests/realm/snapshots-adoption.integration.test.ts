@@ -315,6 +315,131 @@ describe("realm snapshots and adoption", () => {
     graph.dispose();
   });
 
+  it("refuses V1 adoption atomically if equality reentry exhausts a later Store", () => {
+    let inOuter = false;
+    let comparatorCalls = 0;
+    let childAttempted = false;
+    let childOutcome:
+      | { readonly kind: "not-called" }
+      | { readonly kind: "returned" }
+      | { readonly kind: "threw"; readonly error: unknown } = { kind: "not-called" };
+    let writeLater = (_value: number): void => {
+      throw new Error("The later Store has not been created");
+    };
+    const first = createStore({
+      name: "first",
+      initial: 1,
+      snapshot: true,
+      equals: (previous, proposed) => {
+        if (inOuter) comparatorCalls += 1;
+        if (inOuter && !childAttempted) {
+          childAttempted = true;
+          try {
+            writeLater(99);
+            childOutcome = { kind: "returned" };
+          } catch (error) {
+            childOutcome = { kind: "threw", error };
+          }
+        }
+        return Object.is(previous, proposed);
+      },
+    });
+    const later = createStore({ name: "later", initial: 2, snapshot: true });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "realm-tests", operations: { first, later } }),
+    });
+    try {
+      const firstStore = graph.api.first();
+      const laterStore = graph.api.later();
+      writeLater = (value) => laterStore.set(value);
+      adopt(graph, {
+        version: 1,
+        namespace: "realm-tests",
+        encoding: "aeolia-tagged/1",
+        entries: {
+          later: { value: 2, generation: Number.MAX_SAFE_INTEGER - 2, age: 0 },
+        },
+      } as never);
+      const before = snapshot(graph, { version: 1 });
+      expect(before.entries.first?.value).toBe(1);
+      expect(Number(before.entries.later?.generation)).toBe(Number.MAX_SAFE_INTEGER - 1);
+      expect(before.entries.later?.value).toBe(2);
+
+      let outerOutcome:
+        | { readonly kind: "not-started" }
+        | { readonly kind: "returned"; readonly adopted: readonly string[] }
+        | { readonly kind: "threw"; readonly error: unknown } = { kind: "not-started" };
+      try {
+        inOuter = true;
+        const report = adopt(graph, {
+          version: 1,
+          namespace: "realm-tests",
+          encoding: "aeolia-tagged/1",
+          entries: {
+            first: { value: 3, generation: 10, age: 0 },
+            later: { value: 4, generation: 0, age: 0 },
+          },
+        } as never);
+        outerOutcome = { kind: "returned", adopted: report.adopted.map(String) };
+      } catch (error) {
+        outerOutcome = { kind: "threw", error };
+      } finally {
+        inOuter = false;
+      }
+
+      const outerComparatorCalls = comparatorCalls;
+      const outerChildOutcome = childOutcome;
+      const after = snapshot(graph, { version: 1 });
+      const observed = {
+        outer: outerOutcome,
+        comparatorCalls: outerComparatorCalls,
+        child: outerChildOutcome,
+        before: {
+          first: {
+            value: before.entries.first?.value,
+            generation: Number(before.entries.first?.generation),
+          },
+          later: {
+            value: before.entries.later?.value,
+            generation: Number(before.entries.later?.generation),
+          },
+        },
+        after: {
+          first: {
+            value: firstStore.value.get(),
+            snapshotValue: after.entries.first?.value,
+            generation: Number(after.entries.first?.generation),
+          },
+          later: {
+            value: laterStore.value.get(),
+            snapshotValue: after.entries.later?.value,
+            generation: Number(after.entries.later?.generation),
+          },
+        },
+      };
+      expect(observed).toEqual({
+        outer: { kind: "threw", error: expect.any(RangeError) },
+        comparatorCalls: expect.any(Number),
+        child: { kind: "returned" },
+        before: {
+          first: { value: 1, generation: 0 },
+          later: { value: 2, generation: Number.MAX_SAFE_INTEGER - 1 },
+        },
+        after: {
+          first: { value: 1, snapshotValue: 1, generation: 0 },
+          later: {
+            value: 99,
+            snapshotValue: 99,
+            generation: Number.MAX_SAFE_INTEGER,
+          },
+        },
+      });
+      expect(outerComparatorCalls).toBeGreaterThan(0);
+    } finally {
+      graph.dispose();
+    }
+  });
+
   it("adopts all entries in one internal pass and omits predictions", async () => {
     const backend = testBackend();
     const query = createQuery({

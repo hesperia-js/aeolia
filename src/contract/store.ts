@@ -130,6 +130,7 @@ export function directWrite<T>(
 ): void {
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
+  nextGeneration(runtime.generation);
   if (runtime.stream?.positioned !== undefined) {
     noteTransferChange(runtime);
     runtime.stream.positioned.diverged = true;
@@ -252,9 +253,9 @@ export function makeStore<T>(
     update(next: (current: T | undefined) => T): void {
       assertStoreOpen(runtime);
       reactiveInternal.assertWritesAllowed(runtime.committed);
-      noteTransferChange(runtime);
       nextValueRevision(runtime.valueRevision);
-      if (runtime.binding !== undefined) nextGeneration(runtime.generation);
+      nextGeneration(runtime.generation);
+      noteTransferChange(runtime);
       interact(state);
       const addressWrite = beginStoreAddress(runtime);
       try {

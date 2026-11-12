@@ -234,21 +234,16 @@ export function startQueryRequest<T>(
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
   const state = runtime.graph.__runtime;
+  const entryIncarnation =
+    runtime.binding === undefined ? undefined : (expectedIncarnation ?? runtime.incarnation);
+  if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation) return undefined;
+  if ((force || isCurrentRequest(runtime) === undefined) && (force || !runtime.recoveryDisarmed))
+    nextGeneration(runtime.generation);
   const owner = runtime.binding?.context.retirement ?? state.retirement;
   const acquisition = beginPhysicalWork(owner, "acquisition");
   let admission: object | undefined;
   try {
     const resetEpoch = state.resetEpoch;
-    const entryIncarnation =
-      runtime.binding === undefined ? undefined : (expectedIncarnation ?? runtime.incarnation);
-    if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation)
-      return undefined;
-    if (
-      runtime.binding !== undefined &&
-      (force || isCurrentRequest(runtime) === undefined) &&
-      (force || !runtime.recoveryDisarmed)
-    )
-      nextGeneration(runtime.generation);
     admission = beginBindingAddress(runtime.binding, String(runtime.key));
     // Effects supply their ticket before interaction can collect or replace the entry.
     interact(state);
@@ -288,7 +283,7 @@ export function startQueryRequest<T>(
           return undefined;
       }
     }
-    if (runtime.binding !== undefined) nextGeneration(runtime.generation);
+    nextGeneration(runtime.generation);
     if (runtime.timer != null) {
       clearTimeout(runtime.timer);
       runtime.timer = undefined;

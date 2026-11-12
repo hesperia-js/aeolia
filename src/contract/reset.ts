@@ -22,6 +22,7 @@ import type {
   GraphRuntimeState,
   QueryCaller,
   QueryRequest,
+  QuerySource,
   StreamSource,
   StoreRuntime,
 } from "./runtime.ts";
@@ -270,6 +271,41 @@ export function drainResetCleanups<C extends Contract>(state: GraphRuntimeState<
 export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Promise<void> {
   assertGraphOpen(state);
   reactiveInternal.assertWritesAllowed(state.resetVersion);
+  const queryCandidates: Array<{
+    readonly runtime: StoreRuntime<unknown>;
+    readonly source: QuerySource<unknown>;
+  }> = [];
+  const streams: ActiveStream<unknown>[] = [];
+  for (const runtime of state.stores.values()) {
+    if (runtime.disposed) continue;
+    const positioned = runtime.readerScope?.session.positioned;
+    const positionedReaderLive = positioned !== undefined && positioned.phase !== "closed";
+    const hasResetLiveness =
+      runtime.liveReadableCount > runtime.metadataReadableCount ||
+      runtime.progressReadableCount > 0 ||
+      runtime.readyWaiterCount > 0 ||
+      (runtime.stream?.listeners.size ?? 0) > 0;
+    if (
+      (hasResetLiveness || positionedReaderLive || runtime.metadataReadableCount > 0) &&
+      runtime.source !== undefined
+    )
+      queryCandidates.push({ runtime, source: runtime.source });
+    if (
+      (hasResetLiveness || positionedReaderLive) &&
+      runtime.readerScope === undefined &&
+      runtime.binding?.kind !== "stream" &&
+      runtime.streamSource !== undefined
+    )
+      streams.push({ runtime, source: runtime.streamSource, key: runtime.key });
+  }
+  const refreshes = new Set(queryCandidates.map(({ runtime }) => runtime));
+  for (const runtime of state.stores.values()) {
+    if (!runtime.disposed) {
+      const generation = nextGeneration(runtime.generation);
+      if (refreshes.has(runtime)) nextGeneration(generation);
+    }
+    nextValueRevision(runtime.valueRevision);
+  }
   const physical = beginPhysicalWork(state.retirement, "acquisition");
   registerTransferWork(state, physical);
   const scope: ResetCleanupScope = { pending: new Set(), active: true };
@@ -286,52 +322,25 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
     }
   };
   try {
+    const queries = queryCandidates.map(({ runtime, source }) => ({
+      runtime,
+      caller: callerForSource(runtime, source),
+    }));
     const generations = new Map(
       [...state.stores.values()]
         .filter((runtime) => !runtime.disposed)
-        .map(
-          (runtime) =>
-            [
-              runtime,
-              runtime.binding === undefined
-                ? runtime.generation + 1
-                : nextGeneration(runtime.generation),
-            ] as const,
-        ),
+        .map((runtime) => {
+          const generation = nextGeneration(runtime.generation);
+          if (refreshes.has(runtime)) nextGeneration(generation);
+          return [runtime, generation] as const;
+        }),
     );
     const revisions = new Map(
       [...state.stores.values()].map(
         (runtime) => [runtime, nextValueRevision(runtime.valueRevision)] as const,
       ),
     );
-    const queries: ActiveQuery<unknown>[] = [];
-    const streams: ActiveStream<unknown>[] = [];
-    for (const runtime of state.stores.values()) {
-      const positioned = runtime.readerScope?.session.positioned;
-      const positionedReaderLive = positioned !== undefined && positioned.phase !== "closed";
-      const hasResetLiveness =
-        runtime.liveReadableCount > runtime.metadataReadableCount ||
-        runtime.progressReadableCount > 0 ||
-        runtime.readyWaiterCount > 0 ||
-        (runtime.stream?.listeners.size ?? 0) > 0;
-      if (
-        (hasResetLiveness || positionedReaderLive || runtime.metadataReadableCount > 0) &&
-        runtime.source !== undefined
-      )
-        queries.push({
-          runtime,
-          caller: callerForSource(runtime, runtime.source),
-        });
-      if (
-        (hasResetLiveness || positionedReaderLive) &&
-        runtime.readerScope === undefined &&
-        runtime.binding?.kind !== "stream" &&
-        runtime.streamSource !== undefined
-      )
-        streams.push({ runtime, source: runtime.streamSource, key: runtime.key });
-    }
     const projections = [...state.projections];
-
     noteTransferChange(state);
     noteTransferChange(state.graph);
     for (const context of state.bindingContexts) {

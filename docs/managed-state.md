@@ -595,13 +595,17 @@ must prove that boundary. Imported values remain subject to normal collection.
 Adoption and address inspection do not pin them. If collection happens before
 the first claim, the session cannot reclaim the value.
 
-Native generations use safe integers. When the next generation cannot be
-represented, a new request, authoritative write, or bound stream session refuses with
-`RangeError` before issuing that authority. A reset checks every entry's clearing
-generation before changing the graph epoch. Stored values remain readable;
-Aeolia does not wrap, clamp, or renumber exhausted counters, and it supplies no
-automatic recovery from exhaustion. Incoming value revisions remain provenance,
-not a cross-graph clock.
+Native generations use safe integers. Requests and authoritative writes check
+that they can issue their generation before changing readable state or
+dispatching work. Snapshot adoption checks every validated row's generation
+before its commit batch; a safe-limit refusal at that preflight leaves readable
+entries unchanged. An authored equality callback can reenter during commit, and
+completed writes from that callback keep their own authority. Reset preflights
+every store's clearing generation and any selected query refresh before changing
+the graph epoch. If reset refuses at that preflight, it does not clear values,
+advance `graph.resetVersion`, or start refreshes. Aeolia does not wrap, clamp, or
+renumber exhausted counters, and it supplies no automatic recovery from
+exhaustion. Incoming value revisions remain provenance, not a cross-graph clock.
 
 ## Required cached-state transfer
 
