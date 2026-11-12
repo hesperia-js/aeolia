@@ -740,6 +740,112 @@ it("caches graph retirement before abort callouts and joins the original query",
   }
 });
 
+it("joins retirement after disposal without replaying reports from held readables", async () => {
+  let resolveFetch!: (value: number) => void;
+  let fetchCalls = 0;
+  const original = new Promise<number>((resolve) => {
+    resolveFetch = resolve;
+  });
+  const query = createQuery({
+    name: "retirement.disposal-report",
+    key: () => "retirement/disposal-report",
+    fetch: () => {
+      fetchCalls += 1;
+      return original;
+    },
+  });
+  const reported: unknown[] = [];
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-disposal-report", operations: { query } }),
+    onUnobservedFault: (fault) => reported.push(fault),
+  });
+  const store = graph.api.query(undefined, { initial: 1 });
+  const valueValues: Array<number | undefined> = [];
+  const availableValues: boolean[] = [];
+  const value = store.value;
+  const available = store.available;
+  const stopValue = subscribe(value, (next) => valueValues.push(next));
+  const stopAvailable = subscribe(available, (next) => availableValues.push(next));
+  void store.ready.catch(() => undefined);
+  let retirement: Promise<void> | undefined;
+  let resolved = false;
+
+  try {
+    expect(fetchCalls).toBe(1);
+    expect(valueValues).toStrictEqual([1]);
+    expect(availableValues).toStrictEqual([true]);
+
+    graph.dispose();
+    expect(valueValues).toStrictEqual([1]);
+    expect(availableValues).toStrictEqual([true]);
+
+    const reportsAtClose = Object.freeze([...reported]);
+    expect(reportsAtClose.length).toBeGreaterThan(0);
+    const disposedFaults: Fault[] = [];
+    const collectDisposedFaults = (cause: unknown): void => {
+      if (cause instanceof Fault) {
+        expect(cause.kind).toBe("disposed");
+        expect(cause.involved).toStrictEqual(["retirement/disposal-report"]);
+        disposedFaults.push(cause);
+        return;
+      }
+      expect(cause).toBeInstanceOf(AggregateError);
+      const failures = (cause as AggregateError).errors;
+      expect(Array.isArray(failures)).toBe(true);
+      expect(failures.length).toBeGreaterThan(0);
+      for (let index = 0; index < failures.length; index += 1) {
+        expect(Object.prototype.hasOwnProperty.call(failures, index)).toBe(true);
+        collectDisposedFaults(failures[index]);
+      }
+    };
+    for (const report of reportsAtClose) collectDisposedFaults(report);
+    expect(disposedFaults.length).toBeGreaterThan(0);
+
+    await expectPending(original);
+    retirement = graph.retire();
+    for (let index = 0; index < reportsAtClose.length; index += 1)
+      expect(reported[index]).toBe(reportsAtClose[index]);
+    expect(reported).toHaveLength(reportsAtClose.length);
+    await expectPending(retirement);
+    for (let index = 0; index < reportsAtClose.length; index += 1)
+      expect(reported[index]).toBe(reportsAtClose[index]);
+    expect(reported).toHaveLength(reportsAtClose.length);
+
+    expect(() => value.get()).toThrow("disposed");
+    expect(() => available.get()).toThrow("disposed");
+
+    resolveFetch(2);
+    resolved = true;
+    let retirementFailure: unknown;
+    try {
+      await retirement;
+    } catch (cause) {
+      retirementFailure = cause;
+    }
+    await flush();
+    for (let index = 0; index < reportsAtClose.length; index += 1)
+      expect(reported[index]).toBe(reportsAtClose[index]);
+    expect(reported).toHaveLength(reportsAtClose.length);
+    if (reportsAtClose.length === 1) {
+      expect(retirementFailure).toBe(reportsAtClose[0]);
+    } else {
+      expect(retirementFailure).toBeInstanceOf(AggregateError);
+      const failures = (retirementFailure as AggregateError).errors;
+      expect(failures).toHaveLength(reportsAtClose.length);
+      for (let index = 0; index < reportsAtClose.length; index += 1)
+        expect(failures[index]).toBe(reportsAtClose[index]);
+    }
+    expect(valueValues).toStrictEqual([1]);
+    expect(availableValues).toStrictEqual([true]);
+  } finally {
+    stopValue();
+    stopAvailable();
+    if (!resolved) resolveFetch(2);
+    if (retirement !== undefined) await retirement.catch(() => undefined);
+    graph.dispose();
+  }
+});
+
 it("joins the original stream read and its iterator return after graph retirement", async () => {
   let resolveRead!: (result: IteratorResult<number>) => void;
   let resolveReturn!: (result: IteratorResult<number>) => void;

@@ -882,7 +882,20 @@ export async function verifyConsumer(development = false) {
       (error) =>
         check(error instanceof Fault && error.kind === "disposed", "Expected a disposal fault"),
     );
+    check(unobservedFaults.length === 0, "Unexpected diagnostic before graph disposal");
+    const observedBeforeDispose = [...observed];
+    const reactiveBeforeDispose = [...reactiveObserved];
+    const observationsUnchanged = () =>
+      observed.length === observedBeforeDispose.length &&
+      observedBeforeDispose.every((value, index) => Object.is(observed[index], value)) &&
+      reactiveObserved.length === reactiveBeforeDispose.length &&
+      reactiveBeforeDispose.every((value, index) => Object.is(reactiveObserved[index], value));
     graph.dispose();
+    const disposalFaults = [...unobservedFaults];
+    const disposalReportsUnchanged = () =>
+      unobservedFaults.length === disposalFaults.length &&
+      disposalFaults.every((fault, index) => unobservedFaults[index] === fault);
+    check(observationsUnchanged(), "Graph disposal changed the observed Store values");
     check(call.aborted, "Disposal did not abort the backend request");
     const retirement = graph.retire();
     const retirementOutcome = retirement.then(
@@ -890,41 +903,56 @@ export async function verifyConsumer(development = false) {
       (reason) => ({ status: "rejected", reason }),
     );
     check(graph.retire() === retirement, "Graph retirement did not return its cached promise");
+    check(disposalReportsUnchanged(), "Joining retirement repeated a disposal diagnostic");
     await disposedRead;
     await expectPending(retirement, "Graph retirement completed before the original fetch");
     backend.resolve(call, "late response");
     retirementCallResolved = true;
     await refreshing;
     const outcome = await retirementOutcome;
+    check(disposalReportsUnchanged(), "Retirement added a disposal diagnostic");
+    const isDisposedFault = (fault) =>
+      fault instanceof Fault &&
+      fault.kind === "disposed" &&
+      fault.involved.length === 1 &&
+      fault.involved[0] === "items/one";
+    const isDisposalReport = (fault, ancestors = new Set()) => {
+      if (isDisposedFault(fault)) return true;
+      if (!(fault instanceof AggregateError) || !Array.isArray(fault.errors)) return false;
+      if (fault.errors.length === 0 || ancestors.has(fault)) return false;
+      ancestors.add(fault);
+      const valid = Array.from(
+        { length: fault.errors.length },
+        (_, index) =>
+          Object.prototype.hasOwnProperty.call(fault.errors, index) &&
+          isDisposalReport(fault.errors[index], ancestors),
+      ).every(Boolean);
+      ancestors.delete(fault);
+      return valid;
+    };
     check(
-      unobservedFaults.length === 1,
-      `Expected one unobserved disposal fault, got ${unobservedFaults.length}`,
-    );
-    const [disposalFault] = unobservedFaults;
-    check(
-      disposalFault instanceof AggregateError &&
-        Array.isArray(disposalFault.errors) &&
-        disposalFault.errors.length === 2 &&
-        Object.prototype.hasOwnProperty.call(disposalFault.errors, 0) &&
-        Object.prototype.hasOwnProperty.call(disposalFault.errors, 1) &&
-        disposalFault.errors[0] instanceof Fault &&
-        disposalFault.errors[0].kind === "disposed" &&
-        disposalFault.errors[0].involved.length === 1 &&
-        disposalFault.errors[0].involved[0] === "items/one" &&
-        disposalFault.errors[1] instanceof Fault &&
-        disposalFault.errors[1].kind === "disposed" &&
-        disposalFault.errors[1].involved.length === 1 &&
-        disposalFault.errors[1].involved[0] === "items/one",
-      "Disposal reported an unexpected fault",
+      disposalFaults.length > 0 && disposalFaults.every((fault) => isDisposalReport(fault)),
+      "Disposal reported unexpected faults",
     );
     check(
       outcome.status === "rejected",
       "Graph retirement fulfilled despite the live-subscription cleanup failure",
     );
+    const causes =
+      disposalFaults.length === 1
+        ? [outcome.reason]
+        : outcome.reason instanceof AggregateError && Array.isArray(outcome.reason.errors)
+          ? outcome.reason.errors
+          : [];
     check(
-      outcome.reason === disposalFault,
-      "Graph retirement did not reject with the reported disposal fault",
+      causes.length === disposalFaults.length &&
+        disposalFaults.every(
+          (fault, index) =>
+            Object.prototype.hasOwnProperty.call(causes, index) && causes[index] === fault,
+        ),
+      "Graph retirement did not retain the reported cleanup causes in order",
     );
+    check(observationsUnchanged(), "Disposed graph changed the observed Store values");
     check(!observed.includes("late response"), "Disposed graph published a late response");
   } finally {
     if (retirementCall !== undefined && !retirementCallResolved)

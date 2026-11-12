@@ -1324,7 +1324,6 @@ function disposeGraphContents<C extends Contract>(
             physicalCleanup(runtime.binding?.context.retirement ?? state.retirement, () =>
               reactiveInternal.batch(() => {
                 runtime.presence.set(false);
-                runtime.lifecycle.update((value) => value + 1);
               }),
             );
           } catch (error) {
