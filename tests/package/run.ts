@@ -13,10 +13,24 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { chromium } from "playwright";
 
 const root = resolve(import.meta.dir, "../..");
+const chromeExecutablePath = process.env.AEOLIA_CHROME_EXECUTABLE_PATH;
+if (chromeExecutablePath !== undefined) {
+  if (!chromeExecutablePath.trim() || !isAbsolute(chromeExecutablePath))
+    throw new Error("AEOLIA_CHROME_EXECUTABLE_PATH must be a nonempty absolute path");
+
+  let executable;
+  try {
+    executable = await stat(chromeExecutablePath);
+  } catch (cause) {
+    throw new Error("Cannot inspect AEOLIA_CHROME_EXECUTABLE_PATH", { cause });
+  }
+  if (!executable.isFile())
+    throw new Error("AEOLIA_CHROME_EXECUTABLE_PATH must name a regular file");
+}
 const archiveArguments = Bun.argv.slice(2);
 
 if (archiveArguments.length > 1 || archiveArguments[0]?.startsWith("-"))
@@ -533,7 +547,9 @@ try {
     },
   });
   try {
-    const browser = await chromium.launch();
+    const browser = await (chromeExecutablePath === undefined
+      ? chromium.launch()
+      : chromium.launch({ executablePath: chromeExecutablePath }));
     try {
       const runBrowserConsumer = async (path: string, development: boolean): Promise<void> => {
         const page = await browser.newPage();
