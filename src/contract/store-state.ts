@@ -2,18 +2,24 @@ import type {
   Generation,
   QueryDefinition,
   StoreDefinition,
-  StreamDefinition,
+  NativeStreamDefinition,
   ValueOptions,
 } from "./types.ts";
 import { Fault } from "../fault.ts";
 import { nextValueRevision } from "./identity.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
-import type { BoundStreamSessionRuntime, Prediction, StoreRuntime } from "./runtime.ts";
+import type {
+  BoundStreamSessionRuntime,
+  Prediction,
+  StoreRuntime,
+  StreamSession,
+} from "./runtime.ts";
 import { scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { writeAllStatuses } from "./status.ts";
 import { assertStoreOpen, graphFault } from "./faults.ts";
 
-import { beginBindingAddress, changeBoundAddress, endBindingAddress } from "./registry.ts";
+import { beginStoreAddress, changeBoundAddress, endStoreAddress } from "./registry.ts";
+import { noteTransferChange } from "./query-policy.ts";
 
 /** @internal Checks the exact next authority without changing native state. */
 export function nextGeneration(current: number, minimum = current): Generation {
@@ -37,6 +43,7 @@ export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation)
     runtime.binding === undefined
       ? ((Math.max(runtime.generation, minimum) + 1) as Generation)
       : nextGeneration(runtime.generation, minimum);
+  noteTransferChange(runtime);
   runtime.generation = generation;
   if (
     request !== undefined &&
@@ -54,10 +61,12 @@ export function recordLanding<T>(
   value: T,
   landingGeneration?: number,
   expectedSession?: BoundStreamSessionRuntime<T>,
+  expectedPositionedSession?: StreamSession<T>,
 ): void {
   assertStoreOpen(runtime);
   const revision = nextValueRevision(runtime.valueRevision);
-  if (runtime.binding === undefined) {
+  noteTransferChange(runtime);
+  if (runtime.binding === undefined && runtime.stream?.positioned === undefined) {
     const state = runtime.graph.__runtime;
     const epoch = state.resetEpoch;
     const generation = runtime.generation;
@@ -68,13 +77,19 @@ export function recordLanding<T>(
       state.resetEpoch === epoch &&
       runtime.generation === generation &&
       runtime.incarnation === incarnation &&
-      runtime.valueRevision === revision;
+      runtime.valueRevision === revision &&
+      (expectedPositionedSession === undefined ||
+        (runtime.stream === expectedPositionedSession &&
+          !expectedPositionedSession.ended &&
+          runtime.streamToken === expectedPositionedSession.token &&
+          expectedPositionedSession.resetEpoch === epoch));
     runtime.valueRevision = revision;
     runtime.lastLandingAt = Date.now();
     runtime.failing = false;
     runtime.invalidated = false;
     runtime.refreshOnActivation = false;
     runtime.dropped = false;
+    runtime.transferEligible = true;
     const errors: unknown[] = [];
     try {
       runtime.errorCell.set(undefined);
@@ -110,7 +125,7 @@ export function recordLanding<T>(
     if (errors.length > 1) throw new AggregateError(errors, "Store landing propagation failed");
     return;
   }
-  const addressWrite = beginBindingAddress(runtime.binding, String(runtime.key));
+  const addressWrite = beginStoreAddress(runtime);
   try {
     if (runtime.incarnation === undefined) runtime.incarnation = {};
     const incarnation = runtime.incarnation;
@@ -124,6 +139,7 @@ export function recordLanding<T>(
         () =>
           !runtime.disposed &&
           !runtime.graph.__runtime.disposed &&
+          runtime.binding?.context.disposed !== true &&
           runtime.incarnation === incarnation &&
           runtime.generation === generation &&
           runtime.valueRevision === previousRevision &&
@@ -132,7 +148,13 @@ export function recordLanding<T>(
             (expectedSession.phase === "active" &&
               !expectedSession.session.ended &&
               runtime.stream?.token === expectedSession.session.token &&
-              runtime.incarnation === expectedSession.incarnation)),
+              runtime.incarnation === expectedSession.incarnation &&
+              expectedSession.binding.context.disposed !== true)) &&
+          (expectedPositionedSession === undefined ||
+            (runtime.stream === expectedPositionedSession &&
+              !expectedPositionedSession.ended &&
+              runtime.streamToken === expectedPositionedSession.token &&
+              expectedPositionedSession.resetEpoch === epoch)),
         () => {
           runtime.valueRevision = revision;
           runtime.importedBaseline = undefined;
@@ -145,6 +167,24 @@ export function recordLanding<T>(
           runtime.invalidated = false;
           runtime.refreshOnActivation = false;
           runtime.dropped = false;
+          const positioned = runtime.stream?.positioned;
+          if (positioned !== undefined) {
+            positioned.baseRevision = revision;
+            if (
+              expectedPositionedSession !== undefined &&
+              expectedPositionedSession === runtime.stream &&
+              positioned.dispatch !== undefined
+            ) {
+              positioned.dispatch.landingRevision = revision;
+              positioned.diverged = !expectedPositionedSession.hasPosition;
+            } else if (
+              expectedPositionedSession === runtime.stream &&
+              positioned.phase === "dormant" &&
+              positioned.reader !== undefined
+            )
+              positioned.diverged = false;
+            else positioned.diverged = true;
+          }
           runtime.errorCell.set(undefined);
           runtime.presence.set(true);
         },
@@ -160,7 +200,7 @@ export function recordLanding<T>(
       writeAllStatuses(runtime, Date.now(), landingGeneration);
     });
   } finally {
-    endBindingAddress(runtime.binding, String(runtime.key), addressWrite);
+    endStoreAddress(runtime, addressWrite);
   }
 }
 
@@ -172,7 +212,8 @@ export function publishObservation<T>(
 ): boolean {
   const before = runtime.valueRevision;
   const next = nextValueRevision(before);
-  const addressWrite = beginBindingAddress(runtime.binding, String(runtime.key));
+  noteTransferChange(runtime);
+  const addressWrite = beginStoreAddress(runtime);
   try {
     let committed = false;
     reactiveInternal.batch(() => {
@@ -192,11 +233,13 @@ export function publishObservation<T>(
     });
     return committed;
   } finally {
-    endBindingAddress(runtime.binding, String(runtime.key), addressWrite);
+    endStoreAddress(runtime, addressWrite);
   }
 }
 
-export type KeyedDefinition<T> = QueryDefinition<any, T, any, any> | StreamDefinition<any, T, any>;
+export type KeyedDefinition<T> =
+  | QueryDefinition<any, T, any, any>
+  | NativeStreamDefinition<any, T, any, any, any>;
 
 export function optionConflict(
   runtime: StoreRuntime<unknown>,
@@ -210,6 +253,7 @@ export function configureDeclaredStore<T>(
   definition: StoreDefinition<T>,
 ): void {
   if (runtime.configured) return;
+  noteTransferChange(runtime);
   if (!runtime.baseAvailable) nextValueRevision(runtime.valueRevision);
   runtime.configured = true;
   runtime.declared = true;
@@ -260,6 +304,7 @@ export function configureKeyedValue<T>(
   // Dormant transfer installs initial policy without publishing an initial value.
   seed = true,
   afterRead?: () => void,
+  touchCollection = true,
 ): void {
   const initialStated = options != null && Object.prototype.hasOwnProperty.call(options, "initial");
   afterRead?.();
@@ -305,6 +350,7 @@ export function configureKeyedValue<T>(
   if (!runtime.configured) {
     if (seed && initialStated && !runtime.baseAvailable) nextValueRevision(runtime.valueRevision);
     if (validateOnly) return;
+    noteTransferChange(runtime);
     runtime.configured = true;
     runtime.declared = false;
     runtime.initial = initial;
@@ -316,7 +362,7 @@ export function configureKeyedValue<T>(
     if (seed && initialStated && !runtime.baseAvailable) {
       seedInitialValue(runtime, initial as T, expectedSession);
     }
-    touch(runtime);
+    if (touchCollection) touch(runtime);
     return;
   }
   if (initialStated && runtime.initialSpecified && !Object.is(runtime.initial, initial))
@@ -344,6 +390,12 @@ export function configureKeyedValue<T>(
     throw optionConflict(runtime as StoreRuntime<unknown>, "snapshot");
   if (seedInitial) nextValueRevision(runtime.valueRevision);
   if (validateOnly) return;
+  if (
+    (equalsStated && !runtime.equalsSpecified) ||
+    (snapshotStated && !runtime.snapshotSpecified) ||
+    configureInitial
+  )
+    noteTransferChange(runtime);
   if (equalsStated && !runtime.equalsSpecified) {
     runtime.equals = equals ?? Object.is;
     runtime.equalsSpecified = true;
@@ -360,7 +412,7 @@ export function configureKeyedValue<T>(
       runtime.refreshOnActivation = false;
     }
   }
-  touch(runtime);
+  if (touchCollection) touch(runtime);
 }
 
 export function predictionFault<T>(runtime: StoreRuntime<T>): Fault {
@@ -399,6 +451,7 @@ export function preparePrediction<T>(
       } catch (error) {
         if (!isCurrent() || prediction.dead) return value;
         const revision = nextValueRevision(runtime.valueRevision);
+        noteTransferChange(runtime);
         changeBoundAddress(runtime);
         prediction.dead = true;
         runtime.valueRevision = revision;
@@ -421,7 +474,10 @@ export function preparePrediction<T>(
 
 export function markPredictionSucceeded<T>(runtime: StoreRuntime<T>, id: number): void {
   const prediction = runtime.predictionStack.peek().find((entry) => entry.id === id);
-  if (prediction !== undefined && !prediction.dead) prediction.succeeded = true;
+  if (prediction !== undefined && !prediction.dead && !prediction.succeeded) {
+    noteTransferChange(runtime);
+    prediction.succeeded = true;
+  }
 }
 
 export function retirePredictions<T>(runtime: StoreRuntime<T>, ids: readonly number[]): void {
@@ -433,6 +489,7 @@ export function retirePredictions<T>(runtime: StoreRuntime<T>, ids: readonly num
   );
   if (next.length === current.length) return;
   const revision = nextValueRevision(runtime.valueRevision);
+  noteTransferChange(runtime);
   changeBoundAddress(runtime);
   runtime.valueRevision = revision;
   runtime.predictionStack.set(next);
@@ -447,6 +504,7 @@ export function pushPrediction<T>(runtime: StoreRuntime<T>, prediction: Predicti
     return false;
   }
   const revision = nextValueRevision(runtime.valueRevision);
+  noteTransferChange(runtime);
   changeBoundAddress(runtime);
   reactiveInternal.batch(() => {
     runtime.valueRevision = revision;
@@ -462,6 +520,7 @@ export function removePrediction<T>(runtime: StoreRuntime<T>, id: number): void 
   const next = current.filter((entry) => entry.id !== id && !entry.dead);
   if (next.length !== current.length) {
     const revision = nextValueRevision(runtime.valueRevision);
+    noteTransferChange(runtime);
     reactiveInternal.batch(() => {
       runtime.valueRevision = revision;
       if (!runtime.baseAvailable && next.length === 0) runtime.presence.set(false);

@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, expect, it, jest } from "bun:test";
 import {
+  adopt,
   bindStream,
   createBindingContext,
   inspectBoundAddress,
   createGraph,
   createStream,
   defineContract,
+  snapshot,
+  storeKey,
   subscribe,
 } from "../../src/index.ts";
+import { testBackend } from "../../src/testing.ts";
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -170,5 +174,61 @@ it("does not let retired facets, metadata waiters or address inspection retain B
   } finally {
     stopOld();
     source.graph.dispose();
+  }
+});
+
+it("collects an imported stream base on its original idle deadline without renewing it on inspection", async () => {
+  const source = setup(true);
+  const reference = { module: "retention", member: "events" };
+  const targetBackend = testBackend();
+  const targetStream = createStream({
+    name: "retention-events",
+    key: () => "retention-events/one",
+    open: targetBackend.stream<void, number>("retention-events"),
+  });
+  const targetGraph = createGraph({
+    contract: defineContract({ namespace: "retention", operations: { stream: targetStream } }),
+    idleMs: 10,
+  });
+  const targetBinding = bindStream(targetGraph, targetStream, targetGraph.api.stream, {
+    context: createBindingContext(targetGraph),
+  });
+  try {
+    source.store.set(7);
+    const transfer = snapshot(source.graph, {
+      version: 2,
+      bindings: [{ binding: source.binding, reference }],
+    });
+    source.graph.dispose();
+
+    adopt(targetGraph, transfer, {
+      bindings: [{ binding: targetBinding, reference: { member: "events", module: "retention" } }],
+    });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(targetBackend.calls).toHaveLength(0);
+    jest.advanceTimersByTime(6);
+    expect(inspectBoundAddress(targetBinding, storeKey("retention-events/one"))).toMatchObject({
+      state: "occupied",
+      present: true,
+      basePresent: true,
+    });
+    jest.advanceTimersByTime(4);
+    expect(inspectBoundAddress(targetBinding, storeKey("retention-events/one"))).toMatchObject({
+      kind: "stable",
+      state: "empty",
+      present: false,
+      basePresent: false,
+    });
+
+    const fresh = targetBinding.member(undefined);
+    expect([fresh.available.get(), fresh.value.get(), fresh.pending.get()]).toEqual([
+      false,
+      undefined,
+      true,
+    ]);
+    expect(targetBackend.calls).toHaveLength(1);
+  } finally {
+    source.graph.dispose();
+    targetGraph.dispose();
   }
 });

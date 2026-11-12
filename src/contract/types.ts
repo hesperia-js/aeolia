@@ -190,9 +190,11 @@ export interface QueryStore<T, P = never> extends Store<T> {
 /**
  * A view of the latest value produced by a keyed stream.
  *
- * The source is shared by callers resolving to the same key. The first caller
- * opens the source and owns the source-level cancellation signal; later
- * callers join that session. Stream stores are writable through the inherited
+ * Ordinary member calls resolving to the same key share their keyed session.
+ * The first caller opens the source and owns source-level cancellation; later
+ * callers join it. Explicit Store restorations own separate admitted reader
+ * sessions, even at the same key; their views share the returned source Store.
+ * Stream stores are writable through the inherited
  * `set` and `update` methods, but those writes do not emit into the source.
  */
 export interface StreamStore<T> extends Store<T> {
@@ -200,8 +202,9 @@ export interface StreamStore<T> extends Store<T> {
    * Whether the current shared session is waiting for its first emission.
    *
    * An initial, adopted, or previously emitted value does not end this wait.
-   * Gaps before the session's first emission are ignored. Closing or failing
-   * the session ends the wait even if it delivered no value.
+   * Ordinary opens ignore gaps before the session's first emission. An explicitly
+   * restored positioned reader has an admitted boundary and fails on a reported
+   * gap. Closing or failing ends the wait even if the session delivered no value.
    */
   readonly pending: Readable<boolean>;
 
@@ -525,6 +528,9 @@ export interface QueryProgressObservation<P> {
   subscribe(observer: (event: QueryProgressEvent<P>) => void): Unsubscribe;
 }
 
+/** Acquisition behavior for query member calls. */
+export type QueryAcquisition = "cache" | "fetch";
+
 /** Input used to declare a query operation in a contract. */
 export interface CreateQueryInput<I, T, K extends string, P = never> {
   /** Human-readable operation name used in diagnostics and test records. */
@@ -549,6 +555,29 @@ export interface CreateQueryInput<I, T, K extends string, P = never> {
    * The key must be non-empty.
    */
   readonly key: (input: I) => K;
+
+  /**
+   * Controls whether a fresh committed value can satisfy a member call.
+   *
+   * `"cache"` reuses a fresh landing. `"fetch"` enters the ordinary request
+   * path even when a landing is fresh and joins any current same-key request.
+   * It remains subject to recovery limits. A raw same-key request keeps the
+   * callback from the call that started it. Later callers join its result. A
+   * prior committed value remains available through `value` while the fetch
+   * runs, and `ready` waits for the request to settle. The callback may satisfy
+   * the request from a native cache, so this option does not promise network
+   * traffic. Omission and `undefined` mean `"cache"`.
+   *
+   * When present, this must be an own data property whose value is
+   * `undefined`, `"cache"`, or `"fetch"`. Accessors, inherited properties, and
+   * other values cause a synchronous `TypeError`.
+   *
+   * Aeolia captures this policy when `createQuery` runs, or when a graph
+   * registers a structural query definition.
+   *
+   * @defaultValue `"cache"`
+   */
+  readonly acquisition?: QueryAcquisition;
 
   /**
    * Default freshness window for query callers, in milliseconds.
@@ -576,8 +605,35 @@ export interface CreateQueryInput<I, T, K extends string, P = never> {
   readonly equals?: (a: NoInfer<T>, b: NoInfer<T>) => boolean;
 }
 
-export function isCreateQueryInput(
+/** @internal Captures and normalizes the own data field on a validated query declaration. */
+export function captureQueryAcquisition(value: unknown): QueryAcquisition {
+  if (!isObject(value)) throw new TypeError("Invalid query acquisition.");
+
+  let descriptor: PropertyDescriptor | undefined;
+  let inherited = false;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(value, "acquisition");
+    inherited = descriptor === undefined && "acquisition" in value;
+  } catch {
+    throw new TypeError("Invalid query acquisition.");
+  }
+
+  if (descriptor === undefined) {
+    if (inherited) throw new TypeError("Invalid query acquisition.");
+    return "cache";
+  }
+  if (!Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid query acquisition.");
+
+  const acquisition: unknown = descriptor.value;
+  if (acquisition === undefined || acquisition === "cache") return "cache";
+  if (acquisition === "fetch") return acquisition;
+  throw new TypeError("Invalid query acquisition.");
+}
+
+/** @internal Validates the remaining declaration fields using a captured policy. */
+export function isCreateQueryInputWithAcquisition(
   value: unknown,
+  acquisition: QueryAcquisition,
 ): value is CreateQueryInput<unknown, unknown, string, any> {
   return (
     isNamedDeclaration(value) &&
@@ -588,8 +644,21 @@ export function isCreateQueryInput(
     (!("revalidateAfterMs" in value) ||
       value.revalidateAfterMs === undefined ||
       typeof value.revalidateAfterMs === "number") &&
-    matchesOptions(value, valueSemanticsChecks)
+    matchesOptions(value, valueSemanticsChecks) &&
+    (acquisition === "cache" || acquisition === "fetch")
   );
+}
+
+export function isCreateQueryInput(
+  value: unknown,
+): value is CreateQueryInput<unknown, unknown, string, any> {
+  let acquisition: QueryAcquisition;
+  try {
+    acquisition = captureQueryAcquisition(value);
+  } catch {
+    return false;
+  }
+  return isCreateQueryInputWithAcquisition(value, acquisition);
 }
 
 /**
@@ -690,6 +759,339 @@ export interface StreamDefinition<I, T, K extends string = string> extends Creat
 
 export function isStreamDefinition(value: unknown): value is StreamDefinition<unknown, unknown> {
   return isCreateStreamInput(value) && "kind" in value && value.kind === "stream";
+}
+
+/** Native evidence for one successfully installed projected event. */
+declare const positionedFoldReceiptBrand: unique symbol;
+export interface PositionedFoldReceipt<Position> {
+  /** Provider position of the event that was folded. */
+  readonly position: Position;
+  /** Projection generation and successful-fold revision at landing. */
+  readonly generation: number;
+  readonly revision: number;
+  /** Nominal brand; authenticity is checked by native runtime identity. */
+  readonly [positionedFoldReceiptBrand]: true;
+}
+
+/** Non-pulling view of one native positioned projection checkpoint. */
+declare const positionedCheckpointBrand: unique symbol;
+export interface PositionedProjectionCheckpoint<Value, Position> {
+  readonly value: Value;
+  readonly status: "open" | "closed" | "failed";
+  readonly error: unknown;
+  /** False before this projection has folded its first event. */
+  readonly hasPosition: boolean;
+  /** Last provider position actually folded by this projection. */
+  readonly position: Position | undefined;
+  readonly generation: number;
+  readonly revision: number;
+  /** Reducer mutation/failure can make the borrowed value nonresumable. */
+  readonly resumable: boolean;
+  readonly [positionedCheckpointBrand]: true;
+}
+
+/** One provider event with an opaque, provider-defined position. */
+export interface PositionedStreamEvent<Position, Value> {
+  /** Position after this event in the provider's ordering domain. */
+  readonly position: Position;
+  /** Borrowed event value; Aeolia does not clone or freeze it. */
+  readonly value: Value;
+}
+
+/** Options passed to one native-positioned source opening. */
+export interface PositionedStreamOpenOptions<Position, Reader> extends OpenOptions {
+  /** Exclusive start boundary; property presence distinguishes resume from live open. */
+  readonly after?: Position;
+  /** Exact provider reservation validated before a dormant native restore is issued. */
+  readonly reader?: Reader;
+}
+
+/** Decoded projection state admitted for a fresh target graph. */
+export interface PositionedRestoreSeed<Value, Position> {
+  /** Exclusive boundary authenticated by the target provider reservation. */
+  readonly after: Position;
+  /** Borrowed accumulator value decoded and checked by the owning application. */
+  readonly value: Value;
+}
+
+/** Native identity for one coherent Store session and its required projection values. */
+declare const positionedStoreCheckpointBrand: unique symbol;
+/**
+ * Non-pulling borrowed capture of one coherent positioned Store/session cut.
+ * Authenticity belongs to the native issuer, not these descriptive fields.
+ */
+export type PositionedStoreCheckpoint<
+  Event,
+  Values extends readonly unknown[] = readonly unknown[],
+> = {
+  /** Physical identity of the actual source Store. */
+  readonly sourceIdentity: StoreIdentity;
+  /** Exact native source session; a replacement session has another identity. */
+  readonly sessionIdentity: import("./stream-binding.ts").StreamSessionIdentity;
+  /** Whether the source has completed a genuine positioned event landing. */
+  readonly hasPosition: boolean;
+  /**
+   * Genuine continuation anchor when the source can resume. An initial anchor
+   * precedes the first event and does not make a source base value present.
+   */
+  readonly continuation?: {
+    /** Whether the anchor follows a completed event or precedes the first event. */
+    readonly kind: "event" | "initial";
+    /** Exclusive provider boundary, including an explicitly present undefined. */
+    readonly after: unknown;
+  };
+  /** Borrowed provider boundary; the source Store does not carry its Position type. */
+  readonly position: unknown;
+  /** Borrowed required projection values, in the supplied projection order. */
+  readonly values: Values;
+  /** Whether this actual source and all required folds permit continuation. */
+  readonly resumable: boolean;
+  /** Native capture identity; copying fields does not preserve authority. */
+  readonly [positionedStoreCheckpointBrand]: true;
+} & (
+  | {
+      /** No coherent latest source event is available at this cut. */
+      readonly present: false;
+    }
+  | {
+      /** A latest source event is present, including an event valued undefined. */
+      readonly present: true;
+      /** Borrowed source Event, distinct from every projected accumulator. */
+      readonly latest: Event;
+    }
+);
+
+/** Legacy or boundary-aware decoded data admitted for one fresh Store/session. */
+export type PositionedStoreRestoreSeed<Event, Position, Values extends readonly unknown[]> =
+  | {
+      /** Legacy ordinary-restore seed. */
+      readonly after: Position;
+      /** Own latest source-event property; undefined remains a present event. */
+      readonly latest: Event;
+      /** One decoded accumulator per target policy, in matching tuple order. */
+      readonly values: Values;
+    }
+  | {
+      /** Continuation boundary; an initial anchor creates no event or fold receipt. */
+      readonly boundary: {
+        /** Initial is a real provider anchor; event follows an actual completed event. */
+        readonly kind: "event" | "initial";
+        /** Own-property presence is meaningful even when Position is undefined. */
+        readonly after: Position;
+      };
+      /** Present false omits the committed base; present true requires an own value, including undefined. */
+      readonly base:
+        | {
+            /** Preserve the target-authored base without importing a source value. */
+            readonly present: false;
+          }
+        | {
+            /** Import the committed source base. */
+            readonly present: true;
+            /** Own value property; undefined is a present base. */
+            readonly value: Event;
+          };
+      /** One decoded accumulator per target policy, in matching tuple order. */
+      readonly values: Values;
+    };
+
+/** Genuine dormant source Store and its seeded, shared native projections. */
+export interface PositionedStoreRestoration<Event, Values extends readonly unknown[]> {
+  /** Actual Store belonging to this reader/session; all returned views share it. */
+  readonly source: StreamStore<Event>;
+  /** Independent folds over source, seeded without opening or prefix replay. */
+  readonly projections: {
+    readonly [Index in keyof Values]: import("./projection.ts").Projection<Values[Index]>;
+  };
+  /** Original child-session resource completion, separate from claim and graph/context retirement. */
+  readonly retired: Promise<void>;
+  /**
+   * Open this reader once after its admitted boundary, returning source unchanged.
+   * @throws TypeError for repeated activation or stale session/reader authority.
+   */
+  activate(): StreamStore<Event>;
+  /**
+   * Revoke this group and release its reader once. Native retirement joins actual
+   * async iterator cleanup; this synchronous return is not physical completion.
+   */
+  discard(): void;
+}
+
+/** @internal Tuple value relation used by the public Store restoration signature. */
+export type PositionedStorePolicyValues<
+  Event,
+  Policies extends readonly import("./projection.ts").ProjectionPolicy<Event, any>[],
+> = {
+  readonly [
+    Index in keyof Policies
+  ]: Policies[Index] extends import("./projection.ts").AccumulatePolicy
+    ? readonly Event[]
+    : Policies[Index] extends import("./projection.ts").ReducePolicy<Event, infer Value>
+      ? Value
+      : never;
+};
+
+/** @internal Tuple value relation used by non-pulling Store capture. */
+export type PositionedStoreProjectionValues<
+  Projections extends readonly import("./projection.ts").Projection<any>[],
+> = {
+  readonly [
+    Index in keyof Projections
+  ]: Projections[Index] extends import("./projection.ts").Projection<infer Value> ? Value : never;
+};
+
+/**
+ * Provider-backed source contract for a positioned stream.
+ *
+ * The returned iterable must emit strictly ordered positions after the supplied boundary.
+ * Reader validation, currentness checks, acknowledgement, and optional continuation-
+ * lifetime callbacks remain synchronous local operations on the provider opening that
+ * owns the reservation. They must not perform SQL or other external publication.
+ * Automatic reader acquisition is owned by this source.
+ */
+export interface PositionedStreamSource<Input, Value, Position, Reader> {
+  /** Opens a live iterable or a prepared reader after the supplied position. */
+  readonly open: (
+    input: Input,
+    options: PositionedStreamOpenOptions<Position, Reader>,
+  ) => AsyncIterable<PositionedStreamEvent<Position, Value>>;
+  /**
+   * Acquires a reader for automatic resumption from the existing decoded checkpoint.
+   * The request contains exactly the stream input, checkpoint, and effective acquisition
+   * signal. Return the original genuine Promise for an own-data, nonthenable envelope.
+   * The Reader stays opaque and is never awaited or assimilated. Rejection preserves the
+   * original cause, including undefined. The declaration factory does not call this hook.
+   */
+  readonly acquireReader?: (request: {
+    readonly input: Input;
+    readonly checkpoint: PositionedStoreRestoreSeed<Value, Position, readonly unknown[]>;
+    readonly signal: AbortSignal;
+  }) => Promise<{ readonly reader: Reader }>;
+  /**
+   * Reports a real exclusive starting boundary for this opening. Aeolia calls
+   * this with the same input and options as open, after validating its iterable
+   * and before pulling an event. It creates no event or fold receipt.
+   */
+  readonly initialBoundary?: (
+    input: Input,
+    options: PositionedStreamOpenOptions<Position, Reader>,
+  ) => { readonly available: false } | { readonly available: true; readonly after: Position };
+  /**
+   * Reports the genuine invalidation signal and any already-issued immutable
+   * expiry for this exact reservation. Required-transfer restoration needs this
+   * capability; legacy restoration does not. A deadline is an absolute epoch time
+   * in the native clock domain and is not renewed by Aeolia.
+   */
+  readonly readerLifetime?: (
+    input: Input,
+    reader: Reader,
+    after: Position,
+    seed: unknown,
+  ) => { readonly signal: AbortSignal; readonly expiresAt?: number };
+  /** Authenticates a provider reservation and target seed before dormant issuance. */
+  readonly validateReader: (
+    input: Input,
+    reader: Reader,
+    after: Position,
+    checkpoint: PositionedProjectionCheckpoint<unknown, Position> | undefined,
+    seed: unknown,
+  ) => boolean;
+  /** Rechecks the admitted target reservation and seed without consulting its source checkpoint. */
+  readonly isReaderCurrent: (
+    input: Input,
+    reader: Reader,
+    after: Position,
+    seed: unknown,
+  ) => boolean;
+  /** Acknowledges one authentic native successful-fold receipt. */
+  readonly acknowledge: (
+    input: Input,
+    reader: Reader,
+    receipt: PositionedFoldReceipt<Position>,
+  ) => void;
+  /**
+   * Releases this provider reader once when its native owner is discarded or closed.
+   * Primitive returns, including undefined, are ignored. Object and function results
+   * are passed directly to the captured native Promise.prototype.then; arbitrary thenables
+   * are not assimilated. Promise rejection remains cleanup failure. If intrinsic observation
+   * fails, retirement remains incomplete.
+   */
+  readonly releaseReader: (input: Input, reader: Reader) => unknown;
+}
+
+/** Input accepted by createPositionedStream. */
+export interface CreatePositionedStreamInput<Input, Value, Key extends string, Position, Reader> {
+  /** Human-readable operation name used in diagnostics. */
+  readonly name: string;
+  /** Derives the existing stream-store key; positioned state adds no key dimension. */
+  readonly key: (input: Input) => Key;
+  /** Provider source captured by the native declaration factory. */
+  readonly source: PositionedStreamSource<Input, Value, Position, Reader>;
+  /** Whether committed store values are eligible for snapshots. */
+  readonly snapshot?: boolean;
+  /** Equality used by the existing stream store. */
+  readonly equals?: (a: NoInfer<Value>, b: NoInfer<Value>) => boolean;
+}
+
+/** Native declaration for an ordered stream whose positions are provider-defined. */
+export interface PositionedStreamDefinition<
+  Input,
+  Value,
+  Key extends string = string,
+  Position = unknown,
+  Reader = unknown,
+> extends CreatePositionedStreamInput<Input, Value, Key, Position, Reader> {
+  /** Discriminator identifying this declaration as a positioned stream. */
+  readonly kind: "positioned-stream";
+  /** Internal stream-store adapter; callers should use the native factory. */
+  readonly open: (input: Input, options: OpenOptions) => AsyncIterable<Value>;
+}
+
+export type NativeStreamDefinition<
+  Input,
+  Value,
+  Key extends string = string,
+  Position = unknown,
+  Reader = unknown,
+> =
+  | StreamDefinition<Input, Value, Key>
+  | PositionedStreamDefinition<Input, Value, Key, Position, Reader>;
+
+export function isCreatePositionedStreamInput(
+  value: unknown,
+): value is CreatePositionedStreamInput<unknown, unknown, string, unknown, unknown> {
+  if (
+    !isNamedDeclaration(value) ||
+    !isObject(value) ||
+    !("key" in value) ||
+    typeof value.key !== "function"
+  )
+    return false;
+  if (!("source" in value) || !isObject(value.source)) return false;
+  const source = value.source as Partial<
+    PositionedStreamSource<unknown, unknown, unknown, unknown>
+  >;
+  return (
+    typeof source.open === "function" &&
+    typeof source.validateReader === "function" &&
+    typeof source.isReaderCurrent === "function" &&
+    typeof source.acknowledge === "function" &&
+    typeof source.releaseReader === "function" &&
+    (source.acquireReader === undefined || typeof source.acquireReader === "function") &&
+    matchesOptions(value, valueSemanticsChecks)
+  );
+}
+
+export function isPositionedStreamDefinition(
+  value: unknown,
+): value is PositionedStreamDefinition<unknown, unknown, string, unknown, unknown> {
+  return (
+    isCreatePositionedStreamInput(value) &&
+    "kind" in value &&
+    value.kind === "positioned-stream" &&
+    "open" in value &&
+    typeof value.open === "function"
+  );
 }
 
 /**
@@ -967,7 +1369,8 @@ export function hasMutationOptionFields(value: unknown, afterRead?: () => void):
 export type OperationDefinition =
   | QueryDefinition<any, any, any, any>
   | MutationDefinition<any, any>
-  | StreamDefinition<any, any, any>;
+  | StreamDefinition<any, any, any>
+  | PositionedStreamDefinition<any, any, any, any, any>;
 
 export function isOperationDefinition(value: unknown): value is OperationDefinition {
   if (!isObject(value) || !("kind" in value)) return false;
@@ -978,14 +1381,41 @@ export function isOperationDefinition(value: unknown): value is OperationDefinit
       return isMutationDefinition(value);
     case "stream":
       return isStreamDefinition(value);
+    case "positioned-stream":
+      return isPositionedStreamDefinition(value);
     default:
       return false;
   }
 }
 
-// Tree admission keeps comparator arguments opaque, including never-valued streams.
+// Tree admission keeps comparator and acquisition arguments opaque, including never-valued streams.
 type ContractStreamDefinition = Omit<StreamDefinition<any, any, any>, "equals"> & {
   readonly equals?: (a: never, b: never) => boolean;
+};
+type ContractPositionedStreamDefinition = Omit<
+  PositionedStreamDefinition<any, any, any, any, any>,
+  "equals" | "source"
+> & {
+  readonly equals?: (a: never, b: never) => boolean;
+  readonly source: Omit<
+    Extract<OperationDefinition, { readonly kind: "positioned-stream" }>["source"],
+    "acquireReader"
+  > & {
+    readonly acquireReader?: (request: never) => Promise<{ readonly reader: unknown }>;
+  };
+};
+
+declare const positionedStreamMemberTypeBrand: unique symbol;
+
+/** Callable graph member whose position and reader types come from its declaration. */
+export type PositionedStreamMember<Input, Value, Position, Reader> = ((
+  input: Input,
+  options?: ValueOptions<Value>,
+) => StreamStore<Value>) & {
+  readonly [positionedStreamMemberTypeBrand]?: {
+    readonly position: Position;
+    readonly reader: Reader;
+  };
 };
 
 /**
@@ -1000,6 +1430,7 @@ export type OperationTree = {
   readonly [name: string]:
     | OperationDefinition
     | ContractStreamDefinition
+    | ContractPositionedStreamDefinition
     | StoreDefinition<any>
     | OperationTree;
 };
@@ -1071,13 +1502,15 @@ export type MemberOf<D> =
                 overrides?: MutationOptions,
               ) => Promise<R>
             : {})
-      : D extends StreamDefinition<infer I, infer T, any>
-        ? (input: I, options?: ValueOptions<T>) => StreamStore<T>
-        : D extends StoreDefinition<infer T, any>
-          ? () => Store<T>
-          : D extends OperationTree
-            ? { readonly [K in keyof D]: MemberOf<D[K]> }
-            : never;
+      : D extends PositionedStreamDefinition<infer I, infer T, infer _K, infer P, infer R>
+        ? PositionedStreamMember<I, T, P, R>
+        : D extends StreamDefinition<infer I, infer T, any>
+          ? (input: I, options?: ValueOptions<T>) => StreamStore<T>
+          : D extends StoreDefinition<infer T, any>
+            ? () => Store<T>
+            : D extends OperationTree
+              ? { readonly [K in keyof D]: MemberOf<D[K]> }
+              : never;
 
 /** The recursively generated API shape exposed by {@link Graph.api}. */
 export type ContractApi<C extends Contract> =
@@ -1087,19 +1520,21 @@ export type ContractApi<C extends Contract> =
 export type StorePatterns<D> =
   D extends QueryDefinition<any, any, infer K, any>
     ? K
-    : D extends StreamDefinition<any, infer _T, infer K>
+    : D extends PositionedStreamDefinition<infer _I, infer _T, infer K, infer _P, infer _R>
       ? K
-      : D extends StoreDefinition<any, any> | MutationDefinition<any, any>
-        ? never
-        : D extends object
-          ? { readonly [P in keyof D]: StorePatterns<D[P]> }[keyof D]
-          : never;
+      : D extends StreamDefinition<any, infer _T, infer K>
+        ? K
+        : D extends StoreDefinition<any, any> | MutationDefinition<any, any>
+          ? never
+          : D extends object
+            ? { readonly [P in keyof D]: StorePatterns<D[P]> }[keyof D]
+            : never;
 
 /** Extracts declared store names from a declaration tree. */
 export type StoreNames<D> =
   D extends StoreDefinition<any, infer N>
     ? N
-    : D extends OperationDefinition | ContractStreamDefinition
+    : D extends OperationDefinition | ContractStreamDefinition | ContractPositionedStreamDefinition
       ? never
       : D extends object
         ? { readonly [P in keyof D]: StoreNames<D[P]> }[keyof D]
@@ -1109,7 +1544,7 @@ export type StoreNames<D> =
 export type DeclaredStores<D> =
   D extends StoreDefinition<infer T, infer N>
     ? StoreDefinition<T, N>
-    : D extends OperationDefinition | ContractStreamDefinition
+    : D extends OperationDefinition | ContractStreamDefinition | ContractPositionedStreamDefinition
       ? never
       : D extends object
         ? { readonly [P in keyof D]: DeclaredStores<D[P]> }[keyof D]
@@ -1148,15 +1583,17 @@ type KeyedStoreEntry<P extends string, V> = {
 export type KeyedStores<D> =
   D extends QueryDefinition<any, infer T, infer K, any>
     ? KeyedStoreEntry<K, T>
-    : D extends StreamDefinition<any, infer T, infer K>
+    : D extends PositionedStreamDefinition<infer _I, infer T, infer K, infer _P, infer _R>
       ? KeyedStoreEntry<K, T>
-      : D extends StoreDefinition<infer T, infer N>
-        ? KeyedStoreEntry<N, T>
-        : D extends MutationDefinition<any, any>
-          ? never
-          : D extends object
-            ? { readonly [P in keyof D]: KeyedStores<D[P]> }[keyof D]
-            : never;
+      : D extends StreamDefinition<any, infer T, infer K>
+        ? KeyedStoreEntry<K, T>
+        : D extends StoreDefinition<infer T, infer N>
+          ? KeyedStoreEntry<N, T>
+          : D extends MutationDefinition<any, any>
+            ? never
+            : D extends object
+              ? { readonly [P in keyof D]: KeyedStores<D[P]> }[keyof D]
+              : never;
 
 /**
  * Resolves a known contract key to the value type of its matching store.
@@ -1354,18 +1791,19 @@ export interface Graph<C extends Contract = Contract> {
   dispose(): void;
 
   /**
-   * Disposes this graph and joins its original operations and cleanup.
+   * Permanently disposes this graph and joins its original operations and cleanup.
    *
    * Retirement waits for original query and mutation work, stream and projection
-   * reads, iterator returns, and cleanup, including work removed by an earlier
-   * reset or disposal. A source that never acknowledges completion keeps it
-   * pending. Semantic operation failures keep their existing channels; cleanup
-   * failures reject the shared promise. After admission, repeated and reentrant
-   * calls return the same promise.
+   * reads, iterator returns, and native cleanup, including work removed by an
+   * earlier reset or disposal. A source that never acknowledges completion keeps
+   * it pending. Semantic operation failures keep their existing channels. Cleanup
+   * failure rejects with its original cause, or an AggregateError for several
+   * causes. After admission, repeated and reentrant calls return the same promise,
+   * including after failure. Detached provider work needs its own owner join.
    *
    * @returns The graph's shared physical retirement promise.
-   * @throws A {@link Fault} If the first call would close a live graph from a
-   * write-restricted reactive scope. No retirement is admitted in that case.
+   * @throws A {@link Fault} If the first call requires reactive writes in a
+   * write-restricted scope. No retirement is admitted in that case.
    */
   retire(): Promise<void>;
 }

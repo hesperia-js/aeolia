@@ -7,25 +7,38 @@ import type {
   CreateQueryInput,
   CreateStoreInput,
   CreateStreamInput,
+  CreatePositionedStreamInput,
   DefineContractInput,
   FetchOptions,
   MutationDefinition,
   NoCollision,
   OperationTree,
+  QueryAcquisition,
   QueryDefinition,
   StoreDefinition,
   StreamDefinition,
+  PositionedStreamDefinition,
+  PositionedStoreRestoreSeed,
+  PositionedStreamOpenOptions,
 } from "./types.ts";
 import { affectedBrand } from "./symbols.ts";
 import {
   isCreateStoreInput,
-  isCreateQueryInput,
+  captureQueryAcquisition,
+  isCreateQueryInputWithAcquisition,
   isCreateStreamInput,
+  isCreatePositionedStreamInput,
   isCreateMutationInput,
   isAffectSpec,
   isQueryDefinition,
 } from "./types.ts";
 import { validateContract } from "./validation.ts";
+import {
+  positionedStreamSourceByDefinition,
+  positionedPositionWriterByOpenOptions,
+  positionedInitialBoundaryWriterByOpenOptions,
+  positionedOpenRequestByOpenOptions,
+} from "./registry.ts";
 export { createGraph } from "./engine.ts";
 export { storeKey } from "./identity.ts";
 
@@ -64,13 +77,14 @@ export function createStore<T, N extends string>(
 /**
  * Declares a query operation for use in a contract.
  *
- * @param input - Query name, key function, backend callback, and value
- * configuration.
+ * @param input - Query name, key function, backend callback, acquisition
+ * behavior, and value configuration.
  * Zero-parameter key and fetch callbacks infer a no-input query. Callbacks
  * with optional parameters remain input-bearing; a declared input in either
  * callback also keeps the query input-bearing.
  * @returns A shallow-frozen inert query definition.
- * @throws TypeError if declaration fields or callback types are malformed.
+ * @throws TypeError if declaration fields, acquisition, or callback types are
+ * malformed.
  * @example
  * ```ts
  * import { createQuery } from "aeolia";
@@ -102,8 +116,15 @@ export function createQuery<I, T, K extends string, P = never>(
 export function createQuery<I, T, K extends string, P = never>(
   input: CreateQueryInput<I, T, K, P>,
 ): QueryDefinition<I, T, K, P> {
-  if (!isCreateQueryInput(input)) throw new TypeError("Invalid query declaration.");
-  return Object.freeze({ ...input, kind: "query" as const });
+  let acquisition: QueryAcquisition;
+  try {
+    acquisition = captureQueryAcquisition(input);
+  } catch {
+    throw new TypeError("Invalid query declaration.");
+  }
+  if (!isCreateQueryInputWithAcquisition(input, acquisition))
+    throw new TypeError("Invalid query declaration.");
+  return Object.freeze({ ...input, acquisition, kind: "query" as const });
 }
 
 /**
@@ -137,6 +158,259 @@ export function createStream<I, T, K extends string>(
 }
 
 /**
+ * Declares a provider-positioned stream for contracts and graph members.
+ *
+ * Each yielded position belongs to the provider's ordering domain. A source
+ * must emit strictly after the supplied opening boundary. The factory captures
+ * the provider callbacks; graph registration authenticates the exact returned
+ * definition before exposing its raw member. Position metadata does not add a
+ * store key or change the existing raw/bound namespace rules.
+ *
+ * Reader validation and currentness callbacks remain synchronous local checks. The
+ * optional acquireReader callback is captured once; the declaration factory validates
+ * but never invokes it. The wrapper forwards the same checkpoint request unchanged and
+ * returns the original Promise and Reader envelope unchanged when a resume lifecycle uses
+ * it. Values and positions are borrowed.
+ * Native checkpoints do not clone payloads or prove that a reducer returned an
+ * immutable value.
+ *
+ * @param input - Name, key, ordered source, and existing store value options.
+ * @returns A frozen positioned declaration that remains inert until a graph
+ * member or projection opens it.
+ * @throws TypeError when the declaration or any provider callback is malformed.
+ */
+export function createPositionedStream<Input, Value, Key extends string, Position, Reader>(
+  input: CreatePositionedStreamInput<Input, Value, Key, Position, Reader>,
+): PositionedStreamDefinition<Input, Value, Key, Position, Reader> {
+  if (input === null || typeof input !== "object" || Array.isArray(input))
+    throw new TypeError("Invalid positioned stream declaration.");
+  const name = input.name;
+  const key = input.key;
+  const sourceInput = input.source;
+  const snapshot = input.snapshot;
+  const equals = input.equals;
+  if (sourceInput === null || typeof sourceInput !== "object" || Array.isArray(sourceInput))
+    throw new TypeError("Invalid positioned stream source.");
+  const openSource = sourceInput.open;
+  const acquireSourceReader = sourceInput.acquireReader;
+  const validateSourceReader = sourceInput.validateReader;
+  const currentSourceReader = sourceInput.isReaderCurrent;
+  const acknowledgeSourceReader = sourceInput.acknowledge;
+  const releaseSourceReader = sourceInput.releaseReader;
+  const initialBoundarySource = sourceInput.initialBoundary;
+  const readerLifetimeSource = sourceInput.readerLifetime;
+  if (initialBoundarySource !== undefined && typeof initialBoundarySource !== "function")
+    throw new TypeError("Positioned stream initialBoundary must be a function.");
+  if (readerLifetimeSource !== undefined && typeof readerLifetimeSource !== "function")
+    throw new TypeError("Positioned stream readerLifetime must be a function.");
+  if (acquireSourceReader !== undefined && typeof acquireSourceReader !== "function")
+    throw new TypeError("Positioned stream acquireReader must be a function.");
+  if (
+    typeof openSource !== "function" ||
+    typeof validateSourceReader !== "function" ||
+    typeof currentSourceReader !== "function" ||
+    typeof acknowledgeSourceReader !== "function" ||
+    typeof releaseSourceReader !== "function"
+  )
+    throw new TypeError("Positioned stream source callbacks must be functions.");
+  const capturedSource = Object.freeze({
+    open: (value: Input, options: PositionedStreamOpenOptions<Position, Reader>) =>
+      Reflect.apply(openSource, sourceInput, [value, options]),
+    ...(typeof acquireSourceReader === "function"
+      ? {
+          acquireReader: (request: {
+            readonly input: Input;
+            readonly checkpoint: PositionedStoreRestoreSeed<Value, Position, readonly unknown[]>;
+            readonly signal: AbortSignal;
+          }) => Reflect.apply(acquireSourceReader, sourceInput, [request]),
+        }
+      : {}),
+    validateReader: (
+      value: Input,
+      reader: Reader,
+      after: Position,
+      checkpoint:
+        | import("./types.ts").PositionedProjectionCheckpoint<unknown, Position>
+        | undefined,
+      seed: unknown,
+    ) => Reflect.apply(validateSourceReader, sourceInput, [value, reader, after, checkpoint, seed]),
+    isReaderCurrent: (value: Input, reader: Reader, after: Position, seed: unknown) =>
+      Reflect.apply(currentSourceReader, sourceInput, [value, reader, after, seed]),
+    acknowledge: (
+      value: Input,
+      reader: Reader,
+      receipt: import("./types.ts").PositionedFoldReceipt<Position>,
+    ) => Reflect.apply(acknowledgeSourceReader, sourceInput, [value, reader, receipt]),
+    releaseReader: (value: Input, reader: Reader) =>
+      Reflect.apply(releaseSourceReader, sourceInput, [value, reader]),
+    ...(typeof initialBoundarySource === "function"
+      ? {
+          initialBoundary: (value: Input, options: PositionedStreamOpenOptions<Position, Reader>) =>
+            Reflect.apply(initialBoundarySource, sourceInput, [value, options]),
+        }
+      : {}),
+    ...(typeof readerLifetimeSource === "function"
+      ? {
+          readerLifetime: (value: Input, reader: Reader, after: Position, seed: unknown) =>
+            Reflect.apply(readerLifetimeSource, sourceInput, [value, reader, after, seed]),
+        }
+      : {}),
+  });
+  const normalizedInput = {
+    name,
+    key,
+    source: capturedSource,
+    ...(snapshot === undefined ? {} : { snapshot }),
+    ...(equals === undefined ? {} : { equals }),
+  };
+  if (!isCreatePositionedStreamInput(normalizedInput))
+    throw new TypeError("Invalid positioned stream declaration.");
+  const open = (value: Input, options: import("./types.ts").OpenOptions): AsyncIterable<Value> => {
+    const request = positionedOpenRequestByOpenOptions.get(options);
+    const positionedOptions: PositionedStreamOpenOptions<unknown, unknown> =
+      request === undefined ? { ...options } : { ...options, ...request };
+    const events = Reflect.apply(capturedSource.open, capturedSource, [value, positionedOptions]);
+    if (
+      events === null ||
+      typeof events !== "object" ||
+      typeof events[Symbol.asyncIterator] !== "function"
+    )
+      throw new TypeError("Positioned stream open must return an AsyncIterable.");
+    const initialBoundary =
+      capturedSource.initialBoundary === undefined
+        ? undefined
+        : Reflect.apply(capturedSource.initialBoundary, capturedSource, [value, positionedOptions]);
+    positionedInitialBoundaryWriterByOpenOptions.get(options)?.(initialBoundary);
+    let sourceIterator: object | undefined;
+    let source:
+      | {
+          readonly iterator: object;
+          readonly next: Function;
+        }
+      | undefined;
+    let sourceDone = false;
+    let sourceFailure: { readonly cause: unknown } | undefined;
+    let sourceFailureDelivered = false;
+    let adapterClosed = false;
+    let returnRead = false;
+    let returnLookupFailure: { readonly cause: unknown } | undefined;
+    let returnForwarder: ((...args: unknown[]) => unknown) | undefined;
+
+    const getSourceIterator = (): {
+      readonly iterator: object;
+      readonly next: Function;
+    } => {
+      if (source === undefined) {
+        const method = events[Symbol.asyncIterator];
+        if (typeof method !== "function")
+          throw new TypeError("Positioned stream open must return an AsyncIterable.");
+        const iterator = Reflect.apply(method, events, []);
+        if (iterator === null || (typeof iterator !== "object" && typeof iterator !== "function"))
+          throw new TypeError("Positioned stream iterator must be an object.");
+        sourceIterator = iterator;
+        const next: unknown = (iterator as { readonly next?: unknown }).next;
+        if (typeof next !== "function")
+          throw new TypeError("Positioned stream iterator must provide next().");
+        source = { iterator, next };
+      }
+      const current = source;
+      if (current === undefined)
+        throw new TypeError("Positioned stream iterator was not retained.");
+      return current;
+    };
+
+    const next = async (): Promise<IteratorResult<Value>> => {
+      if (adapterClosed || sourceDone) return { done: true, value: undefined };
+      if (sourceFailure !== undefined) {
+        if (sourceFailureDelivered) {
+          sourceDone = true;
+          return { done: true, value: undefined };
+        }
+        sourceFailureDelivered = true;
+        throw sourceFailure.cause;
+      }
+      const current = source;
+      if (current === undefined)
+        throw new TypeError("Positioned stream iterator is not initialized.");
+      const result: unknown = await Reflect.apply(current.next, current.iterator, []);
+      if (result === null || (typeof result !== "object" && typeof result !== "function"))
+        throw new TypeError("Positioned stream iterator result must be an object.");
+      if ((result as { readonly done?: unknown }).done) {
+        sourceDone = true;
+        return { done: true, value: undefined };
+      }
+      const event: unknown = (result as { readonly value?: unknown }).value;
+      if (
+        event === null ||
+        typeof event !== "object" ||
+        !("position" in event) ||
+        !("value" in event)
+      )
+        throw new TypeError("Positioned stream event requires a position and value.");
+      positionedPositionWriterByOpenOptions.get(options)?.(event.position);
+      const value = await event.value;
+      // Keep the existing AsyncIterable<Value> shape for async-yield thenable values.
+      return { done: false, value: value as Value };
+    };
+
+    const readSourceReturn = (): unknown => {
+      if (returnRead) {
+        if (returnLookupFailure !== undefined) throw returnLookupFailure.cause;
+        return returnForwarder;
+      }
+      returnRead = true;
+      adapterClosed = true;
+      const current = sourceIterator;
+      if (current === undefined || sourceDone) return undefined;
+      let close: unknown;
+      try {
+        close = (current as { readonly return?: unknown }).return;
+      } catch (cause) {
+        returnLookupFailure = { cause };
+        throw cause;
+      }
+      if (close === undefined || close === null) return undefined;
+      if (typeof close !== "function") {
+        const cause = new TypeError("Positioned stream iterator return must be a function.");
+        returnLookupFailure = { cause };
+        throw cause;
+      }
+      const exactIterator = current;
+      returnForwarder = (...args: unknown[]): unknown => Reflect.apply(close, exactIterator, args);
+      return returnForwarder;
+    };
+
+    const iterator: AsyncIterator<Value> = { next };
+    // Native cleanup tracks the provider carrier and ignores its private close-result payload.
+    Object.defineProperty(iterator, "return", {
+      configurable: false,
+      enumerable: false,
+      get: readSourceReturn,
+    });
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<Value> {
+        // Native rechecks reader currentness after provider iterator acquisition.
+        if (source === undefined && sourceFailure === undefined) {
+          try {
+            getSourceIterator();
+          } catch (cause) {
+            sourceFailure = { cause };
+          }
+        }
+        return iterator;
+      },
+    };
+  };
+  const definition = Object.freeze({
+    ...normalizedInput,
+    kind: "positioned-stream" as const,
+    open,
+  });
+  positionedStreamSourceByDefinition.set(definition, capturedSource as any);
+  return definition as PositionedStreamDefinition<Input, Value, Key, Position, Reader>;
+}
+
+/**
  * Binds a mutation effect to a query definition.
  *
  * @param query - Query whose keyed store the effect targets.
@@ -160,11 +434,11 @@ export function createStream<I, T, K extends string>(
  * ```
  */
 export function affects<MI, QI, T>(
-  query: QueryDefinition<QI, T>,
+  query: QueryDefinition<QI, T, string, any>,
   spec: AffectSpec<MI, NoInfer<QI>, T>,
 ): Affected<MI>;
 export function affects<MI, QI, T>(
-  query: QueryDefinition<QI, T>,
+  query: QueryDefinition<QI, T, string, any>,
   spec: AffectSpec<MI, QI, T>,
 ): Affected<MI> {
   if (!isQueryDefinition(query)) throw new TypeError("An effect must target a query declaration.");

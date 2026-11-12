@@ -8,6 +8,7 @@ import {
   createQuery,
   defineContract,
   Fault,
+  observeStore,
   onFault,
   peekStore,
   predictionFor,
@@ -999,12 +1000,15 @@ describe("context-bound mutation effects", () => {
   });
 
   it.each(["throw", "read", "capacity"] as const)(
-    "diagnoses and omits a %s prediction without fallback or dispatch failure",
+    "diagnoses and omits a %s prediction without fallback, issue mutation or dispatch failure",
     async (mode) => {
       const f = fixture("invalidate", mode === "capacity" ? 1 : 64);
       try {
         const handle = f.native.member({ id: "one" }, { initial: 1 });
         const label = f.labels.member({ id: "one" }, { initial: "one" });
+        const lease = observeStore(f.graph, handle);
+        const issue = Object.freeze({ message: "earlier observation issue" });
+        lease.reject(issue);
         let fallbackCalls = 0;
         const effect = profileEffect(f.save, 0, f.query, {
           prepare: (phase) =>
@@ -1039,11 +1043,14 @@ describe("context-bound mutation effects", () => {
         const stopFaults = onFault(f.graph, (fault) => faults.push(fault));
         const running = binding.member({ id: "one", value: 2 }, { optimistic: [override] });
         expect(fallbackCalls).toBe(0);
+        expect(lease.issue.peek()).toBe(issue);
         expect(faults.some((fault) => fault.kind === "prediction")).toBe(true);
         if (mode !== "capacity") expect([visible(handle), visible(label)]).toEqual([1, "valid"]);
         for (const call of f.backend.pending("save")) f.backend.resolve(call, "saved");
         await Promise.all([running, held]);
+        expect(lease.issue.peek()).toBe(issue);
         stopFaults();
+        lease.dispose();
       } finally {
         f.graph.dispose();
       }

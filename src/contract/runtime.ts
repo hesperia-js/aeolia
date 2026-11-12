@@ -4,6 +4,7 @@ import type {
   Graph,
   MutationDefinition,
   CallContext,
+  QueryAcquisition,
   QueryDefinition,
   QueryProgressEvent,
   QueryProgressSnapshot,
@@ -13,7 +14,8 @@ import type {
   StoreKey,
   StoreIdentity,
   StoreStatus,
-  StreamDefinition,
+  PositionedStreamDefinition,
+  NativeStreamDefinition,
   StreamStatus,
   StreamStore,
   ValueRevision,
@@ -21,7 +23,7 @@ import type {
 } from "./types.ts";
 import type { Fault, Unsubscribe } from "../fault.ts";
 import type { Computed, WritableSignal } from "../reactive.ts";
-import type { PhysicalWork, ResetCleanupScope, RetirementOwner } from "./retirement.ts";
+import type { PhysicalWork, ResetCleanupScope, RetirementOwner, PreparedReaderLifetime } from "./retirement.ts";
 import type { BindingContext } from "./query-binding.ts";
 import type { BoundStreamSession, StreamDetachment } from "./stream-binding.ts";
 
@@ -55,7 +57,9 @@ export interface QueryRequest {
   readonly generation: number;
   /** Reset identity under which this request was issued. */
   readonly resetEpoch: number;
+  /** Store incarnation under which this request was issued. */
   readonly incarnation: object;
+  /** Frozen opaque identity exposed by this request's progress snapshots. */
   readonly progressIdentity: object;
   /** Whether this request is the one automatic recovery allowed after a failure. */
   readonly automaticRecovery: boolean;
@@ -99,12 +103,16 @@ export interface QueryProgressAuthority {
 export type QueryOutcome = { readonly ok: true } | { readonly ok: false; readonly error: unknown };
 
 export interface StreamSession<T> {
+  positioned?: PositionedStoreSessionState<T>;
   readonly physical: PhysicalWork;
   readonly controller: AbortController;
   readonly token: object;
   /** Reset identity under which this session was opened. */
   readonly resetEpoch: number;
-  readonly listeners: Set<(event: StreamEvent<T>) => void>;
+  listeners: Set<(event: StreamEvent<T>) => void>;
+  /** Latest event boundary, installed before listener census. */
+  position?: unknown;
+  hasPosition: boolean;
   iterator?: AsyncIterator<T>;
   removeCallerAbort?: () => void;
   removeControllerAbort?: () => void;
@@ -115,9 +123,88 @@ export interface StreamSession<T> {
   bound?: BoundStreamSessionRuntime<T>;
 }
 
-export interface StreamSource<T> {
-  readonly stream: StreamDefinition<unknown, T, any>;
+/** One genuine source dispatch, independent of reactive value equality. */
+export interface PositionedStoreEvent {
+  readonly identity: object;
+  readonly ordinal: number;
+  readonly position: unknown;
+  readonly latest: unknown;
+  landingRevision?: import("./types.ts").ValueRevision;
+}
+
+/** Completed source Store landing; pending per-open positions never supply this cut. */
+export interface PositionedStoreCompletedEvent extends PositionedStoreEvent {
+  readonly landingRevision: import("./types.ts").ValueRevision;
+}
+
+export interface PositionedStoreParticipant {
+  readonly projection: object;
+  anchor?: object;
+  event?: PositionedStoreEvent;
+  failed: boolean;
+}
+
+export interface PositionedStoreReaderLease {
+  readonly reader: unknown;
+  readonly after: unknown;
+  readonly seed: unknown;
+  owned: boolean;
+  released: boolean;
+}
+
+export interface PositionedContinuationAnchor {
+  readonly kind: "event" | "initial";
+  readonly after: unknown;
+  readonly token: object;
+}
+
+export interface PositionedStorePreparation {
+  published: boolean;
+  discarded: boolean;
+  observed?: boolean;
+  readonly retirement: RetirementOwner;
+  readonly retired: Promise<void>;
+  lifetime?: PreparedReaderLifetime;
+  readonly registrations: GraphProjection[];
+  readonly registerStops: (() => void)[];
+  publicationMarkers?: (() => void)[];
+  contextStops?: (() => void)[];
+}
+
+/** Actual Store/session ownership shared by its positioned projections. */
+export interface PositionedStoreSessionState<T> {
+  readonly runtime: StoreRuntime<T>;
+  readonly definition: import("./types.ts").PositionedStreamDefinition<any, T, any, any, any>;
+  readonly provider: import("./types.ts").PositionedStreamSource<any, T, any, any>;
   readonly input: unknown;
+  readonly member: object;
+  readonly binding?: StreamBindingRuntime;
+  phase: "dormant" | "active" | "closed";
+  nextOrdinal: number;
+  /** Incoming provider boundary while next() is pending; never a completed capture cut. */
+  pendingPosition?: unknown;
+  hasPendingPosition: boolean;
+  dispatch?: PositionedStoreEvent;
+  completed?: PositionedStoreCompletedEvent;
+  continuation?: PositionedContinuationAnchor;
+  preparation?: PositionedStorePreparation;
+  /** Last committed base landing, distinct from visible prediction revisions. */
+  baseRevision?: ValueRevision;
+  diverged: boolean;
+  readonly participants: Set<PositionedStoreParticipant>;
+  reader?: PositionedStoreReaderLease;
+}
+
+/** Reader-specific native address, distinct from the ordinary logical-key slot. */
+export interface PositionedStoreReaderScope<T> {
+  readonly session: StreamSession<T>;
+  readonly address?: BindingAddressRuntime;
+}
+
+export interface StreamSource<T> {
+  readonly stream: NativeStreamDefinition<unknown, T, any, any, any>;
+  readonly input: unknown;
+  readonly member?: object;
   readonly abortSignal?: AbortSignal;
 }
 
@@ -136,7 +223,12 @@ export interface GraphProjection {
 }
 
 export type StreamEvent<T> =
-  | { readonly kind: "value"; readonly value: T }
+  | {
+      readonly kind: "value";
+      readonly value: T;
+      readonly hasPosition?: boolean;
+      readonly position?: unknown;
+    }
   | { readonly kind: "gap" }
   | { readonly kind: "close"; readonly failed: boolean; readonly reason?: unknown };
 
@@ -159,6 +251,7 @@ export interface ObservationState {
 }
 
 export interface StoreRuntime<T> {
+  readerScope?: PositionedStoreReaderScope<T>;
   readonly graph: GraphRuntime<any>;
   readonly identity: StoreIdentity;
   readonly key: StoreKey;
@@ -172,7 +265,7 @@ export interface StoreRuntime<T> {
   readonly errorCell: WritableSignal<unknown>;
   readonly streamStatusCell: WritableSignal<StreamStatus>;
   readonly streamStatus: Computed<StreamStatus>;
-  readonly callers: QueryCaller<T>[];
+  callers: QueryCaller<T>[];
   readonly requests: Set<QueryRequest>;
   readonly livenessStops: Unsubscribe[];
   readonly readStops: Unsubscribe[];
@@ -228,6 +321,7 @@ export interface StoreRuntime<T> {
   lastInteraction: number;
   liveReadableCount: number;
   metadataReadableCount: number;
+  /** Live query-progress readers retain collection without touching freshness. */
   progressReadableCount: number;
   readyWaiterCount: number;
   valueLive: boolean;
@@ -240,6 +334,65 @@ export interface GraphRuntime<C extends Contract> extends Graph<C> {
   readonly __runtime: GraphRuntimeState<C>;
 }
 
+export type GraphDisposalPhase =
+  | "lifecycle"
+  | "observation"
+  | "contexts"
+  | "reset-reject"
+  | "reset-abort"
+  | "lifetime"
+  | "collection"
+  | "projections"
+  | "stores"
+  | "controllers"
+  | "fault-channel"
+  | "fault-observers"
+  | "complete";
+
+export interface GraphStoreDisposalProgress {
+  readonly runtime: StoreRuntime<unknown>;
+  timerAttempted: boolean;
+  stopsCaptured: boolean;
+  livenessStops?: Unsubscribe[];
+  livenessIndex: number;
+  readStops?: Unsubscribe[];
+  readIndex: number;
+  stopsCleared: boolean;
+  streamCaptured: boolean;
+  stream?: StreamSession<unknown>;
+  streamAttempted: boolean;
+  publicationAttempted: boolean;
+}
+
+export interface GraphDisposalProgress {
+  phase: GraphDisposalPhase;
+  readonly revisions: Map<StoreRuntime<unknown>, ValueRevision>;
+  contexts?: BindingContextRuntime[];
+  contextIndex: number;
+  resetOperationCaptured: boolean;
+  resetOperation?: GraphResetOperation;
+  resetRejectAttempted: boolean;
+  resetAbortAttempted: boolean;
+  stopAbortCaptured: boolean;
+  stopAbort?: Unsubscribe;
+  stopAbortAttempted: boolean;
+  collectionTimerCaptured: boolean;
+  collectionTimer?: TimerHandle;
+  collectionTimerAttempted: boolean;
+  projections?: GraphProjection[];
+  projectionIndex: number;
+  stores?: GraphStoreDisposalProgress[];
+  storeIndex: number;
+  controllers?: AbortController[];
+  controllerIndex: number;
+  faultChannelUnregistered: boolean;
+  faultObserversCleared: boolean;
+  contextsPreflighted: boolean;
+  active: boolean;
+  complete: boolean;
+  resumeWork?: PhysicalWork;
+}
+
 export interface GraphRuntimeState<C extends Contract> {
   readonly retirement: RetirementOwner;
   readonly graph: GraphRuntime<C>;
@@ -247,24 +400,21 @@ export interface GraphRuntimeState<C extends Contract> {
   readonly idleMs: number;
   readonly maxPredictions: number;
   readonly onUnobservedFault?: (error: unknown) => void;
-  readonly stores: Map<string | StoreIdentity, StoreRuntime<unknown>>;
-  readonly queryDefinitions: Set<QueryDefinition<any, any, any, any>>;
+  stores: Map<string | StoreIdentity, StoreRuntime<unknown>>;
+  readonly queryDefinitions: Map<QueryDefinition<any, any, any, any>, QueryAcquisition>;
   readonly mutationDefinitions: Set<MutationDefinition<any, any>>;
+  /** Exact positioned declarations admitted by this graph before API exposure. */
+  readonly positionedDefinitions: Set<PositionedStreamDefinition<any, any, any, any, any>>;
   readonly bindingContexts: Set<BindingContextRuntime>;
   readonly declaredStores: Map<string, StoreDefinition<unknown>>;
   readonly faultObservers: Set<(fault: Fault) => void>;
-  readonly activeControllers: Set<AbortController>;
   readonly resetCleanupScopes: Set<ResetCleanupScope>;
   resetCleanupScope?: ResetCleanupScope;
-  disposal?: {
-    readonly steps: Generator<() => void, void, void>;
-    contextsPreflighted: boolean;
-    active: boolean;
-    complete: boolean;
-    resumeWork?: PhysicalWork;
-  };
-  readonly projections: Set<GraphProjection>;
+  activeControllers: Set<AbortController>;
+  projections: Set<GraphProjection>;
+  pendingPositionedStores?: Set<StoreRuntime<unknown>>;
   readonly collectionHeap: CollectionCandidate[];
+  disposal?: GraphDisposalProgress;
   stopAbort?: Unsubscribe;
   collectionTimer?: TimerHandle;
   sweepScheduled: boolean;
@@ -281,9 +431,15 @@ export interface BindingContextRuntime {
   readonly handle: BindingContext;
   readonly activeCell: WritableSignal<boolean>;
   readonly bindings: Map<QueryDefinition<any, any, any, any>, Map<object, QueryBindingRuntime>>;
-  readonly streamBindings: Map<StreamDefinition<any, any, any>, Map<object, StreamBindingRuntime>>;
+  readonly streamBindings: Map<
+    NativeStreamDefinition<any, any, any, any, any>,
+    Map<object, StreamBindingRuntime>
+  >;
   readonly mutations: Map<MutationDefinition<any, any>, Map<object, MutationBindingRuntime>>;
   readonly mutationControllers: Set<AbortController>;
+  /** Independent native projections opened through this context stream bindings. */
+  positionedProjections?: Set<() => void>;
+  pendingPositionedStores?: Set<StoreRuntime<unknown>>;
   disposed: boolean;
 }
 
@@ -296,16 +452,17 @@ export interface QueryBindingRuntime {
   readonly execution: QueryDefinition<any, any, any, any>;
   readonly value: ValueOptions<any> | undefined;
   handle: object;
-  readonly stores: Map<string, StoreRuntime<unknown>>;
+  stores: Map<string, StoreRuntime<unknown>>;
 }
 
 export interface StreamBindingRuntime {
+  readerStores?: Set<StoreRuntime<unknown>>;
   readonly kind: "stream";
   readonly context: BindingContextRuntime;
-  readonly definition: StreamDefinition<any, any, any>;
+  readonly definition: NativeStreamDefinition<any, any, any, any, any>;
   readonly originalMember: object;
   readonly stores: Map<string, StoreRuntime<unknown>>;
-  readonly addresses: Map<string, BindingAddressRuntime>;
+  addresses: Map<string, BindingAddressRuntime>;
   handle: object;
 }
 
@@ -384,6 +541,14 @@ export interface EffectInstructionRuntime {
  * @internal
  */
 export interface RealmStoreState {
+  /** Whether v1's raw-key representation cannot describe this store. */
+  readonly bound: boolean;
+  /** Exact native binding; undefined retains the raw-key namespace. */
+  readonly binding: StoreBindingRuntime | undefined;
+  /** Actual graph-local physical entry, never a transport address. */
+  readonly identity: StoreIdentity;
+  /** Captured local base revision, independent of request generation. */
+  readonly valueRevision: ValueRevision;
   /** Exact graph-local key for this runtime. */
   readonly key: StoreKey;
 
@@ -391,7 +556,13 @@ export interface RealmStoreState {
   readonly snapshot: boolean;
 
   /** Whether the runtime currently contains a committed value. */
-  readonly hasCommitted: boolean;
+  readonly baseAvailable: boolean;
+  /** Whether the current base has an accepted landing representable by v1. */
+  readonly hasAcceptedLanding: boolean;
+  /** Eligibility attached to this exact committed base revision. */
+  readonly transferEligible: boolean;
+  /** Checks the captured native identity and state after authored encoding. */
+  readonly current: () => boolean;
 
   /** Generation attached to the current committed value. */
   readonly generation: number;

@@ -4,11 +4,24 @@ export {
   createQuery,
   createStore,
   createStream,
+  createPositionedStream,
   defineContract,
   createGraph,
   storeKey,
 } from "./api.ts";
-export { project } from "./projection.ts";
+export {
+  project,
+  projectPositioned,
+  capturePositionedStore,
+  isPositionedStoreCheckpointCurrent,
+  preparePositionedStoreRestore,
+  capturePositionedProjection,
+  isPositionedCheckpointCurrent,
+  preparePositionedRestore,
+  preparePositionedSeedRestore,
+  positionedFoldReceipt,
+  acknowledgePositionedFold,
+} from "./projection.ts";
 export { queryOptions } from "./query-options.ts";
 export { peekStore } from "./store.ts";
 export { observeStore } from "./observation.ts";
@@ -26,6 +39,8 @@ export type {
 } from "./query-binding.ts";
 export type {
   AccumulatePolicy,
+  PositionedRestoration,
+  PositionedStreamAccess,
   Projection,
   ProjectionPolicy,
   ProjectionStatus,
@@ -64,6 +79,7 @@ export type {
   OpenOptions,
   OperationDefinition,
   OperationTree,
+  QueryAcquisition,
   QueryDefinition,
   QueryStore,
   Store,
@@ -78,6 +94,18 @@ export type {
   StorePatterns,
   StoreStatus,
   StreamDefinition,
+  PositionedStreamDefinition,
+  PositionedStreamSource,
+  PositionedStreamEvent,
+  PositionedStreamOpenOptions,
+  CreatePositionedStreamInput,
+  PositionedFoldReceipt,
+  PositionedProjectionCheckpoint,
+  PositionedRestoreSeed,
+  PositionedStoreCheckpoint,
+  PositionedStoreRestoreSeed,
+  PositionedStoreRestoration,
+  NativeStreamDefinition,
   StreamStatus,
   StreamStore,
   ValueOptions,
@@ -116,3 +144,21 @@ export type {
   BoundAddressInspection,
   BoundAddressStamp,
 } from "./binding-address.ts";
+
+export {
+  createTransferScope,
+  prepareTransferOperation,
+  prepareTransferScopeSuccessors,
+  prepareTransferOperationRetirement,
+} from "./query-policy.ts";
+export type {
+  TransferScope,
+  TransferOperation,
+  TransferPublication,
+  TransferCommit,
+  TransferNotifications,
+  QueryTransferSource,
+  MutationTransferSource,
+  TransferOperationDispatch,
+  TransferScopeSuccessor,
+} from "./query-policy.ts";

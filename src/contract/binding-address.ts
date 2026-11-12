@@ -8,6 +8,7 @@ import type {
   StreamBindingRuntime,
 } from "./runtime.ts";
 import { storeKey } from "./identity.ts";
+import { noteTransferChange } from "./query-policy.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
 import {
   assertBindingContextOpen,
@@ -68,6 +69,69 @@ export type BoundAddressInspection =
       readonly stamp: BoundAddressStamp;
     };
 
+interface ReaderAddressSnapshot {
+  readonly runtime: StoreRuntime<unknown>;
+  readonly incarnation?: object;
+  readonly revision: ValueRevision;
+  readonly generation: number;
+  readonly stream?: object;
+  readonly transitioning: boolean;
+  readonly disposed: boolean;
+  readonly basePresent: boolean;
+  readonly requests: number;
+  readonly activeRequest?: object;
+  readonly predictions: readonly { readonly id: number; readonly dead: boolean }[];
+}
+
+function readerStoreRuntimes(binding: StoreBindingRuntime): readonly StoreRuntime<unknown>[] {
+  return binding.kind === "stream" ? [...(binding.readerStores ?? [])] : [];
+}
+
+function readerAddressSnapshots(
+  binding: StoreBindingRuntime,
+  key: string,
+): readonly ReaderAddressSnapshot[] {
+  return readerStoreRuntimes(binding)
+    .filter((runtime) => String(runtime.key) === key)
+    .map((runtime) => ({
+      runtime,
+      incarnation: runtime.incarnation,
+      revision: runtime.valueRevision,
+      generation: runtime.generation,
+      stream: runtime.stream,
+      transitioning: runtime.transitioning,
+      disposed: runtime.disposed,
+      basePresent: runtime.baseAvailable,
+      requests: runtime.requests.size,
+      activeRequest: runtime.activeRequest,
+      predictions: reactiveInternal.signalValue(runtime.predictionStack).map((prediction) => ({
+        id: prediction.id,
+        dead: prediction.dead,
+      })),
+    }));
+}
+
+function readerAddressSnapshotCurrent(snapshot: ReaderAddressSnapshot): boolean {
+  const { runtime } = snapshot;
+  const predictions = reactiveInternal.signalValue(runtime.predictionStack);
+  return (
+    runtime.incarnation === snapshot.incarnation &&
+    runtime.valueRevision === snapshot.revision &&
+    runtime.generation === snapshot.generation &&
+    runtime.stream === snapshot.stream &&
+    runtime.transitioning === snapshot.transitioning &&
+    runtime.disposed === snapshot.disposed &&
+    runtime.baseAvailable === snapshot.basePresent &&
+    runtime.requests.size === snapshot.requests &&
+    runtime.activeRequest === snapshot.activeRequest &&
+    predictions.length === snapshot.predictions.length &&
+    predictions.every(
+      (prediction, index) =>
+        prediction.id === snapshot.predictions[index]?.id &&
+        prediction.dead === snapshot.predictions[index]?.dead,
+    )
+  );
+}
 interface AddressFacts {
   readonly binding: StoreBindingRuntime;
   readonly key: string;
@@ -75,6 +139,8 @@ interface AddressFacts {
   readonly guard: object;
   readonly epoch: number;
   readonly runtime?: StoreRuntime<unknown>;
+  readonly readerStores: readonly StoreRuntime<unknown>[];
+  readonly readerSnapshots: readonly ReaderAddressSnapshot[];
   readonly incarnation?: object;
   readonly revision?: ValueRevision;
   readonly generation?: number;
@@ -110,7 +176,22 @@ export function importedBaselineCurrent(runtime: StoreRuntime<unknown>): boolean
 /** @internal Used by inspection and guarded stream import; empty shells grant no occupation. */
 export function boundAddressOccupied(binding: StoreBindingRuntime, key: string): boolean {
   const runtime = binding.stores.get(key);
+  const readerOccupied = readerStoreRuntimes(binding).some(
+    (reader) =>
+      String(reader.key) === key &&
+      !reader.disposed &&
+      (reader.transitioning ||
+        reader.baseAvailable ||
+        reactiveInternal
+          .signalValue(reader.predictionStack)
+          .some((prediction) => !prediction.dead) ||
+        reader.requests.size > 0 ||
+        (reader.activeRequest !== undefined && !reader.activeRequest.settled) ||
+        (reader.stream !== undefined && !reader.stream.ended) ||
+        reader.boundRetirement?.phase === "retiring"),
+  );
   return (
+    readerOccupied ||
     (binding.addresses.get(key)?.operations.size ?? 0) > 0 ||
     (runtime !== undefined &&
       (runtime.transitioning ||
@@ -129,6 +210,10 @@ export function boundAddressOccupied(binding: StoreBindingRuntime, key: string):
 function factsCurrent(facts: AddressFacts): boolean {
   const { binding, runtime, address } = facts;
   const state = binding.context.state;
+  const readerStores = readerStoreRuntimes(binding).filter(
+    (reader) => String(reader.key) === facts.key,
+  );
+  const readerSnapshotsCurrent = facts.readerSnapshots.every(readerAddressSnapshotCurrent);
   return (
     !state.disposed &&
     !binding.context.disposed &&
@@ -137,6 +222,9 @@ function factsCurrent(facts: AddressFacts): boolean {
     address.guard === facts.guard &&
     address.operations.size === facts.operations &&
     binding.stores.get(facts.key) === runtime &&
+    readerStores.length === facts.readerStores.length &&
+    readerStores.every((reader, index) => reader === facts.readerStores[index]) &&
+    readerSnapshotsCurrent &&
     (runtime === undefined ||
       (!runtime.disposed &&
         !runtime.transitioning &&
@@ -196,6 +284,10 @@ export function inspectBoundAddress(
     guard: address.guard,
     epoch: state.resetEpoch,
     runtime,
+    readerStores: readerStoreRuntimes(binding).filter(
+      (reader) => String(reader.key) === checkedKey,
+    ),
+    readerSnapshots: readerAddressSnapshots(binding, checkedKey),
     incarnation: runtime?.incarnation,
     revision: runtime?.valueRevision,
     generation: runtime?.generation,
@@ -210,8 +302,22 @@ export function inspectBoundAddress(
   const capture = runtime === undefined ? undefined : captureStoreRuntime(runtime);
   if (capture?.kind === "changed" || !factsCurrent(facts))
     return Object.freeze({ kind: "changed" });
-  const present = capture?.present ?? false;
-  const basePresent = runtime?.baseAvailable ?? false;
+  const readerCaptures = facts.readerSnapshots.map((snapshot) =>
+    captureStoreRuntime(snapshot.runtime),
+  );
+  if (
+    readerCaptures.some((readerCapture) => readerCapture.kind === "changed") ||
+    !factsCurrent(facts)
+  )
+    return Object.freeze({ kind: "changed" });
+  const present =
+    (capture?.kind === "stable" && capture.present) ||
+    readerCaptures.some(
+      (readerCapture) => readerCapture.kind === "stable" && readerCapture.present,
+    );
+  const basePresent =
+    (runtime?.baseAvailable ?? false) ||
+    facts.readerSnapshots.some((snapshot) => snapshot.basePresent);
   const occupied = present || boundAddressOccupied(binding, checkedKey);
   const completed = { ...facts, empty: !occupied };
   const stamp = Object.freeze({}) as BoundAddressStamp;
@@ -247,12 +353,20 @@ export function reserveBoundStreamAddress(
       throw new TypeError("Empty condition does not belong to this stream address");
     if (record.used || !record.facts.empty || !factsCurrent(record.facts))
       throw new TypeError("The inspected stream address is no longer empty");
+    const address = bindingAddress(binding, String(key));
+    noteTransferChange(binding);
+    noteTransferChange(binding.handle);
+    noteTransferChange(address);
     const token = beginBindingAddress(binding, String(key))!;
+    noteTransferChange(condition as object);
     record.used = true;
     return token;
   }
   const address = bindingAddress(binding, String(key));
   if (address.operations.size !== 0)
     throw new TypeError("The bound stream address is transitioning");
+  noteTransferChange(binding);
+  noteTransferChange(binding.handle);
+  noteTransferChange(address);
   return beginBindingAddress(binding, String(key))!;
 }

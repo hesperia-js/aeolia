@@ -9,6 +9,7 @@ interface PackageManifest {
       {
         readonly types?: string;
         readonly import?: string;
+        readonly development?: string;
         readonly default?: string;
       }
     >
@@ -25,12 +26,13 @@ test("the published entry point resolves to the built ESM artifact", async () =>
   expect(manifest.dependencies ?? {}).toEqual({});
   expect(entry).toEqual({
     types: "./dist/index.d.ts",
+    development: "./dist/development/index.js",
     import: "./dist/index.js",
     default: "./dist/index.js",
   });
 
   for (const entry of Object.values(manifest.exports ?? {})) {
-    for (const path of [entry.import, entry.types]) {
+    for (const path of [entry.import, entry.types, entry.development]) {
       expect(path).toBeDefined();
       expect(await Bun.file(new URL(`../../${path}`, import.meta.url)).exists()).toBe(true);
     }
@@ -42,28 +44,47 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     "AEOLIA_TAGGED_ENCODING",
     "Fault",
     "Signal",
+    "acknowledgePositionedFold",
     "adopt",
     "affects",
     "afterPropagation",
     "bindOperation",
     "bindStream",
+    "capturePositionedProjection",
+    "capturePositionedStore",
+    "captureReactiveConstruction",
     "computed",
     "createBindingContext",
     "createGraph",
     "createMutation",
     "createObserver",
+    "createPositionedStream",
     "createQuery",
     "createStore",
     "createStream",
+    "createTransferScope",
     "defineContract",
     "inspectBoundAddress",
+    "isPositionedCheckpointCurrent",
+    "isPositionedStoreCheckpointCurrent",
     "observeQueryProgress",
     "observeStore",
     "onFault",
     "peekStore",
+    "positionedFoldReceipt",
     "predictionFor",
+    "preparePassiveTransferClaim",
+    "preparePositionedRestore",
+    "preparePositionedSeedRestore",
+    "preparePositionedStoreRestore",
+    "prepareRequiredTransferAdoption",
+    "prepareRequiredTransferCapture",
+    "prepareTransferOperation",
+    "prepareTransferOperationRetirement",
+    "prepareTransferScopeSuccessors",
     "profileEffect",
     "project",
+    "projectPositioned",
     "queryOptions",
     "readableBrand",
     "signal",
@@ -82,23 +103,38 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     [
       "contract",
       [
+        "acknowledgePositionedFold",
         "affects",
         "bindOperation",
         "bindStream",
+        "capturePositionedProjection",
+        "capturePositionedStore",
         "createBindingContext",
         "createGraph",
         "createMutation",
+        "createPositionedStream",
         "createQuery",
         "createStore",
         "createStream",
+        "createTransferScope",
         "defineContract",
         "inspectBoundAddress",
+        "isPositionedCheckpointCurrent",
+        "isPositionedStoreCheckpointCurrent",
         "observeQueryProgress",
         "observeStore",
         "peekStore",
+        "positionedFoldReceipt",
         "predictionFor",
+        "preparePositionedRestore",
+        "preparePositionedSeedRestore",
+        "preparePositionedStoreRestore",
+        "prepareTransferOperation",
+        "prepareTransferOperationRetirement",
+        "prepareTransferScopeSuccessors",
         "profileEffect",
         "project",
+        "projectPositioned",
         "queryOptions",
         "storeKey",
       ],

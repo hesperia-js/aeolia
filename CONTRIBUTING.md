@@ -56,9 +56,13 @@ For required GitHub checks and npm releases, see [CI and npm releases](docs/ci.m
 
 ### Package build
 
-`build.ts` uses tsdown to clean `dist/` and bundle the four public entry points
-as platform-neutral ES modules with shared chunks. It minifies whitespace and
-syntax, preserves runtime names, and includes TypeScript sources in source maps.
+`tools/build/build.ts` uses tsdown to clean `dist/` and bundle the four public
+entry points as platform-neutral ES modules with shared chunks. It minifies
+whitespace and syntax, preserves runtime names, and includes TypeScript sources
+in source maps.
+
+The private `tools/build` workspace owns tsdown and its stable TypeScript peer.
+The root TypeScript dependency checks first-party code and emits declarations.
 
 TypeScript emits declarations separately to preserve namespace types. A `.d.ts`
 file may have no matching `.js` when its implementation is bundled into a chunk.

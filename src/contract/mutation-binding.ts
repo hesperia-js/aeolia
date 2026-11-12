@@ -23,6 +23,12 @@ import {
   targetPredictionByHandle,
 } from "./registry.ts";
 import type { BindingContextRuntime, MutationBindingRuntime } from "./runtime.ts";
+import {
+  beginTransferAdmission,
+  finishTransferAdmission,
+  registerTransferSource,
+} from "./query-policy.ts";
+import type { TransferAdmission } from "./query-policy.ts";
 
 type AnyMutation = MutationDefinition<any, any>;
 type AnyQuery = QueryDefinition<any, any, any, any>;
@@ -381,18 +387,26 @@ export function bindMutationOperation<M extends AnyMutation, R>(
     const member = (
       ...args: [input?: unknown, options?: BindingMutationOptions<M>]
     ): Promise<R> => {
-      const attempt = beginBoundMutation(binding);
+      let admission: TransferAdmission | undefined = beginTransferAdmission(
+        context.state,
+        definition,
+        undefined,
+        args[0],
+      );
+      let attempt: ReturnType<typeof beginBoundMutation> | undefined;
       const cancellation = new AbortError("The bound mutation phase was superseded or canceled.");
-      const assertAttempt = (): void => {
-        assertBindingContextOpen(context);
-        if (
-          state.resetEpoch !== attempt.epoch ||
-          attempt.stage === "finished" ||
-          attempt.controller.signal.aborted
-        )
-          throw cancellation;
-      };
       try {
+        const currentAttempt = beginBoundMutation(binding);
+        attempt = currentAttempt;
+        const assertAttempt = (): void => {
+          assertBindingContextOpen(context);
+          if (
+            state.resetEpoch !== currentAttempt.epoch ||
+            currentAttempt.stage === "finished" ||
+            currentAttempt.controller.signal.aborted
+          )
+            throw cancellation;
+        };
         const call = normalizeMutationArguments(args[0], args[1], args.length > 1, assertAttempt);
         assertAttempt();
         if (
@@ -414,8 +428,13 @@ export function bindMutationOperation<M extends AnyMutation, R>(
         const predictions =
           overrides === undefined ? [] : captureArray(overrides, context, assertAttempt);
         assertAttempt();
-        return runBoundMutation(attempt, call.input, signal, predictions) as Promise<R>;
+        if (admission !== undefined) {
+          finishTransferAdmission(admission);
+          admission = undefined;
+        }
+        return runBoundMutation(currentAttempt, call.input, signal, predictions) as Promise<R>;
       } catch (error) {
+        if (attempt === undefined) throw error;
         if (error === cancellation) {
           attempt.outputStarted = true;
           finishBoundMutation(attempt);
@@ -424,6 +443,8 @@ export function bindMutationOperation<M extends AnyMutation, R>(
         }
         finishBoundMutation(attempt);
         throw error;
+      } finally {
+        if (admission !== undefined) finishTransferAdmission(admission);
       }
     };
     const handle = Object.freeze({
@@ -433,6 +454,9 @@ export function bindMutationOperation<M extends AnyMutation, R>(
       profile,
       member,
     }) as MutationBinding<M, R>;
+    const transferSource = { graph: state.graph, kind: "mutation" as const, definition, binding };
+    registerTransferSource(member, transferSource);
+    registerTransferSource(handle, transferSource);
     if (profiles === undefined) {
       profiles = new Map();
       context.mutations.set(definition, profiles);

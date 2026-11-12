@@ -9,16 +9,23 @@ import { retireObservation } from "./observation-state.ts";
 import { nextValueRevision } from "./identity.ts";
 import { Fault } from "../fault.ts";
 import type { StreamDetachment, StreamTerminalCapture } from "./stream-binding.ts";
-import { beginBindingAddress, captureStoreRuntime, endBindingAddress } from "./registry.ts";
+import {
+  beginStoreAddress,
+  captureStoreRuntime,
+  changeBoundAddress,
+  endStoreAddress,
+} from "./registry.ts";
 import {
   beginPhysicalWork,
   finishPhysicalWork,
   normalizePhysicalPromise,
   observePhysicalWork,
   physicalCleanup,
+  physicalReaderRelease,
   recordCleanupFailure,
-  returnPhysicalIterator,
+  retireOwner,
 } from "./retirement.ts";
+import { noteTransferChange, registerTransferWork } from "./query-policy.ts";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -75,6 +82,7 @@ export function removeCollectionCandidateAt(state: GraphRuntimeState<any>, index
   const heap = state.collectionHeap;
   const removed = heap[index];
   if (removed === undefined) return;
+  noteTransferChange(removed.runtime);
   const last = heap.pop()!;
   removed.runtime.collectionIndex = -1;
   if (last === removed) return;
@@ -94,6 +102,8 @@ export function popCollectionCandidate(
 }
 
 export function isLive<T>(runtime: StoreRuntime<T>): boolean {
+  const positionedStore = runtime.readerScope?.session.positioned;
+  if (positionedStore !== undefined && positionedStore.phase !== "closed") return true;
   if (runtime.binding?.kind === "stream") {
     const session = runtime.stream;
     return (
@@ -135,6 +145,7 @@ export function updateCollectionCandidate<T>(runtime: StoreRuntime<T>): void {
   }
   const deadline = (runtime.stream?.unobservedSince ?? runtime.lastInteraction) + state.idleMs;
   if (index < 0) {
+    noteTransferChange(runtime);
     const candidate: CollectionCandidate = {
       runtime: runtime as StoreRuntime<unknown>,
       deadline,
@@ -146,6 +157,7 @@ export function updateCollectionCandidate<T>(runtime: StoreRuntime<T>): void {
   }
   const candidate = state.collectionHeap[index];
   if (candidate === undefined || candidate.runtime !== runtime) {
+    noteTransferChange(runtime);
     runtime.collectionIndex = -1;
     updateCollectionCandidate(runtime);
     return;
@@ -181,6 +193,14 @@ export function interact<C extends Contract>(state: GraphRuntimeState<C>): void 
 
 export function setStreamStatus<T>(runtime: StoreRuntime<T>, status: StreamStatus): void {
   const bound = runtime.stream?.bound;
+  const boundLifecycleChanges =
+    bound?.phase === "active" &&
+    !bound.session.ended &&
+    runtime.stream?.token === bound.session.token;
+  if (reactiveInternal.signalValue(runtime.streamStatusCell) !== status || boundLifecycleChanges) {
+    noteTransferChange(runtime);
+    if (boundLifecycleChanges) noteTransferChange(bound);
+  }
   runtime.streamStatusCell.set(status);
   if (
     bound?.phase === "active" &&
@@ -194,13 +214,16 @@ export function returnStreamIterator<T>(
   session: StreamSession<T>,
   iterator: AsyncIterator<T>,
   swallowCallFailure: boolean,
+  suppliedClose?: AsyncIterator<T>["return"],
 ): void {
   const work = beginPhysicalWork(session.physical.owner, "stream-return");
+  registerTransferWork(session, work);
+  noteTransferChange(session);
   let hasOriginal = false;
   try {
     let close: AsyncIterator<T>["return"];
     try {
-      close = iterator.return;
+      close = suppliedClose ?? iterator.return;
     } catch (cause) {
       recordCleanupFailure(work, cause);
       throw cause;
@@ -215,6 +238,7 @@ export function returnStreamIterator<T>(
       return;
     }
     hasOriginal = true;
+    noteTransferChange(work);
     work.original = original;
     try {
       observePhysicalWork(work, normalizePhysicalPromise(original), true, original);
@@ -227,6 +251,161 @@ export function returnStreamIterator<T>(
   }
 }
 
+function closePositionedStoreSession<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): void {
+  const positioned = session.positioned;
+  if (positioned === undefined || positioned.phase === "closed") return;
+  const dormant = positioned.phase === "dormant";
+  const preparation = positioned.preparation;
+  const unpublished = preparation !== undefined && !preparation.published;
+  noteTransferChange(runtime);
+  if (!unpublished && runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
+  noteTransferChange(session);
+  noteTransferChange(positioned);
+  positioned.phase = "closed";
+  positioned.dispatch = undefined;
+  if (preparation !== undefined) {
+    preparation.discarded = true;
+    const lifetime = preparation.lifetime;
+    preparation.lifetime = undefined;
+    if (lifetime !== undefined) {
+      try {
+        physicalCleanup(session.physical.owner, () => lifetime.dispose());
+      } catch (error) {
+        reportContinuationError(runtime.graph.__runtime, error);
+      }
+    }
+    while (preparation.registerStops.length > 0) {
+      const stop = preparation.registerStops.pop()!;
+      try {
+        physicalCleanup(session.physical.owner, stop);
+      } catch (error) {
+        reportContinuationError(runtime.graph.__runtime, error);
+      }
+    }
+  }
+  if (!unpublished && runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
+  const reader = positioned.reader;
+  try {
+    if (reader !== undefined && reader.owned && !reader.released) {
+      reader.released = true;
+      physicalReaderRelease(session.physical.owner, () =>
+        positioned.provider.releaseReader(positioned.input, reader.reader),
+      );
+    }
+  } catch (error) {
+    reportContinuationError(runtime.graph.__runtime, error);
+  } finally {
+    if (dormant) finishPhysicalWork(session.physical);
+  }
+}
+
+function removePendingPositionedStoreRoots<T>(runtime: StoreRuntime<T>): void {
+  const state = runtime.graph.__runtime;
+  state.pendingPositionedStores?.delete(runtime as StoreRuntime<unknown>);
+  runtime.binding?.context.pendingPositionedStores?.delete(runtime as StoreRuntime<unknown>);
+}
+
+export function discardPositionedStoreSession<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+  abortReason?: unknown,
+): void {
+  if (runtime.readerScope?.session !== session || session.positioned === undefined)
+    throw new TypeError("The value is not a positioned reader Store session");
+  const preparation = session.positioned.preparation;
+  const unpublished = preparation !== undefined && !preparation.published;
+  let failure: unknown;
+  let failed = false;
+  try {
+    if (!session.ended) endStream(runtime, session, "closed", undefined, { abortReason });
+  } catch (error) {
+    failure = error;
+    failed = true;
+  }
+  noteTransferChange(runtime);
+  noteTransferChange(session);
+  runtime.disposed = true;
+  runtime.incarnation = undefined;
+  removePendingPositionedStoreRoots(runtime);
+  if (!unpublished) {
+    const state = runtime.graph.__runtime;
+    if (state.stores.get(runtime.identity) === runtime) state.stores.delete(runtime.identity);
+    const binding = runtime.binding;
+    if (binding?.kind === "stream" && binding.readerStores?.has(runtime as StoreRuntime<unknown>))
+      binding.readerStores.delete(runtime as StoreRuntime<unknown>);
+    if (runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
+    updateCollectionCandidate(runtime);
+  }
+  if (failed) throw failure;
+}
+
+function retirePositionedStoreResource<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+): void {
+  const preparation = session.positioned?.preparation;
+  if (preparation === undefined) return;
+  try {
+    retireOwner(preparation.retirement, () => {});
+  } catch (error) {
+    reportContinuationError(runtime.graph.__runtime, error);
+  }
+}
+
+function endDetachedPositionedStoreSession<T>(
+  runtime: StoreRuntime<T>,
+  session: StreamSession<T>,
+  reason: unknown,
+  options?: { readonly abortReason?: unknown },
+): void {
+  const preparation = session.positioned?.preparation;
+  if (preparation === undefined || preparation.published) return;
+  const owner = preparation.retirement;
+  if (session.ended) {
+    retirePositionedStoreResource(runtime, session);
+    return;
+  }
+  const cleanupWork = beginPhysicalWork(owner, "cleanup");
+  registerTransferWork(runtime, cleanupWork);
+  registerTransferWork(session, cleanupWork);
+  noteTransferChange(runtime);
+  noteTransferChange(session);
+  session.ended = true;
+  const failures: unknown[] = [];
+  const attempt = (action: () => void, tracked = true): void => {
+    try {
+      if (tracked) physicalCleanup(owner, action);
+      else action();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+  closePositionedStoreSession(runtime, session);
+  const registrations = preparation.registrations.splice(0);
+  for (const registration of registrations) attempt(() => registration.dispose());
+  const iterator = session.iterator;
+  const removeCallerAbort = session.removeCallerAbort;
+  const removeControllerAbort = session.removeControllerAbort;
+  session.iterator = undefined;
+  session.removeCallerAbort = undefined;
+  session.removeControllerAbort = undefined;
+  if (runtime.stream === session) runtime.stream = undefined;
+  session.listeners.clear();
+  if (session.bound !== undefined) {
+    noteTransferChange(session.bound);
+    session.bound.phase = "detached";
+    session.bound.liveReadables = 0;
+  }
+  if (removeCallerAbort !== undefined) attempt(removeCallerAbort);
+  if (removeControllerAbort !== undefined) attempt(removeControllerAbort);
+  attempt(() => session.controller.abort(options?.abortReason ?? reason));
+  if (iterator !== undefined) attempt(() => returnStreamIterator(session, iterator, true), false);
+  finishPhysicalWork(cleanupWork);
+  removePendingPositionedStoreRoots(runtime);
+  for (const error of failures) reportContinuationError(runtime.graph.__runtime, error);
+  retirePositionedStoreResource(runtime, session);
+}
+
 export function endStream<T>(
   runtime: StoreRuntime<T>,
   session: StreamSession<T>,
@@ -234,15 +413,40 @@ export function endStream<T>(
   reason?: unknown,
   options?: { readonly abortReason?: unknown; readonly deferCleanup?: boolean },
 ): (() => void) | undefined {
-  if (session.bound !== undefined) return endBoundStream(runtime, session, status, reason, options);
-  if (session.ended) return;
-  const state = runtime.graph.__runtime;
+  const preparation = session.positioned?.preparation;
+  if (preparation !== undefined && !preparation.published) {
+    endDetachedPositionedStoreSession(runtime, session, reason, options);
+    return;
+  }
+  if (session.bound !== undefined) {
+    const deferred = endBoundStream(runtime, session, status, reason, options);
+    if (options?.deferCleanup && deferred !== undefined)
+      return () => {
+        try {
+          deferred();
+        } finally {
+          retirePositionedStoreResource(runtime, session);
+        }
+      };
+    retirePositionedStoreResource(runtime, session);
+    return deferred;
+  }
+  if (session.ended) {
+    retirePositionedStoreResource(runtime, session);
+    return;
+  }
   const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
+  registerTransferWork(runtime, cleanupWork);
+  registerTransferWork(session, cleanupWork);
+  const state = runtime.graph.__runtime;
   const current = (): boolean =>
     !state.disposed &&
     runtime.streamToken === session.token &&
     session.resetEpoch === state.resetEpoch;
+  noteTransferChange(runtime);
+  noteTransferChange(session);
   session.ended = true;
+  closePositionedStoreSession(runtime, session);
   const iterator = session.iterator;
   const removeCallerAbort = session.removeCallerAbort;
   const removeControllerAbort = session.removeControllerAbort;
@@ -283,7 +487,7 @@ export function endStream<T>(
         const close = iterator.return;
         if (typeof close !== "function") return;
         try {
-          returnPhysicalIterator(session.physical.owner, iterator, "stream-return", close);
+          returnStreamIterator(session, iterator, true, close);
         } catch {
           /* closing is best effort; the source is already terminal */
         }
@@ -320,9 +524,19 @@ export function endStream<T>(
   if (options?.deferCleanup) {
     session.listeners.clear();
     if (runtime.stream === session) runtime.stream = undefined;
-    return cleanup;
+    return () => {
+      try {
+        cleanup();
+      } finally {
+        retirePositionedStoreResource(runtime, session);
+      }
+    };
   }
-  cleanup();
+  try {
+    cleanup();
+  } finally {
+    retirePositionedStoreResource(runtime, session);
+  }
 }
 
 function endBoundStream<T>(
@@ -335,15 +549,24 @@ function endBoundStream<T>(
   const bound = session.bound!;
   if (bound.phase !== "active") return;
   const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
+  registerTransferWork(runtime, cleanupWork);
+  registerTransferWork(session, cleanupWork);
+  registerTransferWork(bound, cleanupWork);
   const state = runtime.graph.__runtime;
   const retirement = { token: {}, epoch: state.resetEpoch };
+  noteTransferChange(runtime);
+  noteTransferChange(session);
+  noteTransferChange(bound);
+  noteTransferChange(bound.binding);
+  noteTransferChange(bound.binding.handle);
   bound.retirement = retirement;
   bound.phase = "retiring";
   bound.liveReadables = 0;
   session.ended = true;
+  closePositionedStoreSession(runtime, session);
   runtime.boundRetirement = bound;
   runtime.transitioning = true;
-  const addressOperation = beginBindingAddress(bound.binding, String(runtime.key));
+  const addressOperation = beginStoreAddress(runtime);
   let terminalCapture: StreamTerminalCapture<T>;
   try {
     terminalCapture = Object.freeze({
@@ -436,6 +659,10 @@ function endBoundStream<T>(
         reason,
         terminalCapture,
       });
+      noteTransferChange(runtime);
+      noteTransferChange(session);
+      noteTransferChange(bound);
+      noteTransferChange(bound.binding);
       bound.receipt = receipt;
       bound.phase = "detached";
       try {
@@ -449,11 +676,13 @@ function endBoundStream<T>(
         try {
           physicalCleanup(session.physical.owner, () => {
             if (runtime.boundRetirement === bound) {
+              noteTransferChange(runtime);
+              noteTransferChange(bound);
               const owned = owns();
               runtime.boundRetirement = undefined;
               if (owned) runtime.transitioning = false;
             }
-            endBindingAddress(bound.binding, String(runtime.key), addressOperation);
+            endStoreAddress(runtime, addressOperation);
             updateCollectionCandidate(runtime);
             scheduleSweep(state);
           });
@@ -473,6 +702,7 @@ function endBoundStream<T>(
 
 export function dropStore<T>(runtime: StoreRuntime<T>): void {
   if (
+    runtime.readerScope !== undefined ||
     runtime.disposed ||
     runtime.declared ||
     runtime.dropped ||
@@ -481,7 +711,9 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
     runtime.predictionStack.peek().length > 0
   )
     return;
-  const addressDrop = beginBindingAddress(runtime.binding, String(runtime.key));
+  const addressDrop = beginStoreAddress(runtime);
+  noteTransferChange(runtime);
+  if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
   try {
     const streamToken = runtime.streamToken;
     const revision = nextValueRevision(runtime.valueRevision);
@@ -540,7 +772,7 @@ export function dropStore<T>(runtime: StoreRuntime<T>): void {
       updateCollectionCandidate(runtime);
     });
   } finally {
-    endBindingAddress(runtime.binding, String(runtime.key), addressDrop);
+    endStoreAddress(runtime, addressDrop);
   }
 }
 

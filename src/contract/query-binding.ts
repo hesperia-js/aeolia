@@ -17,6 +17,7 @@ import { Fault } from "../fault.ts";
 import { assertGraphOpen } from "./faults.ts";
 import {
   assertBindingContextOpen as assertContextOpen,
+  assertStoreHandlePublished,
   bindingContextByHandle as contexts,
   captureQueryTarget,
   graphRuntimeByGraph,
@@ -33,6 +34,13 @@ import {
 } from "./engine.ts";
 import { beginPhysicalWork, createRetirementOwner, finishPhysicalWork } from "./retirement.ts";
 import { makeQueryStore } from "./query.ts";
+import {
+  beginTransferAdmission,
+  finishTransferAdmission,
+  registerTransferAuthority,
+  registerTransferSource,
+} from "./query-policy.ts";
+import type { TransferAdmission } from "./query-policy.ts";
 import type { BindingContextRuntime, QueryBindingRuntime } from "./runtime.ts";
 
 type AnyQuery = QueryDefinition<any, any, any, any>;
@@ -179,10 +187,11 @@ export function createBindingContext(graph: Graph): BindingContext {
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
   const activeCell = signal(true);
+  const active = computed(() => activeCell.get());
   let context!: BindingContextRuntime;
   const handle: BindingContext = Object.freeze({
     graph: state.graph.id,
-    active: computed(() => activeCell.get()),
+    active,
     dispose: () => disposeBindingContextRuntime(context),
     retire: () => retireBindingContextRuntime(context),
   });
@@ -199,6 +208,12 @@ export function createBindingContext(graph: Graph): BindingContext {
   };
   contexts.set(handle, context);
   state.bindingContexts.add(context);
+  registerTransferAuthority(activeCell, {
+    graph: state.graph,
+    owner: context,
+    kind: "context-active-cell",
+  });
+  registerTransferAuthority(active, { graph: state.graph, owner: context, kind: "context-active" });
   return handle;
 }
 
@@ -207,6 +222,7 @@ function captureTarget<Q extends AnyQuery, V>(
   store: QueryStore<V, QueryProgress<Q>>,
 ): TypedTarget<Q, V> | undefined {
   assertContextOpen(binding.context);
+  assertStoreHandlePublished(store);
   const runtime = queryRuntimeByStore.get(store);
   if (runtime === undefined || runtime.binding !== binding)
     throw new TypeError("Query handle does not belong to this binding");
@@ -281,7 +297,8 @@ function bindQueryOperation<Q extends AnyQuery, V>(
   const contextHandle = configuration.context;
   assertGraphOpen(state);
   const context = contexts.get(contextHandle);
-  if (context === undefined || context.state !== state || !state.queryDefinitions.has(definition))
+  const acquisition = state.queryDefinitions.get(definition);
+  if (context === undefined || context.state !== state || acquisition === undefined)
     throw new TypeError("Query binding requires its exact graph, context and declaration");
   assertContextOpen(context);
   const physical = beginPhysicalWork(context.retirement, "acquisition");
@@ -325,6 +342,7 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       kind: "query",
       name,
       key: (input: QueryInput<Q>) => Reflect.apply(key, definition, [input]) as QueryKey<Q>,
+      acquisition,
       fetch: async (
         input: QueryInput<Q>,
         options: QueryFetchOptions<QueryProgress<Q>>,
@@ -350,7 +368,9 @@ function bindQueryOperation<Q extends AnyQuery, V>(
     const member = (...args: [input?: unknown, options?: StoreOptions<V>]) => {
       assertContextOpen(context);
       const physical = beginPhysicalWork(context.retirement, "acquisition");
+      let admission: TransferAdmission | undefined;
       try {
+        admission = beginTransferAdmission(state, definition, binding, args[0]);
         const call = normalizeQueryCall(args[0], args[1], args.length > 1, () =>
           assertContextOpen(context),
         );
@@ -374,9 +394,17 @@ function bindQueryOperation<Q extends AnyQuery, V>(
           throw new TypeError("Initial value conflicts with query binding configuration");
         const options = selectedOptions as StoreOptions<V> | undefined;
         assertContextOpen(context);
-        return makeQueryStore(state, execution, call.input, options, binding, value);
+        if (admission !== undefined) {
+          finishTransferAdmission(admission);
+          admission = undefined;
+        }
+        return makeQueryStore(state, execution, call.input, options, acquisition, binding, value);
       } finally {
-        finishPhysicalWork(physical);
+        try {
+          if (admission !== undefined) finishTransferAdmission(admission);
+        } finally {
+          finishPhysicalWork(physical);
+        }
       }
     };
     const handle = Object.freeze({
@@ -388,6 +416,9 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       target: (store: QueryStore<V, QueryProgress<Q>>) => captureTarget<Q, V>(binding, store),
     }) as QueryBinding<Q, V>;
     binding.handle = handle;
+    const transferSource = { graph: state.graph, kind: "query" as const, definition, binding };
+    registerTransferSource(member, transferSource);
+    registerTransferSource(handle, transferSource);
     bindings.set(handle, binding);
     if (profiles === undefined) {
       profiles = new Map();

@@ -1,40 +1,47 @@
 import {
+  adopt as rootAdopt,
   createGraph,
   observeStore as rootObserveStore,
   observeQueryProgress as rootObserveQueryProgress,
+  snapshot as rootSnapshot,
+  type AdoptOptionsV2,
   type ObservationLease as RootObservationLease,
+  type Signal as RootSignal,
+  type SnapshotBindingReference,
+  type SnapshotV2,
   type QueryProgressEvent as RootQueryProgressEvent,
   type QueryProgressObservation as RootQueryProgressObservation,
-  type Signal as RootSignal,
 } from "aeolia";
 import {
+  createQuery,
+  defineContract,
+  observeQueryProgress,
+  observeStore,
+  peekStore,
   affects,
   bindOperation,
   bindStream,
-  createBindingContext,
-  createMutation,
-  createQuery,
   createStream,
-  defineContract,
   inspectBoundAddress,
-  observeStore,
-  observeQueryProgress,
-  peekStore,
-  predictionFor,
-  profileEffect,
   storeKey,
   type BoundStreamSession,
   type BoundStreamValueOptions,
+  createBindingContext,
+  createMutation,
+  profileEffect,
+  predictionFor,
   type MutationBinding,
-  type StoreCapture,
+  type TargetPrediction,
   type ObservationLease,
+  type StoreCapture,
   type QueryFetchOptions,
   type QueryProgressSnapshot,
   type QueryProgressStatus,
   type QueryProgressEvent,
   type QueryProgressObservation,
   type QueryStore,
-  type TargetPrediction,
+  type QueryBindingHandle,
+  type StreamBindingHandle,
 } from "aeolia/contract";
 import { Signal, computed, signal } from "aeolia/reactive";
 
@@ -142,6 +149,45 @@ function streamSubpathConsumer(): void {
 
 void streamSubpathConsumer;
 
+function versionedTransferSubpathConsumer(): void {
+  const query = createQuery({
+    name: "subpath-transfer.query",
+    key: (input: { readonly key: string }) => input.key,
+    fetch: async (input: { readonly key: string }) => input.key,
+  });
+  const stream = createStream({
+    name: "subpath-transfer.stream",
+    key: (input: { readonly key: string }) => input.key,
+    open: async function* (input: { readonly key: string }) {
+      yield input.key;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "subpath-transfer", operations: { query, stream } }),
+  });
+  const context = createBindingContext(graph);
+  const queryBinding = bindOperation(graph, query, {
+    context,
+    profile: {},
+    fetch: query.fetch,
+  });
+  const streamBinding = bindStream(graph, stream, graph.api.stream, { context });
+  const queryHandle: QueryBindingHandle = queryBinding;
+  const streamHandle: StreamBindingHandle = streamBinding;
+  const bindings: readonly SnapshotBindingReference[] = [
+    { binding: queryHandle, reference: { operation: query.name, profile: "subpath" } },
+    { binding: streamHandle, reference: { operation: stream.name, profile: "subpath" } },
+  ];
+  const captured: SnapshotV2 = rootSnapshot(graph, { version: 2, bindings });
+  const options: AdoptOptionsV2 = { bindings };
+  rootAdopt(graph, captured, options);
+  // @ts-expect-error Version 2 requires explicit root adoption options.
+  rootAdopt(graph, captured);
+  graph.dispose();
+}
+
+void versionedTransferSubpathConsumer;
+
 function queryProgressSubpathConsumer(): void {
   type Progress = { readonly received: number };
   const query = createQuery<string, number, string, Progress>({
@@ -174,9 +220,10 @@ function queryProgressSubpathConsumer(): void {
     const current: QueryProgressEvent<Progress> = event;
     void current;
   });
-  // @ts-expect-error Contract snapshots do not expose Hesperia projection policy.
+  // @ts-expect-error Contract subpath snapshots expose no Hesperia projection field.
   void snapshot.project;
   void [result, status, captured, stop];
+  graph.dispose();
 }
 
 void queryProgressSubpathConsumer;

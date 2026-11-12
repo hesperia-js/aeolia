@@ -6,7 +6,7 @@ import type {
   StoreRuntime,
 } from "./runtime.ts";
 import { __internal as reactiveInternal } from "../reactive.ts";
-import { addSignalAbort } from "../utils.ts";
+import { addSignalAbortWithDefaultReason } from "../utils.ts";
 import { Fault } from "../fault.ts";
 import { AbortError, assertStoreOpen, reportContinuationError } from "./faults.ts";
 import {
@@ -18,6 +18,7 @@ import {
 } from "./status.ts";
 import { interact, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { issue, nextGeneration, recordLanding, retirePredictions } from "./store-state.ts";
+import { noteTransferChange, registerTransferWork } from "./query-policy.ts";
 import {
   beginQueryProgress,
   completeQueryProgress,
@@ -45,6 +46,7 @@ function bindingContextClosed<T>(runtime: StoreRuntime<T>): boolean {
 
 export function finishRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   if (request.settled) return false;
+  noteTransferChange(runtime);
   request.settled = true;
   changeBoundAddress(runtime);
   let cleanupFailed = false;
@@ -114,11 +116,15 @@ export function settleQuerySuccess<T>(
     throw finishError;
   }
   const wasActive = runtime.activeRequest === request;
-  if (wasActive) runtime.activeRequest = undefined;
+  if (wasActive) {
+    noteTransferChange(runtime);
+    runtime.activeRequest = undefined;
+  }
   if (!current || runtime.disposed || !wasActive) {
     scheduleSweep(runtime.graph.__runtime);
     return;
   }
+  if (runtime.recoveryDisarmed) noteTransferChange(runtime);
   runtime.recoveryDisarmed = false;
   try {
     reactiveInternal.batch(() => {
@@ -162,13 +168,18 @@ export function settleQueryFailure<T>(
     throw finishError;
   }
   const wasActive = runtime.activeRequest === request;
-  if (wasActive) runtime.activeRequest = undefined;
+  if (wasActive) {
+    noteTransferChange(runtime);
+    runtime.activeRequest = undefined;
+  }
   if (!current || runtime.disposed || !wasActive) {
     scheduleSweep(runtime.graph.__runtime);
     return;
   }
+  if (runtime.recoveryDisarmed !== request.automaticRecovery) noteTransferChange(runtime);
   runtime.recoveryDisarmed = request.automaticRecovery;
   try {
+    noteTransferChange(runtime);
     reactiveInternal.batch(() => {
       runtime.failing = true;
       runtime.invalidated = true;
@@ -252,17 +263,21 @@ export function startQueryRequest<T>(
     if (!force) {
       const existing = isCurrentRequest(runtime);
       if (existing != null) {
+        if (runtime.refreshOnActivation) noteTransferChange(runtime);
         runtime.refreshOnActivation = false;
         return existing;
       }
     }
     if (!force && runtime.recoveryDisarmed) return undefined;
+    if (runtime.refreshOnActivation) noteTransferChange(runtime);
     runtime.refreshOnActivation = false;
     if (force) {
+      if (runtime.recoveryDisarmed) noteTransferChange(runtime);
       runtime.recoveryDisarmed = false;
     }
     if (runtime.activeRequest != null && !runtime.activeRequest.settled) {
       const predecessor = runtime.activeRequest;
+      noteTransferChange(runtime);
       predecessor.superseded = true;
       predecessor.controller.abort();
       interruptQueryProgress(runtime, predecessor, predecessor.controller.signal.reason);
@@ -282,9 +297,13 @@ export function startQueryRequest<T>(
       assertStoreOpen(runtime);
       if (state.resetEpoch !== resetEpoch) return undefined;
     }
-    const incarnation = runtime.incarnation ?? (runtime.incarnation = {});
+    let incarnation = runtime.incarnation;
+    if (incarnation === undefined) {
+      noteTransferChange(runtime);
+      incarnation = runtime.incarnation = {};
+    }
     const controller = new AbortController();
-    const unlinkCallerAbort = addSignalAbort(
+    const unlinkCallerAbort = addSignalAbortWithDefaultReason(
       abortSignal,
       controller,
       (remove) => physicalCleanup(owner, remove),
@@ -324,6 +343,7 @@ export function startQueryRequest<T>(
       throw error;
     }
     const source: QuerySource<T> = { query: caller.query, input: caller.input };
+    noteTransferChange(runtime);
     let resolveOutcome!: QueryRequest["resolveOutcome"];
     const outcome = new Promise<QueryOutcome>((resolve) => {
       resolveOutcome = resolve;
@@ -348,6 +368,7 @@ export function startQueryRequest<T>(
       settled: false,
       superseded: false,
     };
+    noteTransferChange(runtime);
     runtime.source = source;
     runtime.requests.add(request);
     updateCollectionCandidate(runtime);
@@ -362,6 +383,7 @@ export function startQueryRequest<T>(
       predecessor.outcomeReported = true;
       void outcome.then((result) => predecessor.resolveOutcome(result));
     }
+    noteTransferChange(runtime);
     runtime.activeRequest = request;
     state.activeControllers.add(controller);
     let setupError: unknown;
@@ -435,6 +457,8 @@ export function startQueryRequest<T>(
       return request;
     }
     const original = beginPhysicalWork(owner, "query");
+    registerTransferWork(runtime, original);
+    registerTransferWork(request, original);
     let fetched: unknown;
     let fetchedReturned = false;
     let acknowledged = true;
@@ -530,6 +554,7 @@ export function callerForSource<T>(
     source.input,
     asWindow(undefined, source.query.revalidateAfterMs),
   );
+  noteTransferChange(runtime);
   runtime.callers.push(caller);
   return caller;
 }
@@ -596,6 +621,7 @@ export function invalidateStore<T>(runtime: StoreRuntime<T>): void {
     touch(runtime);
     return;
   }
+  noteTransferChange(runtime);
   runtime.invalidated = true;
   touch(runtime);
   writeAllStatuses(runtime);

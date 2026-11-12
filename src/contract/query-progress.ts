@@ -13,8 +13,15 @@ import type {
 } from "./runtime.ts";
 import type { Unsubscribe } from "../fault.ts";
 import { signal, __internal as reactiveInternal } from "../reactive.ts";
+import type { WritableSignal } from "../reactive.ts";
 import { assertStoreOpen, graphFault, reportContinuationError } from "./faults.ts";
 import { scheduleSweep, updateCollectionCandidate } from "./collection.ts";
+import {
+  noteTransferChange,
+  prepareTransferChange,
+  registerTransferReadable,
+  unregisterTransferReadable,
+} from "./query-policy.ts";
 
 function idleSnapshot(): QueryProgressSnapshot<unknown> {
   return Object.freeze({
@@ -46,6 +53,7 @@ function progressCell<T>(runtime: StoreRuntime<T>) {
   const created = signal(initial, {
     label: `query:${String(runtime.key)}:progress`,
   });
+  noteTransferChange(runtime);
   runtime.queryProgressCell = created;
   runtime.queryProgressAuthority = {
     current: initial,
@@ -59,6 +67,7 @@ function progressCell<T>(runtime: StoreRuntime<T>) {
   runtime.queryProgressAuthorityChange = (request) => {
     interruptQueryProgress(runtime, request, undefined, { authorityChanged: true });
   };
+  registerTransferReadable(created, runtime, "query-progress");
   reactiveInternal.bindReadable(created, {
     graphId: state.graph.id,
     reportFault: (fault) => graphFault(state, fault),
@@ -286,6 +295,7 @@ function publish<T, P>(
     ...(request === undefined ? {} : { request }),
   };
 
+  noteTransferChange(runtime);
   owner.current = value as QueryProgressSnapshot<unknown>;
   if (request !== undefined) owner.request = request;
   else if (value.execution === undefined) owner.request = undefined;
@@ -360,6 +370,7 @@ function clearQueryProgress<T>(runtime: StoreRuntime<T>): void {
 export function retireQueryProgress<T>(runtime: StoreRuntime<T>): void {
   const owner = runtime.queryProgressAuthority;
   if (owner === undefined) return;
+  noteTransferChange(runtime);
   owner.request = undefined;
   owner.queue.length = 0;
   for (const listener of owner.listeners) listener.active = false;
@@ -368,6 +379,76 @@ export function retireQueryProgress<T>(runtime: StoreRuntime<T>): void {
 }
 
 /** Returns the stable, read-only progress readable for one query runtime. @internal */
+export interface PreparedQueryProgressCell {
+  readonly readable: Readable<QueryProgressSnapshot<unknown>>;
+  readonly cell: WritableSignal<QueryProgressSnapshot<unknown>>;
+  current(): boolean;
+  publish(): void;
+  deliver(): void;
+  discard(): void;
+}
+
+export function prepareQueryProgressCell<T>(runtime: StoreRuntime<T>): PreparedQueryProgressCell {
+  const existing = runtime.queryProgressCell;
+  if (existing !== undefined) {
+    return {
+      readable: existing as Readable<QueryProgressSnapshot<unknown>>,
+      cell: existing as WritableSignal<QueryProgressSnapshot<unknown>>,
+      current: () => runtime.queryProgressCell === existing,
+      publish: () => undefined,
+      deliver: () => undefined,
+      discard: () => undefined,
+    };
+  }
+  const state = runtime.graph.__runtime;
+  const initial = idleSnapshot();
+  const created = signal(initial, { label: "query:" + String(runtime.key) + ":progress" });
+  const nextAuthority: QueryProgressAuthority = {
+    current: initial,
+    sequence: 0,
+    listeners: new Set(),
+    queue: [],
+    continuationErrors: [],
+    dispatching: false,
+  };
+  registerTransferReadable(created, runtime, "query-progress");
+  reactiveInternal.bindReadable(created, {
+    graphId: state.graph.id,
+    reportFault: (fault) => graphFault(state, fault),
+  });
+  const transition = prepareTransferChange(runtime);
+  const clear = (): void => clearQueryProgress(runtime);
+  const authorityChange = (request: QueryRequest): void => {
+    interruptQueryProgress(runtime, request, undefined, { authorityChanged: true });
+  };
+  let published = false;
+  let delivered = false;
+  let discarded = false;
+  return {
+    readable: created as Readable<QueryProgressSnapshot<unknown>>,
+    cell: created,
+    current: () => !published && transition.current() && runtime.queryProgressCell === undefined,
+    publish: () => {
+      if (published) return;
+      transition.publish();
+      runtime.queryProgressCell = created;
+      runtime.queryProgressAuthority = nextAuthority;
+      runtime.queryProgressClear = clear;
+      runtime.queryProgressAuthorityChange = authorityChange;
+      published = true;
+    },
+    deliver: () => {
+      if (!published || delivered) return;
+      delivered = true;
+      observeQueryProgressReadable(runtime, created);
+    },
+    discard: () => {
+      if (published || discarded) return;
+      discarded = true;
+      unregisterTransferReadable(created, runtime);
+    },
+  };
+}
 export function queryProgressReadable<T, P>(
   runtime: StoreRuntime<T>,
 ): Readable<QueryProgressSnapshot<P>> {
