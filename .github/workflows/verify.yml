@@ -199,10 +199,13 @@ jobs:
             throw "Chrome executable path must be absolute"
           }
           if ($env:RUNNER_OS -eq "Linux") {
-            $reported = (& $executable.FullName --version) -join ""
-            if ($LASTEXITCODE -ne 0) { throw "Chrome version check failed" }
-            $match = [regex]::Match($reported, '^Google Chrome for Testing (\d+\.\d+\.\d+\.\d+)$')
-            if (-not $match.Success) { throw "Unexpected Chrome version output: $reported" }
+            $reported = & $executable.FullName --version | Out-String
+            $exitCode = $LASTEXITCODE
+            $captured = ConvertTo-Json -InputObject $reported -Compress
+            Write-Output "PowerShell Chrome version text (JSON): $captured"
+            if ($exitCode -ne 0) { throw "Chrome version check failed: $exitCode" }
+            $match = [regex]::Match($reported.Trim(), '^Google Chrome for Testing (\d+\.\d+\.\d+\.\d+)$')
+            if (-not $match.Success) { throw "Unexpected Chrome version output: $captured" }
             $actualVersion = $match.Groups[1].Value
           } else {
             $info = $executable.VersionInfo
