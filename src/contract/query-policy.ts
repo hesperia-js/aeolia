@@ -101,6 +101,11 @@ export interface TransferSourceRegistration {
   readonly kind: "query" | "mutation" | "stream" | "store";
   readonly definition: object;
   readonly binding?: object;
+  readonly invokeQuery?: (
+    args: readonly unknown[],
+    entries: unknown,
+    assertCurrent?: () => void,
+  ) => QueryStore<any, any>;
 }
 const graphs = new WeakMap<object, GraphRuntimeState<any>>();
 const sources = new WeakMap<object, TransferSourceRegistration>();

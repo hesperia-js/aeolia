@@ -117,7 +117,13 @@ import {
   observeStoreReadable,
   storeEquals,
 } from "./store.ts";
-import { addCaller, createQueryRuntimeActivation, makeQueryStore, ready } from "./query.ts";
+import {
+  addCaller,
+  assertSynchronousQueryAuthority,
+  createQueryRuntimeActivation,
+  makeQueryStore,
+  ready,
+} from "./query.ts";
 import { runMutation } from "./mutation.ts";
 import { createStreamRuntimeActivation, streamMember } from "./stream.ts";
 import {
@@ -621,8 +627,22 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
       if (isCreateQueryInputWithAcquisition(value, acquisition) && value.kind === "query") {
         const definition = value as QueryDefinition<unknown, unknown, any, any>;
         state.queryDefinitions.set(definition, acquisition);
-        const member = (...args: [input?: unknown, options?: StoreOptions<unknown>]) => {
+        const invoke = (
+          args: readonly unknown[],
+          cohortInput?: { readonly entries: unknown; readonly assertCurrent?: () => void },
+        ) => {
           assertGraphOpen(state);
+          const epoch = state.resetEpoch;
+          const assertNative = (): void => {
+            assertGraphOpen(state);
+            if (cohortInput !== undefined && state.resetEpoch !== epoch)
+              throw new AbortError("Query acquisition crossed a graph reset.");
+          };
+          const assertCall = (): void => {
+            assertNative();
+            assertSynchronousQueryAuthority(cohortInput?.assertCurrent);
+            assertNative();
+          };
           const physical = beginPhysicalWork(state.retirement, "acquisition");
           let admission: TransferAdmission | undefined;
           const finishAdmission = (): void => {
@@ -632,15 +652,34 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
             finishTransferAdmission(pending);
           };
           try {
-            const [input, options] = args;
+            if (cohortInput !== undefined && !Array.isArray(args))
+              throw new TypeError("Query arguments must be an array.");
+            const input = args[0];
+            assertCall();
+            const options = args[1];
+            assertCall();
+            const argumentCount = args.length;
+            assertCall();
+            if (
+              cohortInput !== undefined &&
+              (!Number.isSafeInteger(argumentCount) || argumentCount < 0)
+            )
+              throw new TypeError("Query arguments must be an array.");
             admission = beginTransferAdmission(state, definition, undefined, input);
-            assertGraphOpen(state);
-            const call = normalizeQueryCall(input, options, args.length > 1, () =>
-              assertGraphOpen(state),
-            );
+            assertCall();
+            const call = normalizeQueryCall(input, options, argumentCount > 1, assertCall);
             finishAdmission();
-            assertGraphOpen(state);
-            return makeQueryStore(state, definition, call.input, call.options, acquisition);
+            assertCall();
+            return makeQueryStore(
+              state,
+              definition,
+              call.input,
+              call.options,
+              acquisition,
+              undefined,
+              undefined,
+              cohortInput,
+            );
           } finally {
             try {
               finishAdmission();
@@ -649,7 +688,14 @@ function buildApi<C extends Contract>(state: GraphRuntimeState<C>, tree: Operati
             }
           }
         };
-        registerTransferSource(member, { graph: state.graph, kind: "query", definition });
+        const member = (...args: [input?: unknown, options?: StoreOptions<unknown>]) =>
+          invoke(args);
+        registerTransferSource(member, {
+          graph: state.graph,
+          kind: "query",
+          definition,
+          invokeQuery: (args, entries, assertCurrent) => invoke(args, { entries, assertCurrent }),
+        });
         api[property] = member;
       } else if (value !== null && typeof value === "object") {
         api[property] = buildApi(state, value as OperationTree);

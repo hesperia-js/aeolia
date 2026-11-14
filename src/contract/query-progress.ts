@@ -1,7 +1,9 @@
 import type {
+  QueryProgressCohortEntry,
   QueryProgressEvent,
   QueryProgressObservation,
   QueryProgressSnapshot,
+  QueryStore,
   Readable,
 } from "./types.ts";
 import type {
@@ -14,14 +16,100 @@ import type {
 import type { Unsubscribe } from "../fault.ts";
 import { signal, __internal as reactiveInternal } from "../reactive.ts";
 import type { WritableSignal } from "../reactive.ts";
+import { isObject } from "../utils.ts";
 import { assertStoreOpen, graphFault, reportContinuationError } from "./faults.ts";
 import { scheduleSweep, updateCollectionCandidate } from "./collection.ts";
+import { physicalCleanup } from "./retirement.ts";
 import {
   noteTransferChange,
   prepareTransferChange,
   registerTransferReadable,
   unregisterTransferReadable,
 } from "./query-policy.ts";
+
+interface CapturedQueryProgressCohortEntry<T, P> {
+  readonly receiver: QueryProgressCohortEntry<T, P>;
+  readonly signal: AbortSignal;
+  readonly onEvent: QueryProgressCohortEntry<T, P>["onEvent"];
+  readonly addAbortListener: AbortSignal["addEventListener"];
+  readonly removeAbortListener: AbortSignal["removeEventListener"];
+}
+
+/** Internal captured input; never exposed from the public package surface. */
+export interface CapturedQueryProgressCohort<T, P> {
+  readonly entries: readonly CapturedQueryProgressCohortEntry<T, P>[];
+}
+
+/** Captures every authored cohort field before query key or store acquisition. @internal */
+export function captureQueryProgressCohort<T, P>(
+  value: unknown,
+  assertCurrent: () => void,
+): CapturedQueryProgressCohort<T, P> {
+  assertCurrent();
+  if (!Array.isArray(value)) throw new TypeError("Query progress entries must be an array");
+
+  const length: unknown = Reflect.get(value, "length", value);
+  assertCurrent();
+  if (
+    typeof length !== "number" ||
+    !Number.isSafeInteger(length) ||
+    length < 0 ||
+    length > 0xffff_ffff
+  )
+    throw new TypeError("Query progress entries must be an array");
+
+  const values: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const entry: unknown = Reflect.get(value, String(index), value);
+    assertCurrent();
+    values.push(entry);
+  }
+
+  const captured: CapturedQueryProgressCohortEntry<T, P>[] = [];
+  for (const entryValue of values) {
+    if (!isObject(entryValue) || typeof entryValue === "function")
+      throw new TypeError("Each progress cohort entry must be an object");
+    const receiver = entryValue as QueryProgressCohortEntry<T, P>;
+    const signalValue: unknown = Reflect.get(entryValue, "signal", entryValue);
+    assertCurrent();
+    const onEventValue: unknown = Reflect.get(entryValue, "onEvent", entryValue);
+    assertCurrent();
+    if (typeof onEventValue !== "function")
+      throw new TypeError("Each progress cohort entry requires an onEvent function");
+    if (!isObject(signalValue)) throw new TypeError("Each progress cohort entry requires a signal");
+
+    const signal = signalValue as AbortSignal;
+    const aborted: unknown = Reflect.get(signal, "aborted", signal);
+    assertCurrent();
+    const onabort: unknown = Reflect.get(signal, "onabort", signal);
+    assertCurrent();
+    const addAbortListener: unknown = Reflect.get(signal, "addEventListener", signal);
+    assertCurrent();
+    const removeAbortListener: unknown = Reflect.get(signal, "removeEventListener", signal);
+    assertCurrent();
+    const dispatchEvent: unknown = Reflect.get(signal, "dispatchEvent", signal);
+    assertCurrent();
+    const throwIfAborted: unknown = Reflect.get(signal, "throwIfAborted", signal);
+    assertCurrent();
+    if (
+      typeof aborted !== "boolean" ||
+      (onabort !== null && typeof onabort !== "function") ||
+      typeof addAbortListener !== "function" ||
+      typeof removeAbortListener !== "function" ||
+      typeof dispatchEvent !== "function" ||
+      typeof throwIfAborted !== "function"
+    )
+      throw new TypeError("Each progress cohort entry requires an AbortSignal");
+    captured.push({
+      receiver,
+      signal,
+      onEvent: onEventValue as QueryProgressCohortEntry<T, P>["onEvent"],
+      addAbortListener: addAbortListener as AbortSignal["addEventListener"],
+      removeAbortListener: removeAbortListener as AbortSignal["removeEventListener"],
+    });
+  }
+  return Object.freeze({ entries: Object.freeze(captured) });
+}
 
 function idleSnapshot(): QueryProgressSnapshot<unknown> {
   return Object.freeze({
@@ -373,9 +461,22 @@ export function retireQueryProgress<T>(runtime: StoreRuntime<T>): void {
   noteTransferChange(runtime);
   owner.request = undefined;
   owner.queue.length = 0;
-  for (const listener of owner.listeners) listener.active = false;
+  const cleanupFailures: unknown[] = [];
+  const listeners = Array.from(owner.listeners);
+  for (const listener of listeners) {
+    if (listener.cohortStop !== undefined) {
+      try {
+        listener.cohortStop(true);
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    } else {
+      listener.active = false;
+    }
+  }
   owner.listeners.clear();
   runtime.progressReadableCount = 0;
+  for (const error of cleanupFailures) reportContinuationError(runtime.graph.__runtime, error);
 }
 
 /** Returns the stable, read-only progress readable for one query runtime. @internal */
@@ -470,6 +571,265 @@ export function queryProgressObservation<T, P>(
     subscribe: (observer: (event: QueryProgressEvent<P>) => void) =>
       subscribeProgress(runtime, observer),
   });
+}
+
+/** Enrolls one query-call cohort at a single native progress frontier. @internal */
+export function enrollQueryProgressCohort<T, P>(
+  runtime: StoreRuntime<T>,
+  store: QueryStore<T, P>,
+  captured: CapturedQueryProgressCohort<T, P>,
+  assertCurrent: () => void,
+): Unsubscribe {
+  assertCurrent();
+  if (captured.entries.length === 0) return () => undefined;
+  const observation = queryProgressObservation<T, P>(runtime);
+  assertCurrent();
+  const owner = authority(runtime);
+  const cleanupOwner = runtime.binding?.context.retirement ?? runtime.graph.__runtime.retirement;
+  const registrations: {
+    readonly listener: QueryProgressListener;
+    stop(retiring?: boolean): void;
+    attach(): void;
+    eligible(): boolean;
+    commit(): void;
+  }[] = [];
+  let enrollmentOpen = true;
+  let enrollmentFailed = false;
+  let enrollmentError: unknown;
+  const invalidationCleanupErrors: unknown[] = [];
+  let revokeCohort: () => void = () => undefined;
+  const checkCurrent = (): void => {
+    if (enrollmentFailed) throw enrollmentError;
+    try {
+      assertCurrent();
+    } catch (error) {
+      enrollmentFailed = true;
+      enrollmentError = error;
+      throw error;
+    }
+  };
+
+  const makeRegistration = (
+    entry: CapturedQueryProgressCohortEntry<T, P>,
+  ): (typeof registrations)[number] => {
+    let stopped = false;
+    let retained = false;
+    let addAttempted = false;
+    let adding = false;
+    let removePending = false;
+    let removeAttempted = false;
+    let stop!: (retiring?: boolean) => void;
+    let abortHandler!: EventListener;
+    const listener: QueryProgressListener = {
+      observer: (event) => {
+        let callbackFailed = false;
+        let callbackError: unknown;
+        try {
+          Reflect.apply(entry.onEvent, entry.receiver, [event as QueryProgressEvent<P>, context]);
+        } catch (error) {
+          callbackFailed = true;
+          callbackError = error;
+        }
+        let currentFailed = false;
+        let currentError: unknown;
+        if (enrollmentOpen) {
+          try {
+            checkCurrent();
+          } catch (error) {
+            currentFailed = true;
+            currentError = error;
+            try {
+              revokeCohort();
+            } catch (cleanupError) {
+              invalidationCleanupErrors.push(cleanupError);
+            }
+          }
+        }
+        if (callbackFailed) throw callbackError;
+        if (currentFailed) throw currentError;
+      },
+      active: false,
+      frontier: 0,
+    };
+    const context = Object.freeze({
+      store,
+      observation,
+      stop: (): void => stop(false),
+    });
+    const unlink = (): void => {
+      if (!addAttempted || removeAttempted) return;
+      if (adding) {
+        removePending = true;
+        return;
+      }
+      removeAttempted = true;
+      physicalCleanup(cleanupOwner, () =>
+        Reflect.apply(entry.removeAbortListener, entry.signal, ["abort", abortHandler]),
+      );
+      if (enrollmentOpen && !enrollmentFailed) checkCurrent();
+    };
+    stop = (retiring = false): void => {
+      if (stopped) return;
+      stopped = true;
+      const failures: unknown[] = [];
+      if (listener.active) {
+        listener.active = false;
+        owner.listeners.delete(listener);
+        if (retained && !retiring) {
+          retained = false;
+          try {
+            retainProgress(runtime, -1);
+          } catch (error) {
+            failures.push(error);
+          }
+        } else {
+          retained = false;
+        }
+      }
+      try {
+        unlink();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(failures, "Query progress listener cleanup failed");
+    };
+    listener.cohortStop = stop;
+    abortHandler = (): void => {
+      try {
+        stop(false);
+      } catch (error) {
+        reportContinuationError(runtime.graph.__runtime, error);
+      }
+    };
+    const registration = {
+      listener,
+      stop,
+      eligible: (): boolean => !stopped,
+      commit: (): void => {
+        if (stopped || listener.active) return;
+        listener.active = true;
+        owner.listeners.add(listener);
+        retained = true;
+        retainProgress(runtime, 1);
+      },
+      attach: (): void => {
+        const before: unknown = Reflect.get(entry.signal, "aborted", entry.signal);
+        checkCurrent();
+        if (typeof before !== "boolean") throw new TypeError("Invalid progress cohort signal");
+        if (before) {
+          stop(false);
+          return;
+        }
+        addAttempted = true;
+        adding = true;
+        try {
+          Reflect.apply(entry.addAbortListener, entry.signal, [
+            "abort",
+            abortHandler,
+            { once: true },
+          ]);
+        } catch (error) {
+          adding = false;
+          const failures: unknown[] = [error];
+          try {
+            stop(false);
+          } catch (cleanupError) {
+            failures.push(cleanupError);
+          }
+          try {
+            unlink();
+          } catch (cleanupError) {
+            failures.push(cleanupError);
+          }
+          if (failures.length === 1) throw error;
+          throw new AggregateError(
+            failures,
+            "Progress cohort signal attachment and cleanup failed",
+          );
+        }
+        adding = false;
+        if (removePending || stopped) unlink();
+        checkCurrent();
+        const after: unknown = Reflect.get(entry.signal, "aborted", entry.signal);
+        checkCurrent();
+        if (typeof after !== "boolean") throw new TypeError("Invalid progress cohort signal");
+        if (after) stop(false);
+      },
+    };
+    return registration;
+  };
+
+  const ownsDispatcher = !owner.dispatching;
+  if (ownsDispatcher) owner.dispatching = true;
+  const rollback = (): void => {
+    const failures: unknown[] = [];
+    for (const registration of [...registrations].reverse()) {
+      try {
+        registration.stop(false);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1)
+      throw new AggregateError(failures, "Query progress cohort rollback failed");
+  };
+  revokeCohort = rollback;
+
+  try {
+    for (const entry of captured.entries) {
+      checkCurrent();
+      const registration = makeRegistration(entry);
+      registrations.push(registration);
+      registration.attach();
+    }
+
+    for (const registration of registrations) {
+      if (registration.eligible()) registration.commit();
+      checkCurrent();
+    }
+
+    checkCurrent();
+    const seedSnapshot = owner.current;
+    const seedSequence = owner.sequence;
+    const seedRequest = owner.request;
+    const seedEvent = makeEvent("current", seedSnapshot);
+    for (const registration of registrations) {
+      const listener = registration.listener;
+      if (!listener.active) continue;
+      listener.frontier = seedSequence;
+      owner.queue.push({
+        sequence: seedSequence,
+        event: seedEvent,
+        ...(seedRequest === undefined ? {} : { request: seedRequest }),
+        target: listener,
+      });
+    }
+
+    if (ownsDispatcher) drainAndReport(runtime, owner);
+    checkCurrent();
+    enrollmentOpen = false;
+    return rollback;
+  } catch (cause) {
+    enrollmentOpen = false;
+    const failures: unknown[] = [cause, ...invalidationCleanupErrors];
+    try {
+      rollback();
+    } catch (cleanupError) {
+      failures.push(cleanupError);
+    }
+    if (ownsDispatcher && owner.dispatching) {
+      try {
+        drainAndReport(runtime, owner);
+      } catch (drainError) {
+        failures.push(drainError);
+      }
+    }
+    if (failures.length === 1) throw cause;
+    throw new AggregateError(failures, "Query progress cohort enrollment and cleanup failed");
+  }
 }
 
 /** Begins a fresh progress epoch when a real request becomes current. @internal */

@@ -403,6 +403,29 @@ export interface StoreOptions<T> extends ValueOptions<T> {
   readonly revalidateAfterMs?: number;
 }
 
+/** A query-call listener owned independently from the shared query request. */
+export interface QueryProgressCohortEntry<T, P> {
+  /** Revokes this listener without cancelling the query request. */
+  readonly signal: AbortSignal;
+  /**
+   * Receives the current seed and subsequent progress events in native FIFO order.
+   * The callback can run before the query member returns.
+   * @param event - Current progress or a later accepted event.
+   * @param context - This call's genuine store, live observation and listener-only stop.
+   */
+  onEvent(
+    event: QueryProgressEvent<P>,
+    context: {
+      /** The genuine query-store wrapper returned by this member call. */
+      readonly store: QueryStore<T, P>;
+      /** The live progress observation for that store. */
+      readonly observation: QueryProgressObservation<P>;
+      /** Idempotently removes this listener without cancelling the request. */
+      readonly stop: Unsubscribe;
+    },
+  ): void;
+}
+
 const storeOptionChecks = Object.entries({
   ...valueOptionValidators,
   revalidateAfterMs: (value: unknown) => typeof value === "number",

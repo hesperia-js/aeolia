@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import {
   bindOperation,
+  callQueryWithProgress,
   createBindingContext,
   createGraph,
   createQuery,
   defineContract,
   observeQueryProgress,
+  queryOptions,
 } from "../../src/contract/index.ts";
 import { Fault } from "../../src/fault.ts";
 import {
@@ -24,6 +26,8 @@ import {
 import type {
   ClosedEncodedValue,
   PassiveTransferClaim,
+  QueryProgressCohortEntry,
+  QueryStore,
   RequiredTransferCodec,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
@@ -123,6 +127,404 @@ afterEach(() => {
 });
 
 describe("query progress", () => {
+  for (const kind of ["raw", "bound"] as const) {
+    it(`enrolls both ${kind} call listeners before synchronous reports`, async () => {
+      let calls = 0;
+      const query = createQuery<string, number, string, number>({
+        name: `cohort.${kind}`,
+        key: (input) => input,
+        fetch: (_input, options) => {
+          calls += 1;
+          options.reportProgress(1);
+          options.reportProgress(2);
+          return Promise.resolve(3);
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({ namespace: `cohort-${kind}`, operations: { query } }),
+      });
+      const context = createBindingContext(graph);
+      const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+      const values: number[][] = [[], []];
+      const captures: number[][] = [[], []];
+      const stores: Array<QueryStore<number, number> | undefined> = [];
+      const receivers: Array<QueryProgressCohortEntry<number, number> | undefined> = [];
+      const stops: Array<() => void> = [];
+      const entries: QueryProgressCohortEntry<number, number>[] = [0, 1].map((index) => ({
+        signal: new AbortController().signal,
+        onEvent(event, view) {
+          receivers[index] = this;
+          stores[index] = view.store;
+          stops[index] = view.stop;
+          if (event.kind === "report" && event.snapshot.hasValue) {
+            values[index]!.push(event.snapshot.value!);
+            captures[index]!.push(view.observation.capture().reportRevision);
+          }
+        },
+      }));
+      try {
+        const store =
+          kind === "raw"
+            ? callQueryWithProgress(graph.api.query, ["one"], entries)
+            : callQueryWithProgress(binding.member, ["one"], entries);
+        expect(calls).toBe(1);
+        expect(values).toEqual([
+          [1, 2],
+          [1, 2],
+        ]);
+        expect(captures).toEqual([
+          [1, 2],
+          [1, 2],
+        ]);
+        expect(stores[0]).toBe(store);
+        expect(stores[1]).toBe(store);
+        expect(receivers[0]).toBe(entries[0]);
+        expect(receivers[1]).toBe(entries[1]);
+        expect(await store.ready).toBe(3);
+      } finally {
+        for (const stop of stops) stop();
+        graph.dispose();
+      }
+    });
+  }
+
+  it("joins an active delivery at one frontier without replay or duplicate work", async () => {
+    const work = deferred<number>();
+    let report!: (value: number) => void;
+    let calls = 0;
+    const query = createQuery<void, number, string, number>({
+      name: "cohort.reentrant",
+      key: () => "one",
+      fetch: (_input, options) => {
+        calls += 1;
+        report = options.reportProgress;
+        return work.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-reentrant", operations: { query } }),
+    });
+    const original = graph.api.query();
+    const values: number[][] = [[], []];
+    const stops: Array<() => void> = [];
+    const entries: QueryProgressCohortEntry<number, number>[] = [0, 1].map((index) => ({
+      signal: new AbortController().signal,
+      onEvent(event, context) {
+        stops[index] = context.stop;
+        if (event.snapshot.hasValue) values[index]!.push(event.snapshot.value!);
+      },
+    }));
+    const stopOriginal = observeQueryProgress(original).subscribe((event) => {
+      if (event.kind !== "report" || event.snapshot.value !== 1) return;
+      callQueryWithProgress(graph.api.query, [], entries);
+      report(2);
+    });
+    try {
+      report(0);
+      report(1);
+      expect(calls).toBe(1);
+      expect(values).toEqual([
+        [1, 2],
+        [1, 2],
+      ]);
+      work.resolve(3);
+      expect(await original.ready).toBe(3);
+    } finally {
+      stopOriginal();
+      for (const stop of stops) stop();
+      graph.dispose();
+    }
+  });
+
+  it("aborts one cohort listener without cancelling the shared query or its peer", async () => {
+    const first = new AbortController();
+    const second = new AbortController();
+    const alreadyAborted = new AbortController();
+    alreadyAborted.abort();
+    const values: number[][] = [[], [], []];
+    const stops: Array<() => void> = [];
+    let calls = 0;
+    const query = createQuery<void, number, string, number>({
+      name: "cohort.abort-one",
+      key: () => "one",
+      fetch: (_input, options) => {
+        calls += 1;
+        options.reportProgress(1);
+        options.reportProgress(2);
+        return Promise.resolve(3);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-abort-one", operations: { query } }),
+    });
+    const entries: QueryProgressCohortEntry<number, number>[] = [first, second, alreadyAborted].map(
+      (controller, index) => ({
+        signal: controller.signal,
+        onEvent(event, context) {
+          stops[index] = context.stop;
+          if (event.kind !== "report" || !event.snapshot.hasValue) return;
+          values[index]!.push(event.snapshot.value!);
+          if (index === 0) first.abort();
+        },
+      }),
+    );
+    try {
+      const store = callQueryWithProgress(graph.api.query, [], entries);
+      expect(await store.ready).toBe(3);
+      expect(calls).toBe(1);
+      expect(values).toEqual([[1], [1, 2], []]);
+    } finally {
+      for (const stop of stops) stop();
+      graph.dispose();
+    }
+  });
+
+  it("continues cohort delivery and the shared request when one callback throws", async () => {
+    const callbackCause = new Error("cohort callback failed");
+    const diagnostics: unknown[] = [];
+    const received: number[] = [];
+    const stops: Array<() => void> = [];
+    const query = createQuery<void, number, string, number>({
+      name: "cohort.callback-failure",
+      key: () => "one",
+      fetch: (_input, options) => {
+        options.reportProgress(1);
+        options.reportProgress(2);
+        return Promise.resolve(3);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-callback-failure", operations: { query } }),
+      onUnobservedFault: (cause) => diagnostics.push(cause),
+    });
+    const entries: QueryProgressCohortEntry<number, number>[] = [
+      {
+        signal: new AbortController().signal,
+        onEvent(event, context) {
+          stops[0] = context.stop;
+          if (event.kind === "report" && event.snapshot.value === 1) throw callbackCause;
+        },
+      },
+      {
+        signal: new AbortController().signal,
+        onEvent(event, context) {
+          stops[1] = context.stop;
+          if (event.kind === "report" && event.snapshot.hasValue)
+            received.push(event.snapshot.value!);
+        },
+      },
+    ];
+    try {
+      const store = callQueryWithProgress(graph.api.query, [], entries);
+      expect(await store.ready).toBe(3);
+      expect(received).toEqual([1, 2]);
+      expect(diagnostics).toContain(callbackCause);
+    } finally {
+      for (const stop of stops) stop();
+      graph.dispose();
+    }
+  });
+
+  it("does not dispatch a bound query after a cohort callback disposes its context", () => {
+    let calls = 0;
+    const query = createQuery<string, number, string, number>({
+      name: "cohort.revoke-context",
+      key: (input) => input,
+      fetch: () => {
+        calls += 1;
+        return Promise.resolve(1);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-revoke-context", operations: { query } }),
+    });
+    const context = createBindingContext(graph);
+    const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+    try {
+      expect(() =>
+        callQueryWithProgress(
+          binding.member,
+          ["one"],
+          [
+            {
+              signal: new AbortController().signal,
+              onEvent() {
+                context.dispose();
+              },
+            },
+          ],
+        ),
+      ).toThrow("disposed");
+      expect(calls).toBe(0);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("preserves branded options and second-argument precedence", async () => {
+    const values: number[] = [];
+    let initial: number | undefined;
+    const stops: Array<() => void> = [];
+    const entries: QueryProgressCohortEntry<number, number>[] = [
+      {
+        signal: new AbortController().signal,
+        onEvent(event, context) {
+          stops[0] = context.stop;
+          if (event.kind === "current") initial = context.store.value.get();
+          if (event.kind === "report" && event.snapshot.hasValue)
+            values.push(event.snapshot.value!);
+        },
+      },
+    ];
+    const query = createQuery<void, number, string, number>({
+      name: "cohort.options-override",
+      acquisition: "fetch",
+      key: () => "one",
+      fetch: (_input, options) => {
+        options.reportProgress(1);
+        return Promise.resolve(2);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-options-override", operations: { query } }),
+    });
+    try {
+      const store = callQueryWithProgress(
+        graph.api.query,
+        [queryOptions({ initial: 7 }), { initial: 9 }],
+        entries,
+      );
+      expect(await store.ready).toBe(2);
+      expect(initial).toBe(9);
+      expect(values).toEqual([1]);
+    } finally {
+      for (const stop of stops) stop();
+      graph.dispose();
+    }
+  });
+
+  it("keeps a progressCohort property in ordinary query input data", async () => {
+    const received: string[] = [];
+    const query = createQuery<{ progressCohort: string }, number, string, number>({
+      name: "cohort.input-data",
+      key: (input) => input.progressCohort,
+      fetch: (input) => {
+        received.push(input.progressCohort);
+        return Promise.resolve(1);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-input-data", operations: { query } }),
+    });
+    try {
+      const store = callQueryWithProgress(
+        graph.api.query,
+        [{ progressCohort: "actual-input" }],
+        [],
+      );
+      expect(await store.ready).toBe(1);
+      expect(received).toEqual(["actual-input"]);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("rejects a wrapper instead of invoking it as a genuine query member", () => {
+    let calls = 0;
+    const query = createQuery<string, number, string, number>({
+      name: "cohort.genuine-member",
+      key: (input) => input,
+      fetch: () => Promise.resolve(1),
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-genuine-member", operations: { query } }),
+    });
+    const wrapper = (input: string) => {
+      calls += 1;
+      return graph.api.query(input);
+    };
+    try {
+      expect(() => callQueryWithProgress(wrapper, ["one"], [])).toThrow(TypeError);
+      expect(calls).toBe(0);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("unwinds a cohort when a signal attaches and throws", () => {
+    const controller = new AbortController();
+    const registrationCause = new Error("registration failed after attach");
+    const cleanupCause = new Error("registered listener removal failed");
+    let removals = 0;
+    let calls = 0;
+    let events = 0;
+    const signal = new Proxy(controller.signal, {
+      get(target, property) {
+        if (property === "addEventListener")
+          return (
+            type: string,
+            listener: EventListenerOrEventListenerObject,
+            options?: AddEventListenerOptions,
+          ) => {
+            target.addEventListener(type, listener, options);
+            throw registrationCause;
+          };
+        if (property === "removeEventListener")
+          return (type: string, listener: EventListenerOrEventListenerObject) => {
+            target.removeEventListener(type, listener);
+            removals += 1;
+            throw cleanupCause;
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const query = createQuery<void, number, string, number>({
+      name: "cohort.registration-failure",
+      key: () => "one",
+      fetch: () => {
+        calls += 1;
+        return Promise.resolve(1);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-registration-failure", operations: { query } }),
+    });
+    try {
+      let failure: unknown;
+      try {
+        callQueryWithProgress(
+          graph.api.query,
+          [],
+          [
+            {
+              signal: new AbortController().signal,
+              onEvent: () => {
+                events += 1;
+              },
+            },
+            {
+              signal,
+              onEvent: () => {
+                events += 1;
+              },
+            },
+          ],
+        );
+      } catch (cause) {
+        failure = cause;
+      }
+      expect(failure).toBeInstanceOf(AggregateError);
+      if (!(failure instanceof AggregateError))
+        throw new Error("Expected registration and cleanup failures");
+      expect(failure.errors).toEqual([registrationCause, cleanupCause]);
+      expect(removals).toBe(1);
+      expect(events).toBe(0);
+      expect(calls).toBe(0);
+    } finally {
+      graph.dispose();
+    }
+  });
   it("keeps repeated and undefined reports separate from the committed value", async () => {
     const work = deferred<number>();
     let report!: (value: string | undefined) => void;
@@ -1601,6 +2003,500 @@ describe("query progress", () => {
       if (claim !== undefined && !adoptionPublished) claim.discard();
       sourceGraph.dispose();
       targetGraph.dispose();
+    }
+  });
+
+  it("refuses a bound refresh invalidated by its cached seed and keeps its sibling listener", async () => {
+    type Input = { readonly key: string; readonly label: string };
+    const work = deferred<number>();
+    const input: Input = { key: "shared", label: "A" };
+    const fetchInputs: string[] = [];
+    let report!: (value: number) => void;
+    let workSettled = false;
+    const query = createQuery<Input, number, string, number>({
+      name: "cohort.bound-seed-refusal",
+      acquisition: "fetch",
+      key: (value) => value.key,
+      fetch: (value, options) => {
+        fetchInputs.push(value.label);
+        report = options.reportProgress;
+        return work.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-bound-seed-refusal", operations: { query } }),
+    });
+    const context = createBindingContext(graph);
+    const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+    const attemptAuthority = new AbortController();
+    const refusal = new Error("bound call lost authority");
+    const siblingReports: number[] = [];
+    let siblingStop: (() => void) | undefined;
+    let attemptStop: (() => void) | undefined;
+    let attemptSeeded = false;
+    const original = binding.member(input);
+
+    try {
+      const sibling = binding.member(input);
+      siblingStop = observeQueryProgress(sibling).subscribe((event) => {
+        if (event.kind === "report" && event.snapshot.hasValue)
+          siblingReports.push(event.snapshot.value!);
+      });
+      report(1);
+      workSettled = true;
+      work.resolve(3);
+      await expect(original.ready).resolves.toBe(3);
+      await expect(sibling.ready).resolves.toBe(3);
+
+      let didThrow = false;
+      let failure: unknown;
+      try {
+        callQueryWithProgress(
+          binding.member,
+          [input],
+          [
+            {
+              signal: new AbortController().signal,
+              onEvent(event, view) {
+                attemptStop = view.stop;
+                if (event.kind === "current" && event.snapshot.reportRevision === 1) {
+                  attemptSeeded = true;
+                  attemptAuthority.abort();
+                }
+              },
+            },
+          ],
+          () => {
+            if (attemptAuthority.signal.aborted) throw refusal;
+          },
+        );
+      } catch (cause) {
+        didThrow = true;
+        failure = cause;
+      }
+
+      expect(didThrow).toBe(true);
+      expect(failure).toBe(refusal);
+      expect(attemptSeeded).toBe(true);
+      expect(context.active.get()).toBe(true);
+      expect(fetchInputs).toEqual(["A"]);
+
+      expect(siblingReports).toEqual([1]);
+      expect(observeQueryProgress(sibling).capture()).toMatchObject({
+        status: "complete",
+        reportRevision: 1,
+        value: 1,
+      });
+      expect(fetchInputs).toEqual(["A"]);
+    } finally {
+      if (!workSettled) work.resolve(3);
+      attemptStop?.();
+      siblingStop?.();
+      graph.dispose();
+    }
+  });
+
+  it("preserves a reentrant same-key query admitted by the authority guard", async () => {
+    type Input = { readonly key: string; readonly label: "A" | "B" };
+    type Result = { readonly winner: string };
+    const work = deferred<Result>();
+    const result = Object.freeze({ winner: "B" });
+    const inputA: Input = { key: "shared", label: "A" };
+    const inputB: Input = { key: "shared", label: "B" };
+    const fetchInputs: string[] = [];
+    const query = createQuery<Input, Result, string, number>({
+      name: "cohort.guard-reentry",
+      key: (value) => value.key,
+      fetch: (value) => {
+        fetchInputs.push(value.label);
+        return work.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cohort-guard-reentry", operations: { query } }),
+    });
+    let foreignStore: QueryStore<Result, number> | undefined;
+    const refusal = new Error("A lost admission authority");
+    let didThrow = false;
+    let failure: unknown;
+
+    try {
+      try {
+        callQueryWithProgress(graph.api.query, [inputA], [], () => {
+          foreignStore ??= graph.api.query(inputB);
+          throw refusal;
+        });
+      } catch (cause) {
+        didThrow = true;
+        failure = cause;
+      }
+
+      expect(didThrow).toBe(true);
+      expect(failure).toBe(refusal);
+      expect(foreignStore).toBeDefined();
+      expect(fetchInputs).toEqual(["B"]);
+      work.resolve(result);
+      await expect(foreignStore!.ready).resolves.toBe(result);
+      expect(foreignStore!.progress.get()).toMatchObject({ status: "complete" });
+      expect(fetchInputs).toEqual(["B"]);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("preserves foreign work started while the caller signal is registered", async () => {
+    type Input = { readonly key: string; readonly label: "A" | "B" };
+    const inputA: Input = { key: "shared", label: "A" };
+    const inputB: Input = { key: "shared", label: "B" };
+    const work = deferred<string>();
+    const caller = new AbortController();
+    const fetchInputs: string[] = [];
+    let foreignStore: QueryStore<string, number> | undefined;
+    let foreignSignal: AbortSignal | undefined;
+    let removes = 0;
+    let workSettled = false;
+    const query = createQuery<Input, string, string, number>({
+      name: "cohort.signal-registration-reentry",
+      key: (input) => input.key,
+      fetch: (input, options) => {
+        fetchInputs.push(input.label);
+        foreignSignal = options.abortSignal;
+        return work.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "cohort-signal-registration-reentry",
+        operations: { query },
+      }),
+    });
+    const signal = new Proxy(caller.signal, {
+      get(target, property) {
+        if (property === "addEventListener")
+          return (
+            type: string,
+            listener: EventListenerOrEventListenerObject,
+            options?: AddEventListenerOptions,
+          ) => {
+            target.addEventListener(type, listener, options);
+            foreignStore ??= graph.api.query(inputB);
+          };
+        if (property === "removeEventListener")
+          return (type: string, listener: EventListenerOrEventListenerObject) => {
+            removes += 1;
+            target.removeEventListener(type, listener);
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    try {
+      let refused = false;
+      try {
+        callQueryWithProgress(graph.api.query, [inputA, { abortSignal: signal }], [], () => {});
+      } catch {
+        refused = true;
+      }
+      expect(refused).toBe(true);
+      expect(removes).toBe(1);
+      expect(fetchInputs).toEqual(["B"]);
+      expect(foreignStore).toBeDefined();
+      expect(foreignSignal?.aborted).toBe(false);
+      caller.abort();
+      expect(foreignSignal?.aborted).toBe(false);
+      workSettled = true;
+      work.resolve("B result");
+      await expect(foreignStore!.ready).resolves.toBe("B result");
+      expect(fetchInputs).toEqual(["B"]);
+    } finally {
+      if (!workSettled) work.resolve("B result");
+      graph.dispose();
+    }
+  });
+
+  it("preserves foreign work started by predecessor interruption before admission", async () => {
+    type Input = { readonly key: string; readonly label: "first" | "A" | "B" };
+    const firstWork = deferred<string>();
+    const foreignWork = deferred<string>();
+    const inputFirst: Input = { key: "shared", label: "first" };
+    const inputA: Input = { key: "shared", label: "A" };
+    const inputB: Input = { key: "shared", label: "B" };
+    const fetchInputs: string[] = [];
+    let foreignStore: QueryStore<string, number> | undefined;
+    let foreignSignal: AbortSignal | undefined;
+    let interruptions = 0;
+    const query = createQuery<Input, string, string, number>({
+      name: "cohort.predecessor-interruption-reentry",
+      acquisition: "fetch",
+      key: (input) => input.key,
+      fetch: (input, options) => {
+        fetchInputs.push(input.label);
+        if (input.label === "first") {
+          options.abortSignal.addEventListener("abort", () => {
+            interruptions += 1;
+            foreignStore = graph.api.query(inputB);
+          });
+          return firstWork.promise;
+        }
+        foreignSignal = options.abortSignal;
+        return foreignWork.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "cohort-predecessor-interruption-reentry",
+        operations: { query },
+      }),
+    });
+    const first = graph.api.query(inputFirst);
+    try {
+      first.set("manual value");
+      let refused = false;
+      try {
+        callQueryWithProgress(graph.api.query, [inputA], [], () => {});
+      } catch {
+        refused = true;
+      }
+      expect(interruptions).toBe(1);
+      expect(refused).toBe(true);
+      expect(fetchInputs).toEqual(["first", "B"]);
+      expect(foreignStore).toBeDefined();
+      expect(foreignSignal?.aborted).toBe(false);
+      foreignWork.resolve("B result");
+      await expect(foreignStore!.ready).resolves.toBe("B result");
+    } finally {
+      firstWork.resolve("old result");
+      foreignWork.resolve("B result");
+      graph.dispose();
+    }
+  });
+
+  it("keeps an admitted request and its reentrant same-key join after guard invalidation", async () => {
+    type Input = { readonly key: string; readonly label: "A" | "B" };
+    type Result = { readonly request: number };
+    const firstResult = Object.freeze({ request: 1 });
+    const admittedResult = Object.freeze({ request: 2 });
+    const admittedWork = deferred<Result>();
+    const inputA: Input = { key: "shared", label: "A" };
+    const fetchInputs: string[] = [];
+    let admittedSignal: AbortSignal | undefined;
+    let admittedSettled = false;
+    const query = createQuery<Input, Result, string, number>({
+      name: "cohort.guard-reentry-after-admission",
+      acquisition: "fetch",
+      key: (value) => value.key,
+      fetch: (value, options) => {
+        fetchInputs.push(value.label);
+        if (fetchInputs.length === 1) return Promise.resolve(firstResult);
+        admittedSignal = options.abortSignal;
+        return admittedWork.promise;
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "cohort-guard-reentry-after-admission",
+        operations: { query },
+      }),
+    });
+    const initial = graph.api.query(inputA);
+    let foreignStore: QueryStore<Result, number> | undefined;
+    let authorized = true;
+    let lifecycleObserved = false;
+    const refusal = new Error("A authority expired after publication");
+    const observation = observeQueryProgress(initial);
+    const stop = observation.subscribe((event) => {
+      if (event.kind !== "lifecycle" || event.snapshot.status !== "active") return;
+      lifecycleObserved = true;
+      foreignStore = graph.api.query(inputA);
+      authorized = false;
+    });
+
+    try {
+      await expect(initial.ready).resolves.toBe(firstResult);
+      callQueryWithProgress(graph.api.query, [inputA], [], () => {
+        if (!authorized) throw refusal;
+      });
+
+      expect(lifecycleObserved).toBe(true);
+      expect(foreignStore).toBeDefined();
+      expect(fetchInputs).toEqual(["A", "A"]);
+      expect(admittedSignal?.aborted).toBe(false);
+
+      admittedSettled = true;
+      admittedWork.resolve(admittedResult);
+      await expect(foreignStore!.ready).resolves.toBe(admittedResult);
+      expect(fetchInputs).toEqual(["A", "A"]);
+      expect(admittedSignal?.aborted).toBe(false);
+    } finally {
+      if (!admittedSettled) admittedWork.resolve(admittedResult);
+      stop();
+      graph.dispose();
+    }
+  });
+
+  it("retains an undefined authority refusal alongside progress-signal unlink failure", () => {
+    const controller = new AbortController();
+    const cleanupCause = new Error("progress listener removal failed");
+    const signal = throwingRemovalSignal(controller, cleanupCause);
+    let current = true;
+    let calls = 0;
+    let didThrow = false;
+    let failure: unknown;
+    const query = createQuery<void, number, string, number>({
+      name: "cohort.undefined-authority-refusal",
+      key: () => "one",
+      fetch: () => {
+        calls += 1;
+        return Promise.resolve(1);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "cohort-undefined-authority-refusal",
+        operations: { query },
+      }),
+    });
+
+    try {
+      try {
+        callQueryWithProgress(
+          graph.api.query,
+          [],
+          [
+            {
+              signal: signal.signal,
+              onEvent(event) {
+                if (event.kind === "current") current = false;
+              },
+            },
+          ],
+          () => {
+            if (!current) throw undefined;
+          },
+        );
+      } catch (cause) {
+        didThrow = true;
+        failure = cause;
+      }
+
+      expect(didThrow).toBe(true);
+      expect(failure).toBeInstanceOf(AggregateError);
+      if (!(failure instanceof AggregateError))
+        throw new Error("Expected authority refusal and signal cleanup failures");
+      expect(failure.errors).toHaveLength(2);
+      expect(failure.errors[0]).toBeUndefined();
+      expect(failure.errors[1]).toBe(cleanupCause);
+      expect(signal.state.addCalls).toBe(1);
+      expect(signal.state.removeCalls).toBe(1);
+      expect(signal.state.removedRegisteredListener).toBe(true);
+      expect(calls).toBe(0);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("retains an undefined authority refusal alongside caller-signal unlink failure", () => {
+    const controller = new AbortController();
+    const cleanupCause = new Error("caller signal removal failed");
+    let current = true;
+    let removes = 0;
+    let calls = 0;
+    const signal = new Proxy(controller.signal, {
+      get(target, property) {
+        if (property === "addEventListener")
+          return (
+            type: string,
+            listener: EventListenerOrEventListenerObject,
+            options?: AddEventListenerOptions,
+          ) => {
+            target.addEventListener(type, listener, options);
+            current = false;
+          };
+        if (property === "removeEventListener")
+          return (type: string, listener: EventListenerOrEventListenerObject) => {
+            target.removeEventListener(type, listener);
+            removes += 1;
+            throw cleanupCause;
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const query = createQuery<string, number, string, number>({
+      name: "cohort.caller-signal-cleanup",
+      key: (input) => input,
+      fetch: () => {
+        calls += 1;
+        return Promise.resolve(1);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "cohort-caller-signal-cleanup",
+        operations: { query },
+      }),
+    });
+    try {
+      let didThrow = false;
+      let failure: unknown;
+      try {
+        callQueryWithProgress(graph.api.query, ["one", { abortSignal: signal }], [], () => {
+          if (!current) throw undefined;
+        });
+      } catch (cause) {
+        didThrow = true;
+        failure = cause;
+      }
+      expect(didThrow).toBe(true);
+      expect(failure).toBeInstanceOf(AggregateError);
+      if (!(failure instanceof AggregateError))
+        throw new Error("Expected refusal and caller cleanup failures");
+      expect(failure.errors).toEqual([undefined, cleanupCause]);
+      expect(removes).toBe(1);
+      expect(calls).toBe(0);
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it("rejects an asynchronous authority check before query dispatch", () => {
+    let calls = 0;
+    const query = createQuery<string, number, string, number>({
+      name: "cohort.async-authority-check",
+      key: (input) => input,
+      fetch: () => {
+        calls += 1;
+        return Promise.resolve(1);
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "cohort-async-authority-check",
+        operations: { query },
+      }),
+    });
+
+    try {
+      const shadowed = Object.defineProperty(Promise.resolve(), "then", { value: undefined });
+      const observationCause = new Error("authority Promise observation failed");
+      const observationFault = Object.defineProperty(Promise.resolve(), "constructor", {
+        get: () => {
+          throw observationCause;
+        },
+      });
+      for (const guard of [async () => undefined, () => shadowed, () => ({})]) {
+        expect(() => callQueryWithProgress(graph.api.query, ["one"], [], guard)).toThrow(TypeError);
+      }
+      let failure: unknown;
+      try {
+        callQueryWithProgress(graph.api.query, ["one"], [], () => observationFault);
+      } catch (cause) {
+        failure = cause;
+      }
+      expect(failure).toBe(observationCause);
+      expect(calls).toBe(0);
+    } finally {
+      graph.dispose();
     }
   });
 });

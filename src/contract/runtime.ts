@@ -85,6 +85,8 @@ export interface QueryProgressListener {
   readonly observer: (event: QueryProgressEvent<unknown>) => void;
   active: boolean;
   frontier: number;
+  /** Stops a call-owned listener when its signal, caller, or native owner retires. */
+  cohortStop?: (retiring?: boolean) => void;
 }
 
 export interface QueryProgressDelivery {

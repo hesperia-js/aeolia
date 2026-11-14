@@ -14,7 +14,7 @@ import type {
 import { isStoreOptions, isValueOptions } from "./types.ts";
 import { computed, signal } from "../reactive.ts";
 import { Fault } from "../fault.ts";
-import { assertGraphOpen } from "./faults.ts";
+import { AbortError, assertGraphOpen } from "./faults.ts";
 import {
   assertBindingContextOpen as assertContextOpen,
   assertStoreHandlePublished,
@@ -33,7 +33,7 @@ import {
   normalizeQueryCall,
 } from "./engine.ts";
 import { beginPhysicalWork, createRetirementOwner, finishPhysicalWork } from "./retirement.ts";
-import { makeQueryStore } from "./query.ts";
+import { assertSynchronousQueryAuthority, makeQueryStore } from "./query.ts";
 import {
   beginTransferAdmission,
   finishTransferAdmission,
@@ -365,40 +365,86 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       stores: new Map(),
       addresses: new Map(),
     };
-    const member = (...args: [input?: unknown, options?: StoreOptions<V>]) => {
+    const invoke = (
+      args: readonly unknown[],
+      cohortInput?: { readonly entries: unknown; readonly assertCurrent?: () => void },
+    ) => {
       assertContextOpen(context);
+      const epoch = state.resetEpoch;
+      const assertNative = (): void => {
+        assertContextOpen(context);
+        if (cohortInput !== undefined && state.resetEpoch !== epoch)
+          throw new AbortError("Query acquisition crossed a graph reset.");
+      };
+      const assertCall = (): void => {
+        assertNative();
+        assertSynchronousQueryAuthority(cohortInput?.assertCurrent);
+        assertNative();
+      };
       const physical = beginPhysicalWork(context.retirement, "acquisition");
       let admission: TransferAdmission | undefined;
       try {
-        admission = beginTransferAdmission(state, definition, binding, args[0]);
-        const call = normalizeQueryCall(args[0], args[1], args.length > 1, () =>
-          assertContextOpen(context),
-        );
+        if (cohortInput !== undefined && !Array.isArray(args))
+          throw new TypeError("Query arguments must be an array.");
+        const input = args[0];
+        assertCall();
+        const callOptions = args[1];
+        assertCall();
+        const argumentCount = args.length;
+        assertCall();
+        if (
+          cohortInput !== undefined &&
+          (!Number.isSafeInteger(argumentCount) || argumentCount < 0)
+        )
+          throw new TypeError("Query arguments must be an array.");
+        admission = beginTransferAdmission(state, definition, binding, input);
+        const call = normalizeQueryCall(input, callOptions, argumentCount > 1, assertCall);
         const selectedOptions =
-          call.options === undefined
-            ? undefined
-            : copyOptions(call.options, () => assertContextOpen(context));
-        assertContextOpen(context);
-        if (
-          selectedOptions !== undefined &&
-          !isStoreOptions(selectedOptions, () => assertContextOpen(context))
-        )
+          call.options === undefined ? undefined : copyOptions(call.options, assertCall);
+        assertCall();
+        if (selectedOptions !== undefined && !isStoreOptions(selectedOptions, assertCall))
           throw new TypeError("Invalid query options.");
-        if (
-          value !== undefined &&
-          Object.hasOwn(value, "initial") &&
-          selectedOptions !== undefined &&
-          Object.hasOwn(selectedOptions, "initial") &&
-          !Object.is(value.initial, selectedOptions.initial)
-        )
-          throw new TypeError("Initial value conflicts with query binding configuration");
+        if (cohortInput?.assertCurrent === undefined) {
+          if (
+            value !== undefined &&
+            Object.hasOwn(value, "initial") &&
+            selectedOptions !== undefined &&
+            Object.hasOwn(selectedOptions, "initial") &&
+            !Object.is(value.initial, selectedOptions.initial)
+          )
+            throw new TypeError("Initial value conflicts with query binding configuration");
+        } else if (value !== undefined) {
+          const hasBindingInitial = Object.hasOwn(value, "initial");
+          assertCall();
+          if (hasBindingInitial && selectedOptions !== undefined) {
+            const hasCallerInitial = Object.hasOwn(selectedOptions, "initial");
+            assertCall();
+            if (hasCallerInitial) {
+              const bindingInitial = value.initial;
+              assertCall();
+              const callerInitial = selectedOptions.initial;
+              assertCall();
+              if (!Object.is(bindingInitial, callerInitial))
+                throw new TypeError("Initial value conflicts with query binding configuration");
+            }
+          }
+        }
         const options = selectedOptions as StoreOptions<V> | undefined;
-        assertContextOpen(context);
+        assertCall();
         if (admission !== undefined) {
           finishTransferAdmission(admission);
           admission = undefined;
         }
-        return makeQueryStore(state, execution, call.input, options, acquisition, binding, value);
+        return makeQueryStore(
+          state,
+          execution,
+          call.input,
+          options,
+          acquisition,
+          binding,
+          value,
+          cohortInput,
+        );
       } finally {
         try {
           if (admission !== undefined) finishTransferAdmission(admission);
@@ -407,6 +453,7 @@ function bindQueryOperation<Q extends AnyQuery, V>(
         }
       }
     };
+    const member = (...args: [input?: unknown, options?: StoreOptions<V>]) => invoke(args);
     const handle = Object.freeze({
       graph: graph.id,
       context: context.handle,
@@ -416,7 +463,14 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       target: (store: QueryStore<V, QueryProgress<Q>>) => captureTarget<Q, V>(binding, store),
     }) as QueryBinding<Q, V>;
     binding.handle = handle;
-    const transferSource = { graph: state.graph, kind: "query" as const, definition, binding };
+    const transferSource = {
+      graph: state.graph,
+      kind: "query" as const,
+      definition,
+      binding,
+      invokeQuery: (args: readonly unknown[], entries: unknown, assertCurrent?: () => void) =>
+        invoke(args, { entries, assertCurrent }),
+    };
     registerTransferSource(member, transferSource);
     registerTransferSource(handle, transferSource);
     bindings.set(handle, binding);

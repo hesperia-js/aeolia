@@ -26,7 +26,7 @@ export {
 export { queryOptions } from "./query-options.ts";
 export { peekStore } from "./store.ts";
 export { observeStore } from "./observation.ts";
-export { observeQueryProgress } from "./query.ts";
+export { callQueryWithProgress, observeQueryProgress } from "./query.ts";
 export type { ObservationLease, ObservationPublishOptions } from "./observation.ts";
 export { bindOperation, createBindingContext } from "./query-binding.ts";
 export type {
@@ -64,6 +64,7 @@ export type {
   DefineContractInput,
   FetchOptions,
   QueryFetchOptions,
+  QueryProgressCohortEntry,
   QueryProgressEvent,
   QueryProgressObservation,
   QueryProgressSnapshot,

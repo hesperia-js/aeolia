@@ -1,6 +1,7 @@
 import type {
   QueryAcquisition,
   QueryDefinition,
+  QueryProgressCohortEntry,
   QueryProgressObservation,
   QueryStore,
   StoreOptions,
@@ -36,7 +37,12 @@ import { admitStore, getOrCreateStore } from "./store.ts";
 import { observeStoreReadable } from "./store.ts";
 import { configureKeyedValue, nextGeneration } from "./store-state.ts";
 import { startQuery, armStoreTimer } from "./query-request.ts";
-import { queryProgressObservation, queryProgressReadable } from "./query-progress.ts";
+import {
+  captureQueryProgressCohort,
+  enrollQueryProgressCohort,
+  queryProgressObservation,
+  queryProgressReadable,
+} from "./query-progress.ts";
 import { asWindow, createCaller, queryIsStale, writeCallerStatus } from "./status.ts";
 import { storeKey } from "./identity.ts";
 import { touch } from "./collection.ts";
@@ -47,8 +53,78 @@ import {
   registerTransferReadable,
   registerTransferStoreHandle,
   registerTransferCaller,
+  transferSource,
 } from "./query-policy.ts";
 import type { TransferAdmission } from "./query-policy.ts";
+import type { queryOptions } from "./query-options.ts";
+
+const nativePromiseThen = Promise.prototype.then;
+
+/** @internal Checks caller authority without accepting asynchronous validation. */
+export function assertSynchronousQueryAuthority(assertCurrent?: () => void): void {
+  if (assertCurrent === undefined) return;
+  if (typeof assertCurrent !== "function")
+    throw new TypeError("Query acquisition authority must be a function.");
+  const result: unknown = Reflect.apply(assertCurrent, undefined, []);
+  if ((typeof result === "object" && result !== null) || typeof result === "function") {
+    void Reflect.apply(nativePromiseThen, result, [undefined, () => undefined]);
+    throw new TypeError("Query acquisition authority must be synchronous.");
+  }
+}
+
+/**
+ * Acquire a genuine query member with progress listeners registered before dispatch.
+ *
+ * The original arguments retain their arity and normal query-options precedence.
+ * Eligible entries join at one current frontier and receive later events in FIFO
+ * order. Entry signals and stops do not cancel the query. Callbacks can run before
+ * this function returns. Callback failures use the graph's continuation error
+ * route and do not cancel other listeners or the shared request.
+ * If supplied, `assertCurrent` must complete synchronously. Aeolia invokes it
+ * during acquisition and before admitting a new request. Primitive return values
+ * are ignored; object or function returns refuse acquisition. A thrown value refuses
+ * this acquisition without cancelling an already-admitted shared request.
+ *
+ * @param member - An actual raw graph query member or bound query member.
+ * @param args - The arguments to the member, including any explicit `undefined`.
+ * @param entries - Independently owned listeners for this call.
+ * @param assertCurrent - Optional synchronous authority check for this acquisition.
+ * @returns The genuine query-store wrapper produced by this acquisition.
+ * @throws TypeError for a non-query member, malformed arguments, invalid entries,
+ * or an invalid authority check. Promise observation can throw its original cause.
+ * @throws Original setup failures, or an AggregateError when setup and cleanup fail.
+ */
+export function callQueryWithProgress<T, P>(
+  member: (input: void, options?: StoreOptions<T>) => QueryStore<T, P>,
+  args:
+    | readonly []
+    | readonly [input: undefined, options?: StoreOptions<T>]
+    | readonly [options: StoreOptions<T>]
+    | readonly [
+        options: ReturnType<typeof queryOptions<StoreOptions<T>>>,
+        overrides?: StoreOptions<T>,
+      ],
+  entries: readonly QueryProgressCohortEntry<T, P>[],
+  assertCurrent?: () => void,
+): QueryStore<T, P>;
+export function callQueryWithProgress<I, T, P>(
+  member: (input: I, options?: StoreOptions<T>) => QueryStore<T, P>,
+  args: readonly [input: I, options?: StoreOptions<T>],
+  entries: readonly QueryProgressCohortEntry<T, P>[],
+  assertCurrent?: () => void,
+): QueryStore<T, P>;
+export function callQueryWithProgress<T, P>(
+  member: (...args: any[]) => QueryStore<T, P>,
+  args: readonly unknown[],
+  entries: readonly QueryProgressCohortEntry<T, P>[],
+  assertCurrent?: () => void,
+): QueryStore<T, P> {
+  if (typeof member !== "function") throw new TypeError("Expected a genuine query member.");
+  const source = transferSource(member);
+  if (source?.kind !== "query" || source.invokeQuery === undefined)
+    throw new TypeError("Expected a genuine query member.");
+  return source.invokeQuery(args, entries, assertCurrent);
+}
 
 /** @internal Builds the ordinary activation callback without starting or enrolling work. */
 export function createQueryRuntimeActivation<T>(runtime: StoreRuntime<T>): () => void {
@@ -171,8 +247,11 @@ export function makeQueryStore<T, P = never>(
   acquisition: QueryAcquisition,
   binding?: QueryBindingRuntime,
   bindingDefaults?: Pick<ValueOptions<NoInfer<T>>, "initial">,
+  cohortInput?: { readonly entries: unknown; readonly assertCurrent?: () => void },
 ): QueryStore<T, P> {
   assertGraphOpen(state);
+  const hasAuthority = cohortInput?.assertCurrent !== undefined;
+  let hostAuthority = cohortInput?.assertCurrent;
   const physical = beginPhysicalWork(
     binding?.context.retirement ?? state.retirement,
     "acquisition",
@@ -182,14 +261,32 @@ export function makeQueryStore<T, P = never>(
   try {
     admission = beginTransferAdmission(state, binding?.definition ?? query, binding, input);
     const epoch = state.resetEpoch;
-    const assertCurrent = (): void => {
+    let admitted = false;
+    const assertNativeCurrent = (): void => {
       assertGraphOpen(state);
       if (binding !== undefined) {
         if (binding.context.disposed) throw new Fault("disposed", [String(state.graph.id)]);
         if (state.resetEpoch !== epoch)
           throw new AbortError("Query acquisition crossed a graph reset.");
       }
+      if (hasAuthority && state.resetEpoch !== epoch)
+        throw new AbortError("Query acquisition crossed a graph reset.");
     };
+    const assertCurrent = (): void => {
+      assertNativeCurrent();
+      if (!admitted && hostAuthority !== undefined) {
+        assertSynchronousQueryAuthority(hostAuthority);
+        assertNativeCurrent();
+      }
+    };
+    const cohort =
+      cohortInput === undefined
+        ? undefined
+        : captureQueryProgressCohort<T, P>(cohortInput.entries, () => {
+            assertCurrent();
+            if (state.resetEpoch !== epoch)
+              throw new AbortError("Query acquisition crossed a graph reset.");
+          });
     const requestedWindow = options?.revalidateAfterMs;
     assertCurrent();
     const defaultWindow = query.revalidateAfterMs;
@@ -244,6 +341,7 @@ export function makeQueryStore<T, P = never>(
       const abortSignal = options?.abortSignal;
       assertCurrent();
       const caller = createCaller(runtime, query, input, window, abortSignal);
+      if (hostAuthority !== undefined) assertCurrent();
       if (admission !== undefined) {
         finishTransferAdmission(admission, runtime);
         admission = undefined;
@@ -252,9 +350,13 @@ export function makeQueryStore<T, P = never>(
       registerTransferReadable(caller.status, runtime, "query-status", caller);
       registerTransferReadable(caller.pending, runtime, "query-pending", caller);
       admitStore(runtime);
+      if (hostAuthority !== undefined) assertCurrent();
       addCaller(runtime, caller);
+      if (hostAuthority !== undefined) assertCurrent();
       setQueryRuntimeSource(runtime, query, input);
+      if (hostAuthority !== undefined) assertCurrent();
       writeCallerStatus(caller);
+      if (hostAuthority !== undefined) assertCurrent();
       const status = caller.status;
       const pending = caller.pending;
       const queryStore = Object.create(runtime.store) as QueryStore<T, P>;
@@ -296,16 +398,82 @@ export function makeQueryStore<T, P = never>(
         graphId: state.graph.id,
         reportFault: (fault) => graphFault(state, fault),
       });
-      const stale = queryIsStale(caller);
-      if (acquisition === "fetch" || stale)
-        void startQuery(runtime, caller, false, caller.abortSignal, runtime.failing);
-      else armStoreTimer(runtime);
-      touch(runtime);
-      return queryStore;
+      let rollback: Unsubscribe | undefined;
+      let assertCohortCurrent: (() => void) | undefined;
+      try {
+        if (cohort !== undefined) {
+          const incarnation = runtime.incarnation;
+          const source = runtime.source;
+          const callerWasAborted = caller.abortSignal?.aborted === true;
+          const assertCohortNative = (): void => {
+            const callerAborted = caller.abortSignal?.aborted === true;
+            assertNativeCurrent();
+            assertStoreOpen(runtime);
+            if (
+              state.resetEpoch !== epoch ||
+              runtime.incarnation !== incarnation ||
+              runtime.source?.query !== source?.query ||
+              !Object.is(runtime.source?.input, source?.input)
+            )
+              throw new AbortError("Query acquisition lost its current source.");
+            if (!callerWasAborted && callerAborted)
+              throw new AbortError("Query acquisition caller was aborted.");
+          };
+          assertCohortCurrent = (): void => {
+            assertCohortNative();
+            if (!admitted && hostAuthority !== undefined) {
+              assertSynchronousQueryAuthority(hostAuthority);
+              assertCohortNative();
+            }
+          };
+          assertCohortCurrent();
+          rollback = enrollQueryProgressCohort(runtime, queryStore, cohort, assertCohortCurrent);
+          assertCohortCurrent();
+        }
+        const stale = queryIsStale(caller);
+        if (hostAuthority !== undefined) assertCohortCurrent?.();
+        if (acquisition === "fetch" || stale) {
+          const admission =
+            hostAuthority === undefined || assertCohortCurrent === undefined
+              ? undefined
+              : {
+                  assertCurrent: assertCohortCurrent,
+                  admitted: () => {
+                    admitted = true;
+                    hostAuthority = undefined;
+                  },
+                };
+          void startQuery(
+            runtime,
+            caller,
+            false,
+            caller.abortSignal,
+            runtime.failing,
+            undefined,
+            admission,
+          );
+        } else armStoreTimer(runtime);
+        assertCohortCurrent?.();
+        touch(runtime);
+        return queryStore;
+      } catch (cause) {
+        if (rollback !== undefined) {
+          try {
+            rollback();
+          } catch (cleanupCause) {
+            throw new AggregateError(
+              [cause, cleanupCause],
+              "Query acquisition and cohort cleanup failed",
+            );
+          }
+        }
+        throw cause;
+      }
     } finally {
       endBindingAddress(binding, String(key), addressAdmission);
     }
   } finally {
+    hostAuthority = undefined;
     try {
       if (admission !== undefined) finishTransferAdmission(admission, admittedRuntime);
     } finally {

@@ -26,6 +26,7 @@ export {
   peekStore,
   observeStore,
   observeQueryProgress,
+  callQueryWithProgress,
 } from "./contract/index.ts";
 export type {
   Affected,
@@ -38,6 +39,7 @@ export type {
   DeclaredStores,
   FetchOptions,
   QueryFetchOptions,
+  QueryProgressCohortEntry,
   QueryProgressEvent,
   QueryProgressObservation,
   QueryProgressSnapshot,

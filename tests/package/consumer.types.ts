@@ -48,6 +48,7 @@ import {
   positionedFoldReceipt,
   acknowledgePositionedFold,
   observeQueryProgress,
+  callQueryWithProgress,
   observeStore,
   observePositionedStoreCaptureState,
   peekStore,
@@ -63,6 +64,7 @@ import {
   type FetchOptions,
   type QueryAcquisition,
   type QueryFetchOptions,
+  type QueryProgressCohortEntry,
   type QueryProgressEvent,
   type QueryProgressObservation,
   type QueryProgressSnapshot,
@@ -621,6 +623,33 @@ function typecheckOnly(): void {
     contract: defineContract({ namespace: "progress-types", operations: { progressQuery } }),
   });
   const progressStore = progressGraph.api.progressQuery("one");
+  const cohortEntries: readonly QueryProgressCohortEntry<number, Progress>[] = [
+    {
+      signal: new AbortController().signal,
+      onEvent(event, context) {
+        const typedEvent: QueryProgressEvent<Progress> = event;
+        const typedStore: QueryStore<number, Progress> = context.store;
+        const typedCapture: QueryProgressSnapshot<Progress> = context.observation.capture();
+        const stop: Unsubscribe = context.stop;
+        void [typedEvent, typedStore, typedCapture, stop];
+      },
+    },
+  ];
+  const assertQueryAuthority = (): void => {};
+  callQueryWithProgress(
+    progressGraph.api.progressQuery,
+    ["one"],
+    cohortEntries,
+    assertQueryAuthority,
+  );
+  const progressBinding = bindOperation(progressGraph, progressQuery, {
+    context: createBindingContext(progressGraph),
+    profile: {},
+    fetch: progressQuery.fetch,
+  });
+  callQueryWithProgress(progressBinding.member, ["one"], cohortEntries, assertQueryAuthority);
+  // @ts-expect-error A stream member is not a query progress source.
+  callQueryWithProgress(graph.api.stream, [{ id: "1" }], cohortEntries);
   const progressOptions: QueryFetchOptions<Progress> = {
     abortSignal: new AbortController().signal,
     graph: progressGraph.id,

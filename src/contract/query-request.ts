@@ -40,6 +40,12 @@ import {
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const nativeApply = Reflect.apply;
 
+/** @internal Authority that applies only until one query acquisition is admitted. */
+interface QueryAdmissionAuthority {
+  assertCurrent(): void;
+  admitted(): void;
+}
+
 function bindingContextClosed<T>(runtime: StoreRuntime<T>): boolean {
   return runtime.binding?.context.disposed === true;
 }
@@ -216,10 +222,18 @@ export function startQuery<T>(
   abortSignal?: AbortSignal,
   automaticRecovery = false,
   expectedIncarnation?: object,
+  authority?: QueryAdmissionAuthority,
 ): Promise<void> {
   return (
-    startQueryRequest(runtime, caller, force, abortSignal, automaticRecovery, expectedIncarnation)
-      ?.promise ?? Promise.resolve()
+    startQueryRequest(
+      runtime,
+      caller,
+      force,
+      abortSignal,
+      automaticRecovery,
+      expectedIncarnation,
+      authority,
+    )?.promise ?? Promise.resolve()
   );
 }
 
@@ -230,10 +244,12 @@ export function startQueryRequest<T>(
   abortSignal?: AbortSignal,
   automaticRecovery = false,
   expectedIncarnation?: object,
+  authority?: QueryAdmissionAuthority,
 ): QueryRequest | undefined {
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
   const state = runtime.graph.__runtime;
+  let expectedGeneration = runtime.generation;
   const entryIncarnation =
     runtime.binding === undefined ? undefined : (expectedIncarnation ?? runtime.incarnation);
   if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation) return undefined;
@@ -247,6 +263,7 @@ export function startQueryRequest<T>(
     admission = beginBindingAddress(runtime.binding, String(runtime.key));
     // Effects supply their ticket before interaction can collect or replace the entry.
     interact(state);
+    authority?.assertCurrent();
     if (runtime.binding !== undefined) {
       assertStoreOpen(runtime);
       if (
@@ -260,12 +277,33 @@ export function startQueryRequest<T>(
       if (existing != null) {
         if (runtime.refreshOnActivation) noteTransferChange(runtime);
         runtime.refreshOnActivation = false;
+        if (authority !== undefined) {
+          authority.assertCurrent();
+          const current = isCurrentRequest(runtime);
+          if (current === undefined)
+            throw new AbortError("Query acquisition lost its current request.");
+          authority.admitted();
+          return current;
+        }
         return existing;
       }
     }
+    if (authority !== undefined && runtime.generation !== expectedGeneration)
+      throw new AbortError("Query acquisition lost its generation.");
     if (!force && runtime.recoveryDisarmed) return undefined;
     if (runtime.refreshOnActivation) noteTransferChange(runtime);
     runtime.refreshOnActivation = false;
+    if (authority !== undefined) {
+      authority.assertCurrent();
+      const existing = isCurrentRequest(runtime);
+      if (existing !== undefined) {
+        authority.admitted();
+        return existing;
+      }
+      if (runtime.generation !== expectedGeneration)
+        throw new AbortError("Query acquisition lost its generation.");
+      if (!force && runtime.recoveryDisarmed) return undefined;
+    }
     if (force) {
       if (runtime.recoveryDisarmed) noteTransferChange(runtime);
       runtime.recoveryDisarmed = false;
@@ -282,6 +320,17 @@ export function startQueryRequest<T>(
         if (entryIncarnation !== undefined && runtime.incarnation !== entryIncarnation)
           return undefined;
       }
+    }
+    if (authority !== undefined) {
+      authority.assertCurrent();
+      const existing = isCurrentRequest(runtime);
+      if (existing !== undefined) {
+        authority.admitted();
+        return existing;
+      }
+      if (runtime.generation !== expectedGeneration)
+        throw new AbortError("Query acquisition lost its generation.");
+      if (!force && runtime.recoveryDisarmed) return undefined;
     }
     nextGeneration(runtime.generation);
     if (runtime.timer != null) {
@@ -310,6 +359,78 @@ export function startQueryRequest<T>(
         runtime.incarnation === incarnation,
     );
     const removeCallerAbort = (): void => physicalCleanup(owner, unlinkCallerAbort);
+    let callerUnlinked = false;
+    const releaseUnadmittedCaller = (): void => {
+      if (callerUnlinked) return;
+      callerUnlinked = true;
+      removeCallerAbort();
+    };
+    const refuseUnadmitted = (cause: unknown): never => {
+      try {
+        releaseUnadmittedCaller();
+      } catch (cleanup) {
+        throw new AggregateError([cause, cleanup], "Query acquisition and signal cleanup failed");
+      }
+      throw cause;
+    };
+    const releaseAndRecheck = (): void => {
+      let cleanupFailed = false;
+      let cleanupCause: unknown;
+      try {
+        releaseUnadmittedCaller();
+      } catch (cause) {
+        cleanupFailed = true;
+        cleanupCause = cause;
+      }
+      try {
+        authority!.assertCurrent();
+      } catch (cause) {
+        if (cleanupFailed)
+          throw new AggregateError(
+            [cause, cleanupCause],
+            "Query acquisition and signal cleanup failed",
+          );
+        throw cause;
+      }
+      if (cleanupFailed) throw cleanupCause;
+    };
+    const disarmed = "disarmed" as const;
+    const checkAuthorityOrJoin = (): QueryRequest | typeof disarmed | undefined => {
+      if (authority === undefined) return undefined;
+      authority.assertCurrent();
+      const existing = isCurrentRequest(runtime);
+      if (existing === undefined) {
+        if (runtime.generation !== expectedGeneration)
+          throw new AbortError("Query acquisition lost its generation.");
+        if (!force && runtime.recoveryDisarmed) {
+          releaseAndRecheck();
+          const current = isCurrentRequest(runtime);
+          if (current !== undefined) {
+            authority.admitted();
+            return current;
+          }
+          if (!runtime.recoveryDisarmed || runtime.generation !== expectedGeneration)
+            throw new AbortError("Query acquisition changed during signal cleanup.");
+          return disarmed;
+        }
+        return undefined;
+      }
+      releaseAndRecheck();
+      const current = isCurrentRequest(runtime);
+      if (current === undefined)
+        throw new AbortError("Query acquisition lost its current request.");
+      authority.admitted();
+      return current;
+    };
+    if (authority !== undefined) {
+      try {
+        const existing = checkAuthorityOrJoin();
+        if (existing === disarmed) return undefined;
+        if (existing !== undefined) return existing;
+      } catch (cause) {
+        refuseUnadmitted(cause);
+      }
+    }
     if (
       runtime.disposed ||
       state.disposed ||
@@ -329,13 +450,26 @@ export function startQueryRequest<T>(
     let generation: number;
     try {
       generation = issue(runtime);
+      expectedGeneration = generation;
     } catch (error) {
+      if (authority !== undefined) refuseUnadmitted(error);
       try {
-        removeCallerAbort();
+        releaseUnadmittedCaller();
       } catch (cleanupError) {
         reportContinuationError(state, cleanupError);
       }
       throw error;
+    }
+    if (authority !== undefined) {
+      try {
+        const existing = checkAuthorityOrJoin();
+        if (existing === disarmed) return undefined;
+        if (existing !== undefined) return existing;
+        if (runtime.generation !== generation)
+          throw new AbortError("Query acquisition lost its generation.");
+      } catch (cause) {
+        refuseUnadmitted(cause);
+      }
     }
     const source: QuerySource<T> = { query: caller.query, input: caller.input };
     noteTransferChange(runtime);
@@ -364,6 +498,18 @@ export function startQueryRequest<T>(
       superseded: false,
     };
     noteTransferChange(runtime);
+    if (authority !== undefined) {
+      try {
+        const existing = checkAuthorityOrJoin();
+        if (existing === disarmed) return undefined;
+        if (existing !== undefined) return existing;
+        if (runtime.generation !== generation)
+          throw new AbortError("Query acquisition lost its generation.");
+        authority.admitted();
+      } catch (cause) {
+        refuseUnadmitted(cause);
+      }
+    }
     runtime.source = source;
     runtime.requests.add(request);
     updateCollectionCandidate(runtime);

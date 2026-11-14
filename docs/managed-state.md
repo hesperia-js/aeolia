@@ -863,6 +863,35 @@ value is `undefined`. Status is `idle`, `active`, `complete`, `interrupted`, or
 not commit the query value or settle its request. `observeStore().publish()`
 also does not create a progress report.
 
+To observe reports that can occur synchronously during query acquisition, call
+`callQueryWithProgress(member, args, entries)`. Aeolia registers the eligible entries
+together at one current progress frontier before it starts the call's ordinary
+query work. Each entry receives a current seed and subsequent progress events in
+FIFO order. Reports from before the cohort joined are not replayed. If progress
+delivery is already active, the seeds are queued and can arrive after the query
+member returns.
+
+Pass the genuine raw or bound query member and its original argument tuple. The
+helper uses the member's normal argument handling, including branded options and
+second-argument precedence, and returns that call's genuine `QueryStore`.
+
+The optional fourth argument is a synchronous acquisition authority check. Aeolia
+calls it while preparing the cohort and before admitting a new request. If it
+throws, the acquisition is refused with that value; cleanup failures are also
+retained. Primitive return values, including `undefined` and `null`, are ignored.
+An object or function return refuses the acquisition: Aeolia attempts to observe
+it using the captured native Promise mechanism without calling an authored `then`
+method. A genuine Promise is rejected as asynchronous; a failed observation retains
+its original cause. Once a request is admitted, its existing Native owner controls
+cancellation and settlement. The authority check is not used for later revalidation
+or reset.
+
+Each entry supplies an `AbortSignal` and an `onEvent` method. The callback receives
+the genuine `QueryStore` for that call, a live `QueryProgressObservation`, and an
+idempotent stop function. Aborting the entry's signal or calling its stop removes
+only that listener. Neither action cancels a shared query request. Callbacks can
+run before the query member returns, so prepare their state before making the call.
+
 `ObservationPublishOptions.transfer` labels the exact observed base revision.
 The default `eligible` value keeps it eligible for supported snapshots. Use
 `exclude` only for a native fallback whose transfer policy has been explicitly
