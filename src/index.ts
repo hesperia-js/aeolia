@@ -6,9 +6,27 @@ export {
   createQuery,
   createStore,
   createStream,
+  createPositionedStream,
   queryOptions,
   project,
+  projectPositioned,
+  capturePositionedStore,
+  observePositionedStoreCaptureState,
+  isPositionedStoreCheckpointCurrent,
+  preparePositionedStoreRestore,
+  capturePositionedProjection,
+  isPositionedCheckpointCurrent,
+  preparePositionedRestore,
+  preparePositionedSeedRestore,
+  positionedFoldReceipt,
+  acknowledgePositionedFold,
   storeKey,
+  bindOperation,
+  createBindingContext,
+  peekStore,
+  observeStore,
+  observeQueryProgress,
+  callQueryWithProgress,
 } from "./contract/index.ts";
 export type {
   Affected,
@@ -20,6 +38,12 @@ export type {
   DefineContractInput,
   DeclaredStores,
   FetchOptions,
+  QueryFetchOptions,
+  QueryProgressCohortEntry,
+  QueryProgressEvent,
+  QueryProgressObservation,
+  QueryProgressSnapshot,
+  QueryProgressStatus,
   Generation,
   Graph,
   GraphId,
@@ -34,6 +58,7 @@ export type {
   OpenOptions,
   OperationDefinition,
   OperationTree,
+  QueryAcquisition,
   QueryDefinition,
   CreateQueryInput,
   QueryStore,
@@ -42,28 +67,74 @@ export type {
   StoreDefinition,
   CreateStoreInput,
   StoreKey,
+  StoreIdentity,
+  StoreCapture,
+  ValueRevision,
   StoreNames,
   StoreOptions,
   StorePatterns,
   StoreStatus,
   StreamDefinition,
+  PositionedStreamDefinition,
+  PositionedStreamSource,
+  PositionedStreamEvent,
+  PositionedStreamOpenOptions,
+  CreatePositionedStreamInput,
+  PositionedFoldReceipt,
+  PositionedProjectionCheckpoint,
+  PositionedRestoreSeed,
+  PositionedStoreCheckpoint,
+  PositionedStoreRestoreSeed,
+  PositionedStoreRestoration,
+  NativeStreamDefinition,
   CreateStreamInput,
   StreamStatus,
   StreamStore,
   ValueOptions,
+} from "./contract/index.ts";
+export type {
+  BindingContext,
+  BoundQueryMember,
+  ExistingTarget,
+  QueryBinding,
+  ObservationLease,
+  ObservationPublishOptions,
+  QueryBindingConfiguration,
+  QueryBindingHandle,
+  TypedTarget,
 } from "./contract/index.ts";
 export { Fault, onFault } from "./fault.ts";
 export type { FaultKind, Unsubscribe } from "./fault.ts";
 export { subscribe } from "./subscribe.ts";
 export type {
   AccumulatePolicy,
+  PositionedRestoration,
+  PositionedStoreCaptureNotice,
+  PositionedStreamAccess,
   Projection,
   ProjectionPolicy,
   ProjectionStatus,
   ReducePolicy,
 } from "./contract/index.ts";
 export { adopt, AEOLIA_TAGGED_ENCODING, snapshot } from "./realm.ts";
-export type { AdoptionReport, EncodingId, Snapshot, SnapshotEntry } from "./realm.ts";
+export type {
+  AdoptionReport,
+  EncodingId,
+  Snapshot,
+  SnapshotEntry,
+  SnapshotLanding,
+  SnapshotAddress,
+  RawOrQuerySnapshotAddressV2,
+  StreamSnapshotAddressV2,
+  SnapshotEntryFieldsV2,
+  SnapshotEntryV2,
+  SnapshotV2,
+  SnapshotBindingReference,
+  SnapshotOptionsV2,
+  AdoptOptionsV2,
+  AdoptedEntryV2,
+  AdoptionReportV2,
+} from "./realm.ts";
 export {
   Signal,
   afterPropagation,
@@ -83,3 +154,82 @@ export type {
   SignalOptions,
   WritableSignal,
 } from "./reactive.ts";
+
+export { profileEffect, predictionFor } from "./contract/mutation-binding.ts";
+export type {
+  BindingMutationOptions,
+  BrandedBindingMutationOptions,
+  BoundMutationMember,
+  EffectContext,
+  MutationBinding,
+  MutationBindingConfiguration,
+  PreparedEffect,
+  PrepareEffectContext,
+  ProfileEffect,
+  SettledEffect,
+  SettleEffectContext,
+  TargetPrediction,
+} from "./contract/mutation-binding.ts";
+
+export { bindStream } from "./contract/stream-binding.ts";
+export type {
+  BoundStreamMember,
+  BoundStreamSession,
+  BoundStreamValueOptions,
+  StreamBinding,
+  StreamBindingHandle,
+  StreamDetachment,
+  StreamSessionIdentity,
+  StreamTerminalCapture,
+} from "./contract/stream-binding.ts";
+export { inspectBoundAddress } from "./contract/binding-address.ts";
+export type {
+  BoundAddressEmpty,
+  BoundAddressInspection,
+  BoundAddressStamp,
+} from "./contract/binding-address.ts";
+
+export {
+  createTransferScope,
+  prepareTransferOperation,
+  prepareTransferScopeSuccessors,
+  prepareTransferOperationRetirement,
+} from "./contract/index.ts";
+export type {
+  TransferScope,
+  TransferOperation,
+  TransferPublication,
+  TransferCommit,
+  TransferNotifications,
+  QueryTransferSource,
+  MutationTransferSource,
+  TransferOperationDispatch,
+  TransferScopeSuccessor,
+} from "./contract/index.ts";
+export {
+  captureReactiveConstruction,
+  prepareRequiredTransferCapture,
+  preparePassiveTransferClaim,
+  prepareRequiredTransferAdoption,
+} from "./realm.ts";
+export type {
+  ReactiveConstruction,
+  TransferSlot,
+  ClosedEncodedValue,
+  ClosedEncodedFailure,
+  TransferSourceWitness,
+  TransferTargetWitness,
+  RequiredTransferCodec,
+  NativeTransferSource,
+  ExistingNativeValueOptions,
+  NativeStoreFor,
+  PassiveTransferClaim,
+  PreparedPassiveObservation,
+  RequiredTransferNode,
+  RequiredTransferStore,
+  TransferCallerWindow,
+  RequiredTransferCaller,
+  EncodedRequiredTransfer,
+  RequiredTransferCaptureOptions,
+  RequiredTransferAdoptionOptions,
+} from "./realm.ts";

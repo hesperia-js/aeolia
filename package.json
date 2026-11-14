@@ -20,8 +20,12 @@
     "type": "git",
     "url": "https://github.com/hesperia-js/aeolia.git"
   },
+  "workspaces": [
+    "tools/build"
+  ],
   "files": [
     "dist",
+    "docs",
     "README.md",
     "CONTRIBUTING.md",
     "LICENSE",
@@ -35,27 +39,31 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "development": "./dist/development/index.js",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
     "./reactive": {
       "types": "./dist/reactive/index.d.ts",
+      "development": "./dist/development/reactive/index.js",
       "import": "./dist/reactive/index.js",
       "default": "./dist/reactive/index.js"
     },
     "./contract": {
       "types": "./dist/contract/index.d.ts",
+      "development": "./dist/development/contract/index.js",
       "import": "./dist/contract/index.js",
       "default": "./dist/contract/index.js"
     },
     "./testing": {
       "types": "./dist/testing.d.ts",
+      "development": "./dist/development/testing.js",
       "import": "./dist/testing.js",
       "default": "./dist/testing.js"
     }
   },
   "scripts": {
-    "build": "bun build.ts",
+    "build": "bun tools/build/build.ts",
     "test": "bun run build && bun test tests",
     "test:package": "bun run build && bun test tests/package && bun run tests/package/run.ts",
     "prepublishOnly": "bun run test:package",
@@ -72,12 +80,11 @@
     "oxfmt": "0.72.0",
     "oxlint": "1.87.0",
     "playwright": "1.65.0",
-    "tsdown": "0.23.0",
-    "typescript": "7.0.2"
+    "typescript": "7.1.0-beta"
   },
   "peerDependencies": {
     "@types/bun": "^1.4",
-    "typescript": ">=6.0.0"
+    "typescript": ">=6.0.0 || 7.1.0-beta"
   },
   "peerDependenciesMeta": {
     "@types/bun": {
@@ -87,5 +94,5 @@
       "optional": true
     }
   },
-  "packageManager": "bun@1.4.2"
+  "packageManager": "bun@1.4.4"
 }

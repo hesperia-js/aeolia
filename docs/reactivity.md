@@ -55,6 +55,13 @@ the `watched` and `unwatched` lifecycle callbacks must be functions, and
 callback. Invalid options or a non-function callback throw `TypeError` before
 the signal is added to the reactive graph.
 
+`State.update(next)` calls `next` once with the current value and stores its
+result. The result may be any value allowed by the State's type, including a
+function. Published packages include supplementary diagnostics under the
+`development` export condition. Enable that condition in your module resolver
+to get a descriptive `TypeError` for a non-function updater. The ordinary write
+policy, including `withoutWrites`, still takes precedence.
+
 Use `subscribe(readable, observer)` to receive values. It delivers the current
 value immediately, including `undefined`, and respects the source's equality
 policy (`Object.is` by default). A computed whose result remains equal does
@@ -104,6 +111,46 @@ equality configured on a State or Computed can therefore suppress a rerun.
 `dispose()` detaches all dependencies and makes queued invalidations harmless;
 it is idempotent. `afterPropagation` callbacks are deduplicated by callback
 identity within a handoff and their returned unsubscribe is idempotent.
+
+## Transferring cached reactive values
+
+`captureReactiveConstruction` associates a real `State` or `Computed` instance
+with its native construction. `prepareRequiredTransferCapture` records its
+existing cached dependency closure without running callbacks. The resulting
+slots describe dependency edges and cached outcomes; they do not contain the
+source callbacks.
+
+Query `status` and `pending` facets retain a caller slot linked to the shared
+physical Store slot, so the receiver maps each captured caller to its own
+genuine claim. See [Managed state](managed-state.md#required-cached-state-transfer)
+for the caller row and claim mapping.
+
+`ObservationLease.active` and `issue` are also native facets. Their receiver
+counterparts come from `claim.prepareObservation()`. When multiple caller slots
+share one physical query and one required observation, pass the first claim's
+exact pending lease to each additional claim. Independent pending leases do not
+represent the same observation. The image carries no private issue payload, so
+incompatible issue state fails the complete adoption.
+
+Adoption requires actual receiver `State` and `Computed` instances with their
+own construction receipts. State writes since a target State was constructed
+remain visible. If a required cold receiver Computed depends on a browser-owned
+State value that differs from the image, the complete adoption is refused before
+any of its writes are published. The Computed stays cold; its next normal
+`get()` evaluates against the receiver graph. A warm Computed can retain its
+browser cache only when the complete required mapping remains compatible.
+
+Required reactive publication separates writes from notification delivery.
+`TransferCommit.publish()` installs the staged State values and compatible
+caches synchronously. The caller then invokes
+`TransferCommit.notifications.deliver()` at its chosen boundary. If a watcher
+throws during delivery, delivery reports the failure and the installed reactive
+values remain published; the transfer plan reports that same outcome through
+`retired`.
+
+This path preserves the kernel’s normal dependency tracking after publication. A
+later receiver write invalidates the transferred Computed through its actual
+target dependencies, and its next read follows the ordinary propagation rules.
 
 Synchronous teardown can use `withoutWrites(cleanup)` to keep reads available
 while rejecting every State write, including a same-value write that would

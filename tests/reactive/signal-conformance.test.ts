@@ -1,5 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { Fault, Signal } from "../../src/index.ts";
+import {
+  Fault,
+  Signal,
+  captureReactiveConstruction,
+  createGraph,
+  defineContract,
+  prepareRequiredTransferCapture,
+} from "../../src/index.ts";
+import type { ClosedEncodedValue, RequiredTransferCodec } from "../../src/index.ts";
 
 function thrownBy(run: () => unknown): unknown {
   try {
@@ -182,6 +190,63 @@ describe("canonical Signals surface", () => {
       expect(runs).toBe(2);
     });
 
+    it("captures a State construction inside a Computed without evaluating the graph", async () => {
+      const graph = createGraph({
+        contract: defineContract({ namespace: "signal-construction-capture", operations: {} }),
+      });
+      const codec: RequiredTransferCodec = {
+        encodeValue: (value) => value as ClosedEncodedValue,
+        encodeFailure: (cause) => String(cause),
+        decodeValue: (value) => value,
+        decodeFailure: (failure) => new Error(String(failure)),
+      };
+      let sourceState: Signal.State<number> | undefined;
+      let stateConstruction: ReturnType<typeof captureReactiveConstruction> | undefined;
+      let evaluations = 0;
+      let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
+      let published = false;
+      const derived = new Signal.Computed(() => {
+        evaluations += 1;
+        if (sourceState === undefined) {
+          sourceState = new Signal.State(6);
+          stateConstruction = captureReactiveConstruction(sourceState);
+        }
+        return sourceState.get() * 2;
+      });
+
+      try {
+        expect(derived.get()).toBe(12);
+        expect(evaluations).toBe(1);
+        if (sourceState === undefined || stateConstruction === undefined)
+          throw new Error("The Computed did not retain its constructed State");
+        const derivedConstruction = captureReactiveConstruction(derived);
+        capture = prepareRequiredTransferCapture({
+          graphs: [graph],
+          roots: [
+            { source: derived, construction: derivedConstruction },
+            { source: sourceState, construction: stateConstruction },
+          ],
+          codec,
+        });
+        expect(capture.image.roots).toHaveLength(2);
+        expect(evaluations).toBe(1);
+        const commit = capture.seal();
+        if (commit === undefined) throw new Error("The captured reactive closure did not seal");
+        commit.publish();
+        published = true;
+        commit.notifications.deliver();
+        await capture.retired;
+        expect(evaluations).toBe(1);
+      } finally {
+        if (!published) capture?.discard();
+        if (capture !== undefined)
+          await capture.retired.then(
+            () => undefined,
+            () => undefined,
+          );
+        graph.dispose();
+      }
+    });
     it("keeps a live computation failure cached until a dependency invalidates it", () => {
       const source = new Signal.State(0);
       const failure = new Error("not ready");

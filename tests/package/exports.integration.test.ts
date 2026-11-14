@@ -9,6 +9,7 @@ interface PackageManifest {
       {
         readonly types?: string;
         readonly import?: string;
+        readonly development?: string;
         readonly default?: string;
       }
     >
@@ -25,12 +26,13 @@ test("the published entry point resolves to the built ESM artifact", async () =>
   expect(manifest.dependencies ?? {}).toEqual({});
   expect(entry).toEqual({
     types: "./dist/index.d.ts",
+    development: "./dist/development/index.js",
     import: "./dist/index.js",
     default: "./dist/index.js",
   });
 
   for (const entry of Object.values(manifest.exports ?? {})) {
-    for (const path of [entry.import, entry.types]) {
+    for (const path of [entry.import, entry.types, entry.development]) {
       expect(path).toBeDefined();
       expect(await Bun.file(new URL(`../../${path}`, import.meta.url)).exists()).toBe(true);
     }
@@ -42,19 +44,49 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     "AEOLIA_TAGGED_ENCODING",
     "Fault",
     "Signal",
+    "acknowledgePositionedFold",
     "adopt",
     "affects",
     "afterPropagation",
+    "bindOperation",
+    "bindStream",
+    "callQueryWithProgress",
+    "capturePositionedProjection",
+    "capturePositionedStore",
+    "captureReactiveConstruction",
     "computed",
+    "createBindingContext",
     "createGraph",
     "createMutation",
     "createObserver",
+    "createPositionedStream",
     "createQuery",
     "createStore",
     "createStream",
+    "createTransferScope",
     "defineContract",
+    "inspectBoundAddress",
+    "isPositionedCheckpointCurrent",
+    "isPositionedStoreCheckpointCurrent",
+    "observePositionedStoreCaptureState",
+    "observeQueryProgress",
+    "observeStore",
     "onFault",
+    "peekStore",
+    "positionedFoldReceipt",
+    "predictionFor",
+    "preparePassiveTransferClaim",
+    "preparePositionedRestore",
+    "preparePositionedSeedRestore",
+    "preparePositionedStoreRestore",
+    "prepareRequiredTransferAdoption",
+    "prepareRequiredTransferCapture",
+    "prepareTransferOperation",
+    "prepareTransferOperationRetirement",
+    "prepareTransferScopeSuccessors",
+    "profileEffect",
     "project",
+    "projectPositioned",
     "queryOptions",
     "readableBrand",
     "signal",
@@ -73,14 +105,40 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     [
       "contract",
       [
+        "acknowledgePositionedFold",
         "affects",
+        "bindOperation",
+        "bindStream",
+        "callQueryWithProgress",
+        "capturePositionedProjection",
+        "capturePositionedStore",
+        "createBindingContext",
         "createGraph",
         "createMutation",
+        "createPositionedStream",
         "createQuery",
         "createStore",
         "createStream",
+        "createTransferScope",
         "defineContract",
+        "inspectBoundAddress",
+        "isPositionedCheckpointCurrent",
+        "isPositionedStoreCheckpointCurrent",
+        "observePositionedStoreCaptureState",
+        "observeQueryProgress",
+        "observeStore",
+        "peekStore",
+        "positionedFoldReceipt",
+        "predictionFor",
+        "preparePositionedRestore",
+        "preparePositionedSeedRestore",
+        "preparePositionedStoreRestore",
+        "prepareTransferOperation",
+        "prepareTransferOperationRetirement",
+        "prepareTransferScopeSuccessors",
+        "profileEffect",
         "project",
+        "projectPositioned",
         "queryOptions",
         "storeKey",
       ],
@@ -89,6 +147,39 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     const subsystem = await import(`${packageName}/${subpath}`);
     expect(Object.keys(subsystem).sort()).toEqual([...names].sort());
     for (const name of names) expect(subsystem[name]).toBe(publicApi[name]);
+    const response = Promise.withResolvers<number>();
+    const query = publicApi.createQuery({
+      name: "observed",
+      key: () => "one",
+      fetch: () => response.promise,
+    });
+    const graph = publicApi.createGraph({
+      contract: { namespace: "built-observation", operations: { query } },
+    });
+    try {
+      const binding = publicApi.bindOperation(graph, query, {
+        context: publicApi.createBindingContext(graph),
+        profile: {},
+        fetch: query.fetch,
+      });
+      const store = binding.member(undefined);
+      const lease = subsystem.observeStore(graph, store);
+      lease.publish(3);
+      expect(publicApi.peekStore(store)).toMatchObject({
+        kind: "stable",
+        present: true,
+        value: 3,
+      });
+      response.resolve(4);
+      expect(await store.ready).toBe(4);
+      expect(subsystem.peekStore(store)).toMatchObject({
+        kind: "stable",
+        present: true,
+        value: 4,
+      });
+    } finally {
+      graph.dispose();
+    }
   }
 
   const reactivePackageName = `${packageName}/reactive`;

@@ -33,9 +33,9 @@ export function statusFor<T>(
   const runtime = caller.runtime;
   assertStoreOpen(runtime);
   const current = isCurrentRequest(runtime);
-  if (current != null) return runtime.hasCommitted ? "revalidating" : "fetching";
-  if (!runtime.hasCommitted && runtime.failing) return "failed";
-  if (!runtime.hasCommitted) return "empty";
+  if (current != null) return runtime.hasAcceptedLanding ? "revalidating" : "fetching";
+  if (!runtime.hasAcceptedLanding && runtime.failing) return "failed";
+  if (!runtime.hasAcceptedLanding) return "empty";
   if (runtime.failing) return "failed";
   if (runtime.invalidated) return "stale";
   if (landingGeneration === runtime.generation) return "ready";
@@ -94,7 +94,7 @@ export function makePending(status: Readable<StoreStatus>): Readable<boolean> {
 
 export function createCaller<T>(
   runtime: StoreRuntime<T>,
-  query: QueryDefinition<any, T, any>,
+  query: QueryDefinition<any, T, any, any>,
   input: unknown,
   windowMs: number,
   abortSignal?: AbortSignal,
@@ -129,6 +129,6 @@ export function createCaller<T>(
 
 export function queryIsStale<T>(caller: QueryCaller<T>): boolean {
   const runtime = caller.runtime;
-  if (!runtime.hasCommitted || runtime.failing || runtime.invalidated) return true;
+  if (!runtime.hasAcceptedLanding || runtime.failing || runtime.invalidated) return true;
   return runtime.lastLandingAt != null && Date.now() - runtime.lastLandingAt >= caller.windowMs;
 }
