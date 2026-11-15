@@ -34,7 +34,14 @@ export function graphFault(state: GraphRuntimeState<any>, fault: Fault): void {
 }
 
 export function reportContinuationError(state: GraphRuntimeState<any>, error: unknown): void {
-  if (error instanceof Fault) graphFault(state, error);
+  let fault: Fault | undefined;
+  try {
+    if (error instanceof Fault) fault = error;
+  } catch {
+    reportUnobserved(state, error);
+    return;
+  }
+  if (fault !== undefined) graphFault(state, fault);
   else reportUnobserved(state, error);
 }
 

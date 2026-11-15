@@ -153,6 +153,8 @@ function typecheckOnly(): void {
   const erasedAffectSpec: AffectSpec<{ readonly id: string }, unknown, unknown> =
     mutation.affects[0]!;
   const graph = createGraph({ contract });
+  const retirement: Promise<void> = graph.retire();
+  void retirement;
   const declared = graph.api.store();
   const queried = graph.api.query({ id: "1" });
   graph.api.query({ id: "2" }, undefined);

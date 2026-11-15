@@ -5,6 +5,12 @@ import { assertGraphOpen, reportContinuationError } from "./faults.ts";
 import { writeAllStatuses } from "./status.ts";
 import type { StoreRuntime, StreamSession } from "./runtime.ts";
 import { publishStreamEvent } from "./stream-events.ts";
+import {
+  beginPhysicalWork,
+  finishPhysicalWork,
+  physicalCleanup,
+  returnPhysicalIterator,
+} from "./retirement.ts";
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
@@ -164,6 +170,7 @@ export function endStream<T>(
 ): (() => void) | undefined {
   if (session.ended) return;
   const state = runtime.graph.__runtime;
+  const cleanupWork = beginPhysicalWork(session.physical.owner, "cleanup");
   const current = (): boolean =>
     !state.disposed &&
     runtime.streamToken === session.token &&
@@ -181,62 +188,67 @@ export function endStream<T>(
   const cleanup = (): void => {
     if (cleaned) return;
     cleaned = true;
-    const failures: unknown[] = [];
-    const attempt = (action: () => void): void => {
-      try {
-        action();
-      } catch (error) {
-        failures.push(error);
-      }
-    };
-    if (current() && runtime.stream === session)
-      attempt(() =>
-        publishStreamEvent(runtime, session, {
-          kind: "close",
-          failed: status === "failed",
-          reason,
-        }),
-      );
-    session.listeners.clear();
-    if (runtime.stream === session) runtime.stream = undefined;
-    if (removeCallerAbort !== undefined) attempt(removeCallerAbort);
-    if (removeControllerAbort !== undefined) attempt(removeControllerAbort);
-    attempt(() => session.controller.abort(options?.abortReason));
-    attempt(() => {
-      if (iterator == null) return;
-      const close = iterator.return;
-      if (typeof close !== "function") return;
-      try {
-        void Promise.resolve(close.call(iterator)).catch(() => undefined);
-      } catch {
-        /* closing is best effort; the source is already terminal */
-      }
-    });
-    if (current()) {
-      try {
-        reactiveInternal.batch(() => {
-          if (!current()) return;
-          if (status === "failed") {
-            runtime.failing = true;
-            runtime.invalidated = true;
-            runtime.errorCell.set(reason);
+    try {
+      const failures: unknown[] = [];
+      const attempt = (action: () => void, alreadyOwned = false): void => {
+        try {
+          if (alreadyOwned) action();
+          else physicalCleanup(session.physical.owner, action);
+        } catch (error) {
+          failures.push(error);
+        }
+      };
+      if (current() && runtime.stream === session)
+        attempt(() =>
+          publishStreamEvent(runtime, session, {
+            kind: "close",
+            failed: status === "failed",
+            reason,
+          }),
+        );
+      session.listeners.clear();
+      if (runtime.stream === session) runtime.stream = undefined;
+      if (removeCallerAbort !== undefined) attempt(removeCallerAbort, true);
+      if (removeControllerAbort !== undefined) attempt(removeControllerAbort, true);
+      attempt(() => session.controller.abort(options?.abortReason));
+      attempt(() => {
+        if (iterator == null) return;
+        const close = iterator.return;
+        if (typeof close !== "function") return;
+        try {
+          returnPhysicalIterator(session.physical.owner, iterator, "stream-return", close);
+        } catch {
+          /* closing is best effort; the source is already terminal */
+        }
+      });
+      if (current()) {
+        try {
+          reactiveInternal.batch(() => {
             if (!current()) return;
-            writeAllStatuses(runtime);
-          } else if (status === "empty") {
-            runtime.failing = false;
-            runtime.invalidated = false;
-            runtime.errorCell.set(undefined);
-          }
-          if (current()) setStreamStatus(runtime, status);
-        });
-      } catch (error) {
-        if (current()) reportContinuationError(state, error);
+            if (status === "failed") {
+              runtime.failing = true;
+              runtime.invalidated = true;
+              runtime.errorCell.set(reason);
+              if (!current()) return;
+              writeAllStatuses(runtime);
+            } else if (status === "empty") {
+              runtime.failing = false;
+              runtime.invalidated = false;
+              runtime.errorCell.set(undefined);
+            }
+            if (current()) setStreamStatus(runtime, status);
+          });
+        } catch (error) {
+          if (current()) reportContinuationError(state, error);
+        }
+        if (current()) scheduleSweep(state);
       }
-      if (current()) scheduleSweep(state);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(failures, "Several stream cleanup operations failed");
+    } finally {
+      finishPhysicalWork(cleanupWork);
     }
-    if (failures.length === 1) throw failures[0];
-    if (failures.length > 1)
-      throw new AggregateError(failures, "Several stream cleanup operations failed");
   };
   if (options?.deferCleanup) {
     session.listeners.clear();
