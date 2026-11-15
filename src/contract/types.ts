@@ -247,13 +247,22 @@ export interface ValueOptions<T> {
   readonly snapshot?: boolean;
 }
 
-type OptionChecks = readonly (readonly [string, (value: unknown) => boolean])[];
+type OptionChecks = readonly (readonly [
+  string,
+  (value: unknown, afterRead?: () => void, cleanup?: (action: () => void) => void) => boolean,
+])[];
 
-function matchesOptions(value: unknown, checks: OptionChecks): boolean {
+function matchesOptions(
+  value: unknown,
+  checks: OptionChecks,
+  afterRead?: () => void,
+  cleanup?: (action: () => void) => void,
+): boolean {
   if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
   return checks.every(([field, check]) => {
     const option: unknown = Reflect.get(value, field);
-    return option === undefined || check(option);
+    afterRead?.();
+    return option === undefined || check(option, afterRead, cleanup);
   });
 }
 
@@ -292,22 +301,25 @@ function isNamedDeclaration(value: unknown): value is { readonly name: string } 
 }
 
 /** Validates value options; the caller's arbitrary initial data remains unknown. */
-export function isValueOptions(value: unknown): value is ValueOptions<unknown> {
-  return matchesOptions(value, valueOptionChecks);
+export function isValueOptions(
+  value: unknown,
+  afterRead?: () => void,
+): value is ValueOptions<unknown> {
+  return matchesOptions(value, valueOptionChecks, afterRead);
 }
 
 /** Validates the cancellation-only options accepted by explicit revalidation. */
 export function isCancellationOptions(
   value: unknown,
+  afterRead?: () => void,
 ): value is Pick<ValueOptions<unknown>, "abortSignal"> {
-  return (
-    isObject(value) &&
-    typeof value !== "function" &&
-    !Array.isArray(value) &&
-    (!("abortSignal" in value) ||
-      value.abortSignal === undefined ||
-      isAbortSignal(value.abortSignal))
-  );
+  if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
+  const hasSignal = "abortSignal" in value;
+  afterRead?.();
+  if (!hasSignal) return true;
+  const signal = value.abortSignal;
+  afterRead?.();
+  return signal === undefined || isAbortSignal(signal, afterRead);
 }
 
 /** Options for one query caller, extending keyed value configuration. */
@@ -331,8 +343,11 @@ const storeOptionChecks = Object.entries({
 } satisfies Record<keyof StoreOptions<unknown>, (value: unknown) => boolean>);
 
 /** Validates query option types; effective freshness bounds are checked when used. */
-export function isStoreOptions(value: unknown): value is StoreOptions<unknown> {
-  return matchesOptions(value, storeOptionChecks);
+export function isStoreOptions(
+  value: unknown,
+  afterRead?: () => void,
+): value is StoreOptions<unknown> {
+  return matchesOptions(value, storeOptionChecks, afterRead);
 }
 
 /** Recognizes the options-only call form, including malformed option values. */
@@ -694,32 +709,83 @@ export interface MutationOptions {
   readonly optimistic?: ReadonlyMap<StoreKey, (current: unknown, input: unknown) => unknown>;
 }
 
-function isOptimisticMap(value: unknown): value is NonNullable<MutationOptions["optimistic"]> {
+function isOptimisticMap(
+  value: unknown,
+  afterRead?: () => void,
+  cleanup?: (action: () => void) => void,
+): value is NonNullable<MutationOptions["optimistic"]> {
   if (!isObject(value)) return false;
-  const map = value as Partial<ReadonlyMap<unknown, unknown>>;
-  if (
-    typeof map.size !== "number" ||
-    !Number.isInteger(map.size) ||
-    map.size < 0 ||
-    typeof map.get !== "function" ||
-    typeof map.has !== "function" ||
-    typeof map.forEach !== "function" ||
-    typeof map.entries !== "function" ||
-    typeof map.keys !== "function" ||
-    typeof map.values !== "function" ||
-    typeof map[Symbol.iterator] !== "function"
-  )
-    return false;
-  for (const entry of value as Iterable<unknown>) {
-    if (
-      !Array.isArray(entry) ||
-      entry.length !== 2 ||
-      !isStoreKey(entry[0]) ||
-      typeof entry[1] !== "function"
-    )
-      return false;
+  const read = (target: object, key: PropertyKey): unknown => {
+    const result: unknown = Reflect.get(target, key);
+    afterRead?.();
+    return result;
+  };
+  const size = read(value, "size");
+  if (typeof size !== "number" || !Number.isInteger(size) || size < 0) return false;
+  for (const key of ["get", "has", "forEach", "entries", "keys", "values"] as const) {
+    if (typeof read(value, key) !== "function") return false;
   }
-  return true;
+  const factory = read(value, Symbol.iterator);
+  if (typeof factory !== "function") return false;
+  const iterator: unknown = Reflect.apply(factory, value, []);
+  if (!isObject(iterator)) {
+    afterRead?.();
+    throw new TypeError("The optimistic map iterator is not an object.");
+  }
+  let needsClose = true;
+  const close = (): void => {
+    if (!needsClose) return;
+    needsClose = false;
+    const action = (): void => {
+      const closeMethod: unknown = Reflect.get(iterator, "return");
+      if (closeMethod === undefined || closeMethod === null) return;
+      const result: unknown = Reflect.apply(
+        closeMethod as (...args: never[]) => unknown,
+        iterator,
+        [],
+      );
+      if (!isObject(result))
+        throw new TypeError("The optimistic map iterator return is not an object.");
+    };
+    if (cleanup === undefined) action();
+    else cleanup(action);
+  };
+  try {
+    afterRead?.();
+    const next = read(iterator, "next");
+    for (;;) {
+      const step: unknown = Reflect.apply(next as (...args: never[]) => unknown, iterator, []);
+      afterRead?.();
+      if (!isObject(step))
+        throw new TypeError("The optimistic map iterator result is not an object.");
+      if (read(step, "done")) {
+        needsClose = false;
+        return true;
+      }
+      const entry = read(step, "value");
+      if (
+        !Array.isArray(entry) ||
+        read(entry, "length") !== 2 ||
+        !isStoreKey(read(entry, 0)) ||
+        typeof read(entry, 1) !== "function"
+      ) {
+        try {
+          close();
+        } catch (error) {
+          // An owned close failure cannot replace the invalid-options result.
+          if (cleanup === undefined) throw error;
+        }
+        return false;
+      }
+    }
+  } catch (error) {
+    try {
+      close();
+    } catch {
+      // A validation failure keeps its original cause.
+    }
+    throw error;
+  }
 }
 
 const mutationOptionChecks = Object.entries({
@@ -728,8 +794,12 @@ const mutationOptionChecks = Object.entries({
 } satisfies Record<keyof MutationOptions, (value: unknown) => boolean>);
 
 /** Validates mutation options and every supplied optimistic producer. */
-export function isMutationOptions(value: unknown): value is MutationOptions {
-  return matchesOptions(value, mutationOptionChecks);
+export function isMutationOptions(
+  value: unknown,
+  afterRead?: () => void,
+  cleanup?: (action: () => void) => void,
+): value is MutationOptions {
+  return matchesOptions(value, mutationOptionChecks, afterRead, cleanup);
 }
 
 /** Recognizes the options-only call form, including malformed option values. */
@@ -1108,4 +1178,20 @@ export interface Graph<C extends Contract = Contract> {
    * reads through held store readables fail with a `disposed` {@link Fault}.
    */
   dispose(): void;
+
+  /**
+   * Disposes this graph and joins its original operations and cleanup.
+   *
+   * Retirement waits for original query and mutation work, stream and projection
+   * reads, iterator returns, and cleanup, including work removed by an earlier
+   * reset or disposal. A source that never acknowledges completion keeps it
+   * pending. Semantic operation failures keep their existing channels; cleanup
+   * failures reject the shared promise. After admission, repeated and reentrant
+   * calls return the same promise.
+   *
+   * @returns The graph's shared physical retirement promise.
+   * @throws A {@link Fault} If the first call would close a live graph from a
+   * write-restricted reactive scope. No retirement is admitted in that case.
+   */
+  retire(): Promise<void>;
 }
