@@ -12,10 +12,30 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { chromium } from "playwright";
 
 const root = resolve(import.meta.dir, "../..");
+const chromeExecutablePath = process.env.AEOLIA_CHROME_EXECUTABLE_PATH;
+const expectedChromeVersion = process.env.AEOLIA_CHROME_EXPECTED_VERSION;
+if (
+  expectedChromeVersion !== undefined &&
+  (!expectedChromeVersion.trim() || chromeExecutablePath === undefined)
+)
+  throw new Error("AEOLIA_CHROME_EXPECTED_VERSION requires an explicit Chrome executable");
+if (chromeExecutablePath !== undefined) {
+  if (!chromeExecutablePath.trim() || !isAbsolute(chromeExecutablePath))
+    throw new Error("AEOLIA_CHROME_EXECUTABLE_PATH must be a nonempty absolute path");
+
+  let executable;
+  try {
+    executable = await stat(chromeExecutablePath);
+  } catch (cause) {
+    throw new Error("Cannot inspect AEOLIA_CHROME_EXECUTABLE_PATH", { cause });
+  }
+  if (!executable.isFile())
+    throw new Error("AEOLIA_CHROME_EXECUTABLE_PATH must name a regular file");
+}
 const archiveArguments = Bun.argv.slice(2);
 
 if (archiveArguments.length > 1 || archiveArguments[0]?.startsWith("-"))
@@ -167,8 +187,18 @@ try {
     },
   });
   try {
-    const browser = await chromium.launch();
+    const browser = await (chromeExecutablePath === undefined
+      ? chromium.launch()
+      : chromium.launch({ executablePath: chromeExecutablePath }));
     try {
+      const actualChromeVersion = browser.version();
+      console.log("Chrome runtime version: " + actualChromeVersion);
+      if (expectedChromeVersion !== undefined)
+        assert.equal(
+          actualChromeVersion,
+          expectedChromeVersion,
+          "Unexpected Chrome runtime version",
+        );
       const page = await browser.newPage();
       const errors: string[] = [];
       page.on("pageerror", (error) => errors.push(error.message));
@@ -188,7 +218,7 @@ try {
         }
       });
       assert.deepEqual(errors, [], "Browser errors during the packed consumer workflow");
-      console.log(`PASS packed consumer workflow: Chromium ${browser.version()}`);
+      console.log(`PASS packed consumer workflow: Chromium ${actualChromeVersion}`);
     } finally {
       await browser.close();
     }

@@ -13,14 +13,16 @@ Keep branches short-lived and use these names for branches in this repository:
 | ------------------- | --------------------- | ------------------------- |
 | `feature/<name>`    | New features          | `feature/query-snapshots` |
 | `fix/<name>`        | Fixes and hotfixes    | `fix/reset-cancellation`  |
+| `work/<name>`       | Other work            | `work/browser-security`   |
 | `release/<VERSION>` | Release stabilization | `release/1.0.0-alpha.2`   |
 
 The version in a release branch name must match `package.json`, without a `v`
 prefix. See [the release guide](docs/ci.md#make-a-release) for supported versions
 and publishing steps. `main` remains the integration branch.
 
-Open feature and fix PRs against `main`. During release stabilization, open
-release-fix PRs from `fix/<name>` against the relevant `release/<VERSION>` branch.
+Open feature, fix, and work PRs against `main` or a feature branch. During release
+stabilization, open release-fix PRs from `fix/<name>` against the relevant
+`release/<VERSION>` branch.
 CI rejects PRs from incorrectly named branches in this repository. Fork branch
 names are exempt, although using the same convention is welcome.
 

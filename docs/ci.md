@@ -4,14 +4,14 @@ This guide is for maintainers configuring checks and publishing Aeolia releases.
 
 ## Required checks
 
-The `CI` workflow runs on pull requests targeting `main` or `release/*`, on pushes
-to `main`, and on manual dispatch. It checks formatting, lint, the build, and
+The `CI` workflow runs on pull requests targeting `main`, `release/*`, or
+`feature/**`, on pushes to `main`, and on manual dispatch. It checks formatting, lint, the build, and
 types. Builds precede type checks because consumer fixtures use the generated
 declarations. Behavioral tests run on Windows and Linux.
 
 For a PR whose source branch belongs to this repository, verification first
 checks the [branch naming convention](../CONTRIBUTING.md#issues-and-pull-requests).
-Only `feature/<name>`, `fix/<name>`, and `release/<VERSION>` are accepted. A release
+Only `feature/<name>`, `fix/<name>`, `work/<name>`, and `release/<VERSION>` are accepted. A release
 branch must name a supported version that matches `package.json`. Fork branch
 names are exempt, and a fork's `release/*` branch does not trigger release-version
 checks or publication.
@@ -28,7 +28,7 @@ that could leave a required result pending. Test selection happens inside the ru
 This CI check blocks merging after a PR is opened; it does not prevent branch
 creation. To reject other prefixes when branches are created on GitHub, create
 a separate branch ruleset targeting all branches, exclude `main`, `feature/**/*`,
-`fix/**/*`, and `release/**/*`, and enable **Restrict creations** with no bypass
+`fix/**/*`, `work/**/*`, and `release/**/*`, and enable **Restrict creations** with no bypass
 actors. The CI check still validates the release version. See
 [GitHub's ruleset guide](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository).
 
