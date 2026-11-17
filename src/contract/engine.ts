@@ -1468,6 +1468,14 @@ export function createGraph<C extends Contract>(options: GraphOptions<C>): Graph
     disposed: false,
   };
   Object.assign(graph, { __runtime: state, id });
+  Object.defineProperty(graph, "active", {
+    enumerable: true,
+    configurable: false,
+    get() {
+      if (this !== graph) throw new TypeError("The receiver is not this Aeolia graph");
+      return !state.disposed;
+    },
+  });
   graphRuntimeByGraph.set(graph, state);
   registerTransferGraph(graph, state);
   collectDeclaredStores(options.contract.operations, state.declaredStores);

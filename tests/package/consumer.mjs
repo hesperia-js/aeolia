@@ -108,6 +108,7 @@ async function verifyRootGraphConsumer() {
   const graph = createGraph({
     contract: defineContract({ namespace: "packed-consumer", operations: { item, save } }),
   });
+  check(graph.active === true, "Packed graph did not report its active logical state");
   const pending = (name) => {
     const calls = backend.pending(name);
     check(calls.length === 1, `Expected one pending ${name} call, got ${calls.length}`);
@@ -150,6 +151,7 @@ async function verifyRootGraphConsumer() {
         check(error instanceof Fault && error.kind === "disposed", "Expected a disposal fault"),
     );
     const retirement = graph.retire();
+    check(graph.active === false, "Packed graph stayed active after logical retirement");
     check(graph.retire() === retirement, "Retirement did not return the same promise");
     let retired = false;
     void retirement.then(

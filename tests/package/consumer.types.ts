@@ -555,6 +555,10 @@ function typecheckOnly(): void {
   const erasedAffectSpec: AffectSpec<{ readonly id: string }, unknown, unknown> =
     mutation.affects[0]!;
   const graph = createGraph({ contract });
+  const graphActive: boolean = graph.active;
+  // @ts-expect-error The graph's logical state cannot be assigned by a caller.
+  graph.active = false;
+  void graphActive;
   const retirement: Promise<void> = graph.retire();
   void retirement;
   const declared = graph.api.store();

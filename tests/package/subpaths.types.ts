@@ -59,6 +59,10 @@ function subpathConsumer(): void {
   const graph = createGraph({
     contract: defineContract({ namespace: "subpaths", operations: { item } }),
   });
+  const active: boolean = graph.active;
+  // @ts-expect-error Graph logical state is read-only through the contract subpath.
+  graph.active = false;
+  void active;
   const handle = graph.api.item("one");
   const ready: Promise<{ id: string }> = handle.ready;
   const lease: ObservationLease<{ id: string }> = observeStore(graph, handle);

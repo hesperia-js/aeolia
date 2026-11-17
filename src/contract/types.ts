@@ -1708,6 +1708,14 @@ export interface Graph<C extends Contract = Contract> {
   readonly id: GraphId;
 
   /**
+   * Whether this graph has not been logically revoked by disposal or retirement.
+   *
+   * This is a nonreactive observation. A false value does not mean that owned
+   * cleanup, a transport, or an external mutation has finished.
+   */
+  readonly active: boolean;
+
+  /**
    * Monotonic identity for the graph's current state epoch.
    *
    * The value starts at `0` and changes synchronously whenever {@link reset}

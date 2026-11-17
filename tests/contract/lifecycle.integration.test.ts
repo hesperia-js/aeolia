@@ -2836,7 +2836,9 @@ for (const scenario of ["distinct", "same", "report"] as const) {
       graph.api.stream(0);
       graph.api.stream(1);
       await Promise.all(started.map((entry) => entry.promise));
+      expect(graph.active).toBe(true);
       const retirement = graph.retire();
+      expect(graph.active).toBe(false);
       expect(graph.retire()).toBe(retirement);
       let settlements = 0;
       let rejection: unknown;
@@ -2887,6 +2889,7 @@ for (const scenario of ["distinct", "same", "report"] as const) {
         expect(causes[1]).toBe(secondFailure);
       }
       expect(graph.retire()).toBe(retirement);
+      expect(graph.active).toBe(false);
       await flush();
       expect(settlements).toBe(1);
       expect(order).toEqual([0, 1]);
@@ -3189,6 +3192,50 @@ it("joins original queries after cancellation and prior void graph disposal", as
   }
 });
 
+it("exposes a protected, receiver-checked logical graph state", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "graph-active", operations: {} }),
+  });
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(graph, "active");
+    expect(graph.active).toBe(true);
+    expect(descriptor?.enumerable).toBe(true);
+    expect(descriptor?.configurable).toBe(false);
+    expect(descriptor?.set).toBeUndefined();
+    expect(Reflect.set(graph, "active", false)).toBe(false);
+    expect(() => Object.defineProperty(graph, "active", { value: false })).toThrow(TypeError);
+    expect(() => Reflect.get(graph, "active", {})).toThrow(TypeError);
+    await graph.reset();
+    graph.cancelPending();
+    expect(graph.active).toBe(true);
+    const retirement = graph.retire();
+    expect(graph.active).toBe(false);
+    await retirement;
+    expect(graph.active).toBe(false);
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("reports logical revocation after disposal or graph cancellation", () => {
+  const contract = defineContract({ namespace: "graph-active-abort", operations: {} });
+  const disposed = createGraph({ contract });
+  expect(disposed.active).toBe(true);
+  disposed.dispose();
+  expect(disposed.active).toBe(false);
+  const controller = new AbortController();
+  const graph = createGraph({ contract, abortSignal: controller.signal });
+  expect(graph.active).toBe(true);
+  controller.abort();
+  expect(graph.active).toBe(false);
+  const aborted = new AbortController();
+  aborted.abort();
+  const closed = createGraph({ contract, abortSignal: aborted.signal });
+  expect(closed.active).toBe(false);
+  graph.dispose();
+  closed.dispose();
+});
+
 it("allows retirement after a write-restricted first attempt", async () => {
   const graph = createGraph({
     contract: defineContract({ namespace: "retirement-admission", operations: {} }),
@@ -3207,10 +3254,12 @@ it("allows retirement after a write-restricted first attempt", async () => {
     expect(refusal).toBeInstanceOf(Fault);
     expect((refusal as Fault).kind).toBe("write-forbidden");
     expect(refusedPromise).toBeUndefined();
+    expect(graph.active).toBe(true);
     const writable = graph.at("still-open");
     writable.set(1);
     expect(writable.value.get()).toBe(1);
     const retirement = graph.retire();
+    expect(graph.active).toBe(false);
     expect(graph.retire()).toBe(retirement);
     await retirement;
   } finally {
@@ -3246,6 +3295,7 @@ it("refuses retirement in the same write-restricted scope as a failed disposal",
     expect(retirementCause).toBeInstanceOf(Fault);
     expect((retirementCause as Fault).kind).toBe("write-forbidden");
     expect(refusedPromise).toBeUndefined();
+    expect(graph.active).toBe(false);
     expect(context.active.get()).toBe(true);
 
     const retirement = graph.retire();

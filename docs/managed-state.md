@@ -241,6 +241,12 @@ when its readable state and resources should finally be released.
 
 ## Retiring a graph
 
+`graph.active` reads the graph's current logical state without creating a
+reactive subscription. It becomes `false` when disposal or retirement revokes
+the graph, even if cleanup later fails. It does not indicate that cleanup,
+transport shutdown, or an external mutation has completed. A retirement call
+rejected before it starts leaves an otherwise active graph active.
+
 Use `graph.retire()` when the graph's owner is finished with the graph and
 needs to wait for the work it admitted to complete:
 
