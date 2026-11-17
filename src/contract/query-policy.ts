@@ -139,6 +139,7 @@ interface AddressBook {
 interface CoverageRecord {
   readonly owner: object;
   readonly key: string;
+  readonly initialVersion: object;
   operations: Set<OperationRecord>;
   version: object;
 }
@@ -156,6 +157,31 @@ function ownerFor(runtime: StoreRuntime<any>): object {
 }
 function coverageFor(runtime: StoreRuntime<any>): CoverageRecord | undefined {
   return books.get(ownerFor(runtime))?.current.get(runtime.key);
+}
+/** @internal Capture only the native operation coverage of this exact address. */
+export function captureSnapshotCoverage(runtime: StoreRuntime<any>): {
+  readonly covered: boolean;
+  readonly current: () => boolean;
+} {
+  const owner = ownerFor(runtime);
+  const key = runtime.key;
+  const original = books.get(owner)?.current.get(key);
+  const version = original?.version;
+  return {
+    covered: original !== undefined && original.operations.size > 0,
+    current: () => {
+      const next = books.get(owner)?.current.get(key);
+      if (original !== undefined) return next === original && next.version === version;
+      return (
+        next === undefined || (next.operations.size === 0 && next.version === next.initialVersion)
+      );
+    },
+  };
+}
+
+function newCoverage(owner: object, key: string): CoverageRecord {
+  const initialVersion = {};
+  return { owner, key, operations: new Set(), initialVersion, version: initialVersion };
 }
 function storeRecord(runtime: StoreRuntime<any>): StoreRecord {
   let record = storeRecords.get(runtime);
@@ -732,7 +758,7 @@ function scopeAt(
   const addressBook = book(owner);
   let coverage = addressBook.current.get(key);
   if (coverage === undefined) {
-    coverage = { owner, key, operations: new Set(), version: {} };
+    coverage = newCoverage(owner, key);
     addressBook.current.set(key, coverage);
     addressBook.version = {};
   }
@@ -791,7 +817,8 @@ export function createTransferScope(
  * @param scopes - Authentic affected addresses; overlaps retain independent operations.
  * @param dispatches - Exact raw/bound source and carrier identities.
  * @returns Pending native publication and its opaque operation.
- * @throws TypeError for crossed sources, repeated roles/carriers, or stale scope issuance.
+ * @throws TypeError for crossed sources, repeated roles/carriers, stale scope issuance,
+ * or a successor scope whose publication has not completed.
  */
 export function prepareTransferOperation(
   scopes: readonly TransferScope[],
@@ -810,6 +837,8 @@ export function prepareTransferOperation(
   for (const handle of scopeHandles) {
     const scope = scopeRecords.get(handle);
     if (scope === undefined) throw new TypeError("Fabricated transfer scope");
+    if (books.get(scope.coverage.owner)?.current.get(scope.coverage.key) !== scope.coverage)
+      throw new TypeError("Transfer scope address has not been published");
     if (
       scope.runtime !== undefined &&
       (scope.runtime.disposed || scope.runtime.incarnation !== scope.incarnation)
@@ -817,6 +846,9 @@ export function prepareTransferOperation(
       throw new TypeError("Scope issuance is stale");
     scopeSet.add(scope);
     guards.push(sourceCurrent(scope.source));
+    guards.push(
+      () => books.get(scope.coverage.owner)?.current.get(scope.coverage.key) === scope.coverage,
+    );
     if (scope.runtime !== undefined) guards.push(transferEpochCurrent(scope.runtime));
   }
   const roles = new Set<string>();
@@ -989,7 +1021,7 @@ export function prepareTransferScopeSuccessors(
     }
     let coverage = bookChange.next.get(key);
     if (coverage === undefined) {
-      coverage = { owner: info.binding ?? info.graph, key, operations: new Set(), version: {} };
+      coverage = newCoverage(info.binding ?? info.graph, key);
       bookChange.next.set(key, coverage);
     }
     staged.push({ operation, scope: scopeRecord(info, coverage) });

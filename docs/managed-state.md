@@ -766,6 +766,9 @@ retries, and address successors. `prepareTransferScopeSuccessors` adds
 replacement query addresses for the same still-active operation in one
 publication while retaining predecessor coverage. It checks the replacement
 source and native key against the predecessor address.
+Publish the successor plan before using a returned successor scope to prepare
+another operation. A scope from an unpublished plan has no active address in the
+destination graph.
 
 Release coverage only after the application confirms its external operation has
 retired and every joined native mutation has completed its original work and
@@ -773,6 +776,12 @@ cleanup. `prepareTransferOperationRetirement` refuses while a dispatch is
 unjoined, active, or has failed cleanup. Reset, disposal, a successful query
 landing, and settlement of a public result promise do not by themselves release
 this coverage.
+
+While an operation covers an address, ordinary version 1 and version 2
+snapshots omit that address, even if another query landing replaces its value.
+Uncovered eligible values remain in the snapshot. Once all operations covering
+the address retire, its current value is eligible under the usual snapshot
+rules. Creating a scope without publishing an operation does not exclude it.
 
 These APIs track native lifecycle facts. They do not authorize an external
 write, commit a transaction, or prove that a server action has finished.

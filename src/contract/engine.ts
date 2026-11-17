@@ -86,6 +86,7 @@ import {
 } from "./faults.ts";
 import {
   beginTransferAdmission,
+  captureSnapshotCoverage,
   finishTransferAdmission,
   registerTransferGraph,
   registerTransferSource,
@@ -174,7 +175,8 @@ function realmStores(graph: Graph): readonly RealmStoreState[] {
       runtime.readerScope !== undefined &&
       runtime.snapshot &&
       runtime.baseAvailable &&
-      runtime.transferEligible,
+      runtime.transferEligible &&
+      !captureSnapshotCoverage(runtime).covered,
   );
   if (unsupportedReader !== undefined) throw new Fault("encoding", [String(unsupportedReader.key)]);
   return graphStores
@@ -194,6 +196,7 @@ function realmStores(graph: Graph): readonly RealmStoreState[] {
       const available = runtime.baseAvailable;
       const accepted = runtime.hasAcceptedLanding;
       const eligible = runtime.transferEligible;
+      const coverage = captureSnapshotCoverage(runtime);
       return {
         bound: runtime.binding !== undefined,
         binding,
@@ -204,7 +207,10 @@ function realmStores(graph: Graph): readonly RealmStoreState[] {
         baseAvailable: runtime.baseAvailable,
         hasAcceptedLanding: runtime.hasAcceptedLanding,
         transferEligible: runtime.transferEligible,
+        covered: coverage.covered,
+        coverageCurrent: coverage.current,
         current: () =>
+          coverage.current() &&
           !state.disposed &&
           !runtime.disposed &&
           !runtime.transitioning &&

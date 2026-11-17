@@ -572,6 +572,10 @@ export interface RealmStoreState {
   readonly hasAcceptedLanding: boolean;
   /** Eligibility attached to this exact committed base revision. */
   readonly transferEligible: boolean;
+  /** Whether genuine native operation coverage excludes this address. */
+  readonly covered: boolean;
+  /** Checks the exact address coverage captured for this snapshot. */
+  readonly coverageCurrent: () => boolean;
   /** Checks the captured native identity and state after authored encoding. */
   readonly current: () => boolean;
 

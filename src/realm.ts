@@ -697,11 +697,15 @@ function ownSnapshotEntry(value: unknown): ValidatedSnapshotEntry {
  * Captures selected committed values from a graph in a portable envelope.
  *
  * Snapshot selection follows each store's effective `snapshot` setting. The
- * captured value is the committed base, not any optimistic predictions, and
- * active requests, streams, projections, callbacks, and reactive identities
+ * captured value is the committed base, not any optimistic predictions. Active
+ * requests, streams, projections, callbacks, and reactive identities
  * remain graph-local. Stores are traversed in JavaScript code-unit key order
  * before entries are assigned to the object envelope. The returned envelope,
  * entry map, and entry records are frozen.
+ *
+ * Addresses covered by a published native operation are omitted. Scope
+ * issuance alone does not exclude an address. The snapshot fails if that
+ * address coverage changes while selected values are encoded.
  *
  * Values are encoded with {@link AEOLIA_TAGGED_ENCODING}. The encoder
  * preserves supported special values, aliases, and cycles within each store
@@ -732,7 +736,7 @@ export function snapshot(graph: Graph): Snapshot;
  * Captures full addresses through genuine qualified bindings, without acquisition.
  * @param graph - Open source graph containing the selected committed bases.
  * @param options - Explicit format selection and genuine qualified binding mappings.
- * @returns Frozen v2 envelope; predictions and native operation state are excluded.
+ * @returns Frozen v2 envelope; predictions and addresses under published native operation coverage are excluded.
  * @throws Fault for unsupported encoding, stale native authority, or a disposed lifetime.
  */
 export function snapshot(graph: Graph, options: SnapshotOptionsV2): SnapshotV2;
@@ -745,12 +749,20 @@ export function snapshot(graph: Graph, options?: SnapshotOptionsV2): Snapshot | 
   });
   const now = Date.now();
   const captured: typeof stores = [];
+  const candidates = stores.filter(
+    (store) => store.snapshot && store.baseAvailable && store.transferEligible,
+  );
+  const checkCoverage = (): void => {
+    const changed = candidates.find((store) => !store.coverageCurrent());
+    if (changed !== undefined) throw new Fault("encoding", [String(changed.key)]);
+  };
   const entries: Record<string, SnapshotEntry> = Object.create(null) as Record<
     string,
     SnapshotEntry
   >;
   for (const store of stores) {
-    if (!store.snapshot || !store.baseAvailable || !store.transferEligible) continue;
+    if (!store.snapshot || !store.baseAvailable || !store.transferEligible || store.covered)
+      continue;
     captured.push(store);
     const key = String(store.key);
     if (store.bound || !store.hasAcceptedLanding) throw new Fault("encoding", [key]);
@@ -763,6 +775,7 @@ export function snapshot(graph: Graph, options?: SnapshotOptionsV2): Snapshot | 
         false,
         false,
         () => {
+          checkCoverage();
           if (!store.current()) throw new Fault("encoding", [key]);
         },
       );
@@ -787,6 +800,7 @@ export function snapshot(graph: Graph, options?: SnapshotOptionsV2): Snapshot | 
   }
   for (const store of captured)
     if (!store.current()) throw new Fault("encoding", [String(store.key)]);
+  checkCoverage();
   return Object.freeze({
     version: 1 as const,
     namespace: graphInternal.realmNamespace(graph),
@@ -1014,11 +1028,14 @@ function captureBindings(graph: Graph, list: unknown, check: () => void): Captur
 function snapshotV2(graph: Graph, options: SnapshotOptionsV2): SnapshotV2 {
   const graphCurrent = graphInternal.realmCurrent(graph);
   const namespace = graphInternal.realmNamespace(graph);
-  const stores = graphInternal
+  const candidates = graphInternal
     .realmStores(graph)
     .filter((store) => store.snapshot && store.baseAvailable && store.transferEligible);
+  const stores = candidates.filter((store) => !store.covered);
   let mappings: CapturedBinding[] = [];
   const check = (): void => {
+    const coverageChanged = candidates.find((store) => !store.coverageCurrent());
+    if (coverageChanged !== undefined) throw new Fault("encoding", [String(coverageChanged.key)]);
     const changed = stores.find((store) => !store.current());
     if (changed !== undefined) throw new Fault("encoding", [String(changed.key)]);
     if (!graphCurrent() || mappings.some((row) => !row.current())) throw new Fault("encoding", []);
