@@ -1437,6 +1437,336 @@ for (const owner of ["query", "stream", "projection", "mutation-select", "mutati
 }
 
 for (const owner of ["query", "stream"] as const) {
+  it(`does not call a passive ${owner} key after its getter retires the graph`, async () => {
+    const input = { value: "passive" };
+    const retirements: Promise<void>[] = [];
+    let armed = false;
+    let getterCalls = 0;
+    let keyCalls = 0;
+    const calls: { receiver: unknown; input: unknown }[] = [];
+    let providerCalls = 0;
+    const key = function (this: unknown, value: typeof input): string {
+      keyCalls += 1;
+      calls.push({ receiver: this, input: value });
+      return "passive-key";
+    };
+    const readKey = () => {
+      if (armed) {
+        getterCalls += 1;
+        retirements.push(graph.retire());
+      }
+      return key;
+    };
+    const query = {
+      kind: "query" as const,
+      name: "passive-key-query",
+      get key() {
+        return readKey();
+      },
+      fetch: async () => {
+        providerCalls += 1;
+        return 1;
+      },
+    };
+    const stream = {
+      kind: "stream" as const,
+      name: "passive-key-stream",
+      get key() {
+        return readKey();
+      },
+      open: () => {
+        providerCalls += 1;
+        return { async *[Symbol.asyncIterator]() {} };
+      },
+    };
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: `passive-key-${owner}`,
+        operations: { query, stream },
+      }),
+    });
+    const prepare = () =>
+      owner === "query"
+        ? preparePassiveTransferClaim(graph, graph.api.query, input)
+        : preparePassiveTransferClaim(graph, graph.api.stream, input);
+    try {
+      const control = prepare();
+      expect(keyCalls).toBe(1);
+      expect(calls[0]?.receiver).toBe(owner === "query" ? query : stream);
+      expect(calls[0]?.input).toBe(input);
+      expect(providerCalls).toBe(0);
+      control.discard();
+      await control.retired;
+
+      keyCalls = 0;
+      armed = true;
+      const unexpected: { value?: ReturnType<typeof prepare> } = {};
+      try {
+        expect(() => {
+          unexpected.value = prepare();
+        }).toThrow();
+      } finally {
+        unexpected.value?.discard();
+        if (unexpected.value !== undefined) await unexpected.value.retired;
+      }
+      expect(getterCalls).toBe(1);
+      expect(graph.active).toBe(false);
+      expect(keyCalls).toBe(0);
+      expect(providerCalls).toBe(0);
+      await Promise.all(retirements);
+    } finally {
+      graph.dispose();
+    }
+  });
+}
+
+for (const change of ["target", "operation"] as const) {
+  it(`does not call a successor key after its getter changes the ${change}`, async () => {
+    const input = { value: "successor" };
+    const nestedInput = { value: "nested" };
+    const retirements: Promise<void>[] = [];
+    const seen: { receiver: unknown; input: unknown }[] = [];
+    let armed = false;
+    let getterCalls = 0;
+    let fetches = 0;
+    let dispatches = 0;
+    let onGetter = (): void => {};
+    const query = {
+      kind: "query" as const,
+      name: "successor-key-query",
+      get key() {
+        if (armed) {
+          armed = false;
+          getterCalls += 1;
+          onGetter();
+        }
+        return function (this: unknown, value: typeof input): string {
+          seen.push({ receiver: this, input: value });
+          return "successor-key";
+        };
+      },
+      fetch: async () => {
+        fetches += 1;
+        return 1;
+      },
+    };
+    const mutation = createMutation({
+      name: "successor-key-mutation",
+      run: async (_input: object) => {
+        dispatches += 1;
+      },
+      affects: [],
+    });
+    const contract = defineContract({
+      namespace: `successor-key-${change}`,
+      operations: { query, mutation },
+    });
+    const original = createGraph({ contract });
+    const target = createGraph({ contract });
+    const nested = createGraph({ contract });
+    try {
+      const store = original.api.query(input);
+      await store.ready;
+      const predecessor = createTransferScope(original, original.api.query, store);
+      const carrier = {};
+      const operation = prepareTransferOperation(
+        [predecessor],
+        [{ role: "raw", source: original.api.mutation, input: carrier }],
+      );
+      const commit = operation.seal();
+      if (commit === undefined) throw new Error("The original operation did not seal");
+      commit.publish();
+      commit.notifications.deliver();
+
+      const prepare = () =>
+        prepareTransferScopeSuccessors([
+          {
+            operation: operation.operation,
+            predecessor,
+            graph: target,
+            source: target.api.query,
+            input,
+          },
+        ]);
+      seen.length = 0;
+      const control = prepare();
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.receiver).toBe(query);
+      expect(seen[0]?.input).toBe(input);
+      control.discard();
+      await control.retired;
+
+      seen.length = 0;
+      onGetter = () => {
+        if (change === "target") {
+          retirements.push(target.retire());
+          return;
+        }
+        const replacement = prepareTransferScopeSuccessors([
+          {
+            operation: operation.operation,
+            predecessor,
+            graph: nested,
+            source: nested.api.query,
+            input: nestedInput,
+          },
+        ]);
+        const replacementCommit = replacement.seal();
+        if (replacementCommit === undefined) throw new Error("The nested successor did not seal");
+        replacementCommit.publish();
+        replacementCommit.notifications.deliver();
+      };
+      armed = true;
+      const unexpected: { value?: ReturnType<typeof prepare> } = {};
+      try {
+        expect(() => {
+          unexpected.value = prepare();
+        }).toThrow();
+      } finally {
+        unexpected.value?.discard();
+        if (unexpected.value !== undefined) await unexpected.value.retired;
+      }
+      expect(getterCalls).toBe(1);
+      expect(seen).toHaveLength(change === "target" ? 0 : 1);
+      if (change === "operation") {
+        expect(seen[0]?.receiver).toBe(query);
+        expect(seen[0]?.input).toBe(nestedInput);
+      }
+      expect(target.active).toBe(change !== "target");
+      expect(fetches).toBe(1);
+      expect(dispatches).toBe(0);
+      await Promise.all(retirements);
+
+      await original.api.mutation(carrier);
+      expect(dispatches).toBe(1);
+      const retirement = prepareTransferOperationRetirement(operation.operation);
+      const retirementCommit = retirement.seal();
+      if (retirementCommit === undefined) throw new Error("The original operation did not retire");
+      retirementCommit.publish();
+      retirementCommit.notifications.deliver();
+      await retirement.retired;
+    } finally {
+      original.dispose();
+      target.dispose();
+      nested.dispose();
+    }
+  });
+}
+
+it("does not call a bound successor key after its getter disposes the target context", async () => {
+  const input = { value: "bound" };
+  const profile = {};
+  let armed = false;
+  let getterCalls = 0;
+  let keyCalls = 0;
+  const calls: { receiver: unknown; input: unknown }[] = [];
+  let fetches = 0;
+  const query = {
+    kind: "query" as const,
+    name: "bound-successor-key",
+    get key() {
+      if (armed) {
+        getterCalls += 1;
+        targetContext.dispose();
+      }
+      return function (this: unknown, value: typeof input): string {
+        keyCalls += 1;
+        calls.push({ receiver: this, input: value });
+        return "bound-key";
+      };
+    },
+    fetch: async () => 1,
+  };
+  const mutation = createMutation({
+    name: "bound-successor-mutation",
+    run: async (_input: object) => {},
+    affects: [],
+  });
+  const contract = defineContract({
+    namespace: "bound-successor-key",
+    operations: { query, mutation },
+  });
+  const original = createGraph({ contract });
+  const target = createGraph({ contract });
+  const originalContext = createBindingContext(original);
+  const targetContext = createBindingContext(target);
+  const originalBinding = bindOperation(original, query, {
+    context: originalContext,
+    profile,
+    fetch: async () => {
+      fetches += 1;
+      return 1;
+    },
+  });
+  const targetBinding = bindOperation(target, query, {
+    context: targetContext,
+    profile,
+    fetch: async () => {
+      fetches += 1;
+      return 1;
+    },
+  });
+  try {
+    const store = originalBinding.member(input);
+    await store.ready;
+    const predecessor = createTransferScope(original, originalBinding, store);
+    const carrier = {};
+    const operation = prepareTransferOperation(
+      [predecessor],
+      [{ role: "raw", source: original.api.mutation, input: carrier }],
+    );
+    const commit = operation.seal();
+    if (commit === undefined) throw new Error("The original operation did not seal");
+    commit.publish();
+    commit.notifications.deliver();
+    const prepare = () =>
+      prepareTransferScopeSuccessors([
+        {
+          operation: operation.operation,
+          predecessor,
+          graph: target,
+          source: targetBinding,
+          input,
+        },
+      ]);
+    keyCalls = 0;
+    const control = prepare();
+    expect(keyCalls).toBe(1);
+    expect(calls.at(-1)?.receiver).toBe(query);
+    expect(calls.at(-1)?.input).toBe(input);
+    control.discard();
+    await control.retired;
+
+    keyCalls = 0;
+    armed = true;
+    const unexpected: { value?: ReturnType<typeof prepare> } = {};
+    try {
+      expect(() => {
+        unexpected.value = prepare();
+      }).toThrow();
+    } finally {
+      unexpected.value?.discard();
+      if (unexpected.value !== undefined) await unexpected.value.retired;
+    }
+    expect(getterCalls).toBe(1);
+    expect(targetContext.active.get()).toBe(false);
+    expect(target.active).toBe(true);
+    expect(keyCalls).toBe(0);
+    expect(fetches).toBe(1);
+    await original.api.mutation(carrier);
+    const retirement = prepareTransferOperationRetirement(operation.operation);
+    const retirementCommit = retirement.seal();
+    if (retirementCommit === undefined) throw new Error("The original operation did not retire");
+    retirementCommit.publish();
+    retirementCommit.notifications.deliver();
+    await retirement.retired;
+  } finally {
+    original.dispose();
+    target.dispose();
+  }
+});
+
+for (const owner of ["query", "stream"] as const) {
   it(`does not configure a ${owner} store after its key callback retires the graph`, async () => {
     let retirement: Promise<void> | undefined;
     let configuredAfterRetirement = false;

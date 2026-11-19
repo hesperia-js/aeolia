@@ -998,16 +998,30 @@ export function prepareTransferScopeSuccessors(
         throw new TypeError("Successor profile differs");
     }
     const before = sourceCurrent(info);
-    const key = (info.definition as QueryDefinition<any, any, any, any>).key(entry.input);
+    const version = operationVersions.get(operation) ?? operation.version;
+    const current = (): boolean =>
+      before() &&
+      sources.get(entry.source) === info &&
+      operation.active &&
+      !operation.retired &&
+      operation.scopes.has(predecessor) &&
+      operation.version === version;
+    if (!current())
+      throw new TypeError("Successor native address is incompatible or changed during preparation");
+    const definition = info.definition as QueryDefinition<any, any, any, any>;
+    const keyForInput = definition.key;
+    if (!current())
+      throw new TypeError("Successor native address is incompatible or changed during preparation");
+    const key = Reflect.apply(keyForInput, definition, [entry.input]);
     if (
       typeof key !== "string" ||
       key.length === 0 ||
       key !== predecessor.coverage.key ||
-      !before()
+      !current()
     )
       throw new TypeError("Successor native address is incompatible or changed during preparation");
-    guards.push(before);
-    operationVersions.set(operation, operation.version);
+    guards.push(current);
+    operationVersions.set(operation, version);
     const addressBook = book(info.binding ?? info.graph);
     let bookChange = bookChanges.get(addressBook);
     if (bookChange === undefined) {

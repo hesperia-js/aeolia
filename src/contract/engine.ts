@@ -2921,13 +2921,20 @@ function prepareNativeStreamTransferClaim(
   const setPublished = (): void => {
     published = true;
   };
-  try {
-    const keyForInput = stream.key;
-    const key = storeKey(Reflect.apply(keyForInput, stream, [input]));
+  const assertCurrent = (): void => {
     if (transferSource(source) !== info)
       throw new TypeError("Stream source registration changed during passive preparation");
     assertGraphOpen(state);
     if (state.resetEpoch !== resetEpoch) throw new TypeError("Stream input crossed a graph reset");
+    if (!graphEpoch()) throw new TypeError("Stream source changed during passive preparation");
+  };
+  try {
+    assertCurrent();
+    const keyForInput = stream.key;
+    assertCurrent();
+    const keyValue = Reflect.apply(keyForInput, stream, [input]);
+    assertCurrent();
+    const key = storeKey(keyValue);
     const storesBefore = state.stores;
     const graphEntryBefore = state.stores.get(String(key)) as StoreRuntime<unknown> | undefined;
     runtime = graphEntryBefore;
@@ -3154,14 +3161,22 @@ export function prepareNativePassiveTransferClaim(
     if (binding !== undefined) assertBindingContextOpen(binding.context);
     if (!graphEpoch() || !bindingEpoch() || !contextEpoch())
       throw new TypeError("Native query source changed during option preparation");
-    const key = storeKey(query.key(input));
-    if (transferSource(source) !== info)
-      throw new TypeError("Query source registration changed during passive preparation");
-    assertGraphOpen(state);
-    if (state.resetEpoch !== resetEpoch)
-      throw new TypeError("Passive query input crossed a graph reset");
-    if (!graphEpoch() || !bindingEpoch() || !contextEpoch())
-      throw new TypeError("Native query source changed during key preparation");
+    const assertCurrent = (): void => {
+      if (transferSource(source) !== info)
+        throw new TypeError("Query source registration changed during passive preparation");
+      assertGraphOpen(state);
+      if (state.resetEpoch !== resetEpoch)
+        throw new TypeError("Passive query input crossed a graph reset");
+      if (binding !== undefined) assertBindingContextOpen(binding.context);
+      if (!graphEpoch() || !bindingEpoch() || !contextEpoch())
+        throw new TypeError("Native query source changed during key preparation");
+    };
+    assertCurrent();
+    const keyForInput = query.key;
+    assertCurrent();
+    const keyValue = Reflect.apply(keyForInput, query, [input]);
+    assertCurrent();
+    const key = storeKey(keyValue);
     const storesBefore = state.stores;
     const bindingStoresBefore = binding?.stores;
     const graphEntryBefore =
