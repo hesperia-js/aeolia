@@ -1,12 +1,33 @@
 /**
- * The exact runtime key of a store.
+ * The exact authored logical key of a store.
  *
- * Keys are graph-local identities. Query and stream definitions derive them
+ * Raw entries use graph-local keys. Query and stream definitions derive them
  * from inputs; declared stores use their `name` as their key. The brand keeps
  * an arbitrary string from being passed where a previously validated key is
- * required.
+ * required. A bound query additionally distinguishes context, declaration and
+ * profile; its physical Store.identity is separate from this logical key.
  */
 export type StoreKey = string & { readonly __storeKey: unique symbol };
+
+/**
+ * Opaque identity of one physical graph store, shared by its caller wrappers.
+ * It survives reset and idle collection, and is not a portable snapshot address
+ * or authority to access a current store incarnation.
+ */
+export interface StoreIdentity {
+  /** @internal Nominal identity brand; there is no public constructor. */
+  readonly __storeIdentity: unique symbol;
+}
+
+/** Store-local visible-value ordering, independent of request generations. */
+export type ValueRevision = number & { readonly __valueRevision: unique symbol };
+
+/** @internal Reserve the next exact revision before changing native state. */
+export function nextValueRevision(current: ValueRevision): ValueRevision {
+  if (!Number.isSafeInteger(current) || current < 0 || current >= Number.MAX_SAFE_INTEGER)
+    throw new RangeError("Store value revision exhausted");
+  return (current + 1) as ValueRevision;
+}
 
 /** Checks the non-empty string identity without normalizing it. */
 export function isStoreKey(value: unknown): value is StoreKey {
@@ -51,8 +72,8 @@ export function storeKey(value: string): StoreKey {
  * The value, error, active request, failure state, and invalidation state are
  * shared by callers that resolve to the same key. Each caller has its own
  * freshness window and status cell, so window-based transitions can differ.
- * `empty` has no committed value, `fetching` has a request without a
- * committed value, `ready` has committed state published as fresh (including
+ * `empty` has no accepted landing, `fetching` has a request without an
+ * accepted landing, `ready` has authoritative state published as fresh (including
  * the landing turn before its freshness timer runs), `stale` needs a request
  * but has none active, `revalidating` has a committed value with a request
  * active, and `failed` records the latest failed request.

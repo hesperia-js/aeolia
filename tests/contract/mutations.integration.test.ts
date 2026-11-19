@@ -100,13 +100,17 @@ describe("mutation effects and failure routing", () => {
   it("removes predictions on mutation failure and routes prediction reads to the fault channel", async () => {
     const backend = testBackend();
     const query = userQuery(backend);
+    let activeDuringPrediction: boolean | undefined;
     const failing = createMutation({
       name: "users.failing",
       affects: [
         affects(query, {
           select: (input: { readonly id: string }) => input,
           on: "invalidate",
-          optimistic: (current) => ({ id: `${current?.id ?? "none"}-optimistic` }),
+          optimistic: (current) => {
+            activeDuringPrediction = graph.active;
+            return { id: `${current?.id ?? "none"}-optimistic` };
+          },
         }),
       ],
       run: backend.perform<{ readonly id: string }, string>("users.failing"),
@@ -125,6 +129,7 @@ describe("mutation effects and failure routing", () => {
     store.set({ id: "base" });
     const failure = graph.api.failing({ id: "prediction" });
     expect(store.value.get()).toEqual({ id: "base-optimistic" });
+    expect(activeDuringPrediction).toBe(true);
     backend.reject(
       backend.calls.find((call) => call.name === "users.failing")!,
       new Error("rejected"),

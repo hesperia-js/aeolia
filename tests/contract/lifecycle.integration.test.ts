@@ -6,27 +6,100 @@ import {
   createStream,
   createMutation,
   affects,
+  bindOperation,
+  createBindingContext,
+  createTransferScope,
+  prepareTransferOperation,
+  prepareTransferOperationRetirement,
+  preparePassiveTransferClaim,
+  prepareTransferScopeSuccessors,
   defineContract,
   project,
   subscribe,
   watch,
-  withoutWrites,
   Fault,
+  withoutWrites,
+  captureReactiveConstruction,
+  prepareRequiredTransferCapture,
 } from "../../src/index.ts";
+import type { ClosedEncodedValue, RequiredTransferCodec } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
+let ownsFakeTimers = false;
 beforeEach(() => {
   jest.useFakeTimers();
+  ownsFakeTimers = true;
   jest.setSystemTime(100);
 });
 afterEach(() => {
-  jest.clearAllTimers();
+  if (ownsFakeTimers) jest.clearAllTimers();
   jest.useRealTimers();
+  ownsFakeTimers = false;
 });
 async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+async function expectPending(promise: Promise<unknown>): Promise<void> {
+  jest.useRealTimers();
+  ownsFakeTimers = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      promise.then(
+        () => "settled",
+        () => "settled",
+      ),
+      new Promise<"pending">((resolve) => {
+        timer = setTimeout(() => resolve("pending"), 0);
+      }),
+    ]);
+    expect(result).toBe("pending");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function expectSettled(promise: Promise<unknown>): Promise<void> {
+  jest.useRealTimers();
+  ownsFakeTimers = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      promise.then(
+        () => "settled",
+        () => "rejected",
+      ),
+      new Promise<"pending">((resolve) => {
+        timer = setTimeout(() => resolve("pending"), 0);
+      }),
+    ]);
+    expect(result).toBe("settled");
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+async function nativeResolveThenConstructorReads(): Promise<number> {
+  const input = Promise.withResolvers<unknown>();
+  const speciesHolder = { [Symbol.species]: Promise };
+  let reads = 0;
+  Object.defineProperty(input.promise, "constructor", {
+    configurable: true,
+    get() {
+      reads += 1;
+      return reads === 1 ? Promise : speciesHolder;
+    },
+  });
+  const normalized = Reflect.apply(Promise.resolve, Promise, [input.promise]) as Promise<unknown>;
+  const carrier = Reflect.apply(Promise.prototype.then, normalized, [
+    (value: unknown) => value,
+  ]) as Promise<unknown>;
+  input.resolve("native control");
+  await carrier;
+  return reads;
 }
 
 it("disposes immediately when the graph lifetime signal is already aborted", () => {
@@ -84,6 +157,69 @@ it("disposes the graph and aborts in-flight work when its lifetime signal aborts
   await flush();
   expect(() => graph.at("graph-abort-query/one")).toThrow("disposed");
   graph.dispose();
+});
+
+it("removes a lifetime listener that attaches after reentrant disposal", async () => {
+  const controller = new AbortController();
+  const originalAdd = controller.signal.addEventListener.bind(controller.signal);
+  const originalRemove = controller.signal.removeEventListener.bind(controller.signal);
+  const attached = new Set<EventListenerOrEventListenerObject>();
+  const removalPhases: string[] = [];
+  let addCalls = 0;
+  let reentered = false;
+  const abortSignal = new Proxy(controller.signal, {
+    get(target, property) {
+      if (property === "addEventListener")
+        return (...args: Parameters<AbortSignal["addEventListener"]>) => {
+          const [type, listener] = args;
+          if (type === "abort" && listener != null) {
+            addCalls += 1;
+            if (!reentered) {
+              reentered = true;
+              const event = new Event("abort");
+              if (typeof listener === "function") listener.call(target, event);
+              else listener.handleEvent(event);
+            }
+            originalAdd(...args);
+            attached.add(listener);
+            return;
+          }
+          return originalAdd(...args);
+        };
+      if (property === "removeEventListener")
+        return (...args: Parameters<AbortSignal["removeEventListener"]>) => {
+          const [type, listener] = args;
+          if (type === "abort" && listener != null) {
+            removalPhases.push(attached.has(listener) ? "after attach" : "before attach");
+            attached.delete(listener);
+          }
+          return originalRemove(...args);
+        };
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const query = createQuery({
+    name: "reentrant-lifetime.query",
+    key: () => "reentrant-lifetime/one",
+    fetch: async () => 1,
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "reentrant-lifetime", operations: { query } }),
+    abortSignal,
+  });
+  try {
+    expect(reentered).toBe(true);
+    expect(addCalls).toBe(1);
+    expect(removalPhases).toEqual(["before attach", "after attach"]);
+    expect(attached.size).toBe(0);
+    expect(() => graph.api.query()).toThrow(Fault);
+    const retirement = graph.retire();
+    expect(graph.retire()).toBe(retirement);
+    await retirement;
+  } finally {
+    graph.dispose();
+  }
 });
 
 it("invalidates warmed query readables and their cached consumers on disposal", async () => {
@@ -358,6 +494,80 @@ for (const { label, preAborted, mode } of [
   });
 }
 
+for (const preAborted of [false, true]) {
+  it(`retains readables and late mutation effects (pre-aborted: ${preAborted})`, async () => {
+    const backend = testBackend();
+    const signals: AbortSignal[] = [];
+    const query = createQuery({
+      name: "cancel.query",
+      key: (input: string) => `cancel/${input}`,
+      fetch: backend.respond<string, number>("cancel.query"),
+    });
+    const perform = backend.perform<void, string>("cancel.mutate");
+    const mutate = createMutation({
+      name: "cancel.mutate",
+      run: (input: void, options) => {
+        signals.push(options.abortSignal);
+        return perform(input, options);
+      },
+      affects: [affects(query, { select: () => "cached", on: "revalidate" })],
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cancel-lifecycle", operations: { query, mutate } }),
+    });
+    let stopCached = (): void => undefined;
+    const observed: Array<number | undefined> = [];
+    try {
+      const cached = graph.api.query("cached", { initial: 7 });
+      stopCached = subscribe(cached.value, (value) => observed.push(value));
+      const pending = graph.api.query("pending");
+      const ready = pending.ready;
+      const value = cached.value;
+      const derived = computed(() => value.get());
+      expect(derived.get()).toBe(7);
+      expect(observed).toEqual([7]);
+      const controller = new AbortController();
+      const earlierReason = new Error("caller already cancelled");
+      if (preAborted) controller.abort(earlierReason);
+      const mutation = graph.api.mutate(undefined, { abortSignal: controller.signal });
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.aborted).toBe(preAborted);
+      const reason = new Error("request ended");
+
+      graph.cancelPending(reason);
+
+      expect(backend.calls[0]!.aborted).toBe(true);
+      const previousReason = signals[0]!.reason;
+      if (preAborted) expect(previousReason).toMatchObject({ name: "AbortError" });
+      expect(signals[0]!.reason).toBe(preAborted ? previousReason : reason);
+      await expect(ready).rejects.toBe(reason);
+      expect(graph.resetVersion.get()).toBe(0);
+      expect(cached.value).toBe(value);
+      expect(value.get()).toBe(7);
+      expect(derived.get()).toBe(7);
+      expect(pending.error.get()).toBe(reason);
+      expect(pending.pending.get()).toBe(false);
+
+      backend.resolve(backend.calls[1]!, "accepted late");
+      await expect(mutation).resolves.toBe("accepted late");
+      expect(backend.calls).toHaveLength(3);
+      expect(backend.calls[2]!.input).toBe("cached");
+      expect(backend.calls[2]!.aborted).toBe(false);
+      const refreshed = cached.ready;
+      backend.resolve(backend.calls[2]!, 9);
+      await refreshed;
+      expect(derived.get()).toBe(9);
+      expect(observed).toEqual([7, 9]);
+      expect(graph.resetVersion.get()).toBe(0);
+    } finally {
+      stopCached();
+      graph.dispose();
+    }
+    expect(() => graph.at("cancel/cached").value.get()).toThrow("disposed");
+    expect(() => graph.cancelPending()).not.toThrow();
+  });
+}
+
 it("retains prearmed freshness and collection timers after cancelling the entry work", async () => {
   const backend = testBackend();
   const query = createQuery({
@@ -520,17 +730,7 @@ it("caches graph retirement before abort callouts and joins the original query",
     expect(backend.calls).toHaveLength(1);
     await ready;
     expect(call.aborted).toBe(true);
-    let settled = false;
-    void retirement.then(
-      () => {
-        settled = true;
-      },
-      () => {
-        settled = true;
-      },
-    );
-    await flush();
-    expect(settled).toBe(false);
+    await expectPending(retirement);
     backend.resolve(call, 42);
     resolved = true;
     await retirement;
@@ -896,36 +1096,6 @@ async function expectRetirementPending(retirement: Promise<void>): Promise<void>
   expect(settled).toBe(false);
 }
 
-it("allows retirement after a write-restricted first attempt", async () => {
-  const graph = createGraph({
-    contract: defineContract({ namespace: "retirement-admission", operations: {} }),
-  });
-  let refusedPromise: Promise<void> | undefined;
-  let refusal: unknown;
-  try {
-    try {
-      withoutWrites(() => {
-        refusedPromise = graph.retire();
-        void refusedPromise.catch(() => undefined);
-      });
-    } catch (error) {
-      refusal = error;
-    }
-    expect(refusal).toBeInstanceOf(Fault);
-    expect((refusal as Fault).kind).toBe("write-forbidden");
-    expect(refusedPromise).toBeUndefined();
-    const writable = graph.at("still-open");
-    writable.set(1);
-    expect(writable.value.get()).toBe(1);
-    const retirement = graph.retire();
-    expect(graph.retire()).toBe(retirement);
-    await retirement;
-  } finally {
-    graph.dispose();
-    await refusedPromise?.catch(() => undefined);
-  }
-});
-
 it("does not resolve a stream key after option validation retires the graph", async () => {
   let retirement: Promise<void> | undefined;
   let keys = 0;
@@ -1265,6 +1435,336 @@ for (const owner of ["query", "stream", "projection", "mutation-select", "mutati
     }
   });
 }
+
+for (const owner of ["query", "stream"] as const) {
+  it(`does not call a passive ${owner} key after its getter retires the graph`, async () => {
+    const input = { value: "passive" };
+    const retirements: Promise<void>[] = [];
+    let armed = false;
+    let getterCalls = 0;
+    let keyCalls = 0;
+    const calls: { receiver: unknown; input: unknown }[] = [];
+    let providerCalls = 0;
+    const key = function (this: unknown, value: typeof input): string {
+      keyCalls += 1;
+      calls.push({ receiver: this, input: value });
+      return "passive-key";
+    };
+    const readKey = () => {
+      if (armed) {
+        getterCalls += 1;
+        retirements.push(graph.retire());
+      }
+      return key;
+    };
+    const query = {
+      kind: "query" as const,
+      name: "passive-key-query",
+      get key() {
+        return readKey();
+      },
+      fetch: async () => {
+        providerCalls += 1;
+        return 1;
+      },
+    };
+    const stream = {
+      kind: "stream" as const,
+      name: "passive-key-stream",
+      get key() {
+        return readKey();
+      },
+      open: () => {
+        providerCalls += 1;
+        return { async *[Symbol.asyncIterator]() {} };
+      },
+    };
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: `passive-key-${owner}`,
+        operations: { query, stream },
+      }),
+    });
+    const prepare = () =>
+      owner === "query"
+        ? preparePassiveTransferClaim(graph, graph.api.query, input)
+        : preparePassiveTransferClaim(graph, graph.api.stream, input);
+    try {
+      const control = prepare();
+      expect(keyCalls).toBe(1);
+      expect(calls[0]?.receiver).toBe(owner === "query" ? query : stream);
+      expect(calls[0]?.input).toBe(input);
+      expect(providerCalls).toBe(0);
+      control.discard();
+      await control.retired;
+
+      keyCalls = 0;
+      armed = true;
+      const unexpected: { value?: ReturnType<typeof prepare> } = {};
+      try {
+        expect(() => {
+          unexpected.value = prepare();
+        }).toThrow();
+      } finally {
+        unexpected.value?.discard();
+        if (unexpected.value !== undefined) await unexpected.value.retired;
+      }
+      expect(getterCalls).toBe(1);
+      expect(graph.active).toBe(false);
+      expect(keyCalls).toBe(0);
+      expect(providerCalls).toBe(0);
+      await Promise.all(retirements);
+    } finally {
+      graph.dispose();
+    }
+  });
+}
+
+for (const change of ["target", "operation"] as const) {
+  it(`does not call a successor key after its getter changes the ${change}`, async () => {
+    const input = { value: "successor" };
+    const nestedInput = { value: "nested" };
+    const retirements: Promise<void>[] = [];
+    const seen: { receiver: unknown; input: unknown }[] = [];
+    let armed = false;
+    let getterCalls = 0;
+    let fetches = 0;
+    let dispatches = 0;
+    let onGetter = (): void => {};
+    const query = {
+      kind: "query" as const,
+      name: "successor-key-query",
+      get key() {
+        if (armed) {
+          armed = false;
+          getterCalls += 1;
+          onGetter();
+        }
+        return function (this: unknown, value: typeof input): string {
+          seen.push({ receiver: this, input: value });
+          return "successor-key";
+        };
+      },
+      fetch: async () => {
+        fetches += 1;
+        return 1;
+      },
+    };
+    const mutation = createMutation({
+      name: "successor-key-mutation",
+      run: async (_input: object) => {
+        dispatches += 1;
+      },
+      affects: [],
+    });
+    const contract = defineContract({
+      namespace: `successor-key-${change}`,
+      operations: { query, mutation },
+    });
+    const original = createGraph({ contract });
+    const target = createGraph({ contract });
+    const nested = createGraph({ contract });
+    try {
+      const store = original.api.query(input);
+      await store.ready;
+      const predecessor = createTransferScope(original, original.api.query, store);
+      const carrier = {};
+      const operation = prepareTransferOperation(
+        [predecessor],
+        [{ role: "raw", source: original.api.mutation, input: carrier }],
+      );
+      const commit = operation.seal();
+      if (commit === undefined) throw new Error("The original operation did not seal");
+      commit.publish();
+      commit.notifications.deliver();
+
+      const prepare = () =>
+        prepareTransferScopeSuccessors([
+          {
+            operation: operation.operation,
+            predecessor,
+            graph: target,
+            source: target.api.query,
+            input,
+          },
+        ]);
+      seen.length = 0;
+      const control = prepare();
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.receiver).toBe(query);
+      expect(seen[0]?.input).toBe(input);
+      control.discard();
+      await control.retired;
+
+      seen.length = 0;
+      onGetter = () => {
+        if (change === "target") {
+          retirements.push(target.retire());
+          return;
+        }
+        const replacement = prepareTransferScopeSuccessors([
+          {
+            operation: operation.operation,
+            predecessor,
+            graph: nested,
+            source: nested.api.query,
+            input: nestedInput,
+          },
+        ]);
+        const replacementCommit = replacement.seal();
+        if (replacementCommit === undefined) throw new Error("The nested successor did not seal");
+        replacementCommit.publish();
+        replacementCommit.notifications.deliver();
+      };
+      armed = true;
+      const unexpected: { value?: ReturnType<typeof prepare> } = {};
+      try {
+        expect(() => {
+          unexpected.value = prepare();
+        }).toThrow();
+      } finally {
+        unexpected.value?.discard();
+        if (unexpected.value !== undefined) await unexpected.value.retired;
+      }
+      expect(getterCalls).toBe(1);
+      expect(seen).toHaveLength(change === "target" ? 0 : 1);
+      if (change === "operation") {
+        expect(seen[0]?.receiver).toBe(query);
+        expect(seen[0]?.input).toBe(nestedInput);
+      }
+      expect(target.active).toBe(change !== "target");
+      expect(fetches).toBe(1);
+      expect(dispatches).toBe(0);
+      await Promise.all(retirements);
+
+      await original.api.mutation(carrier);
+      expect(dispatches).toBe(1);
+      const retirement = prepareTransferOperationRetirement(operation.operation);
+      const retirementCommit = retirement.seal();
+      if (retirementCommit === undefined) throw new Error("The original operation did not retire");
+      retirementCommit.publish();
+      retirementCommit.notifications.deliver();
+      await retirement.retired;
+    } finally {
+      original.dispose();
+      target.dispose();
+      nested.dispose();
+    }
+  });
+}
+
+it("does not call a bound successor key after its getter disposes the target context", async () => {
+  const input = { value: "bound" };
+  const profile = {};
+  let armed = false;
+  let getterCalls = 0;
+  let keyCalls = 0;
+  const calls: { receiver: unknown; input: unknown }[] = [];
+  let fetches = 0;
+  const query = {
+    kind: "query" as const,
+    name: "bound-successor-key",
+    get key() {
+      if (armed) {
+        getterCalls += 1;
+        targetContext.dispose();
+      }
+      return function (this: unknown, value: typeof input): string {
+        keyCalls += 1;
+        calls.push({ receiver: this, input: value });
+        return "bound-key";
+      };
+    },
+    fetch: async () => 1,
+  };
+  const mutation = createMutation({
+    name: "bound-successor-mutation",
+    run: async (_input: object) => {},
+    affects: [],
+  });
+  const contract = defineContract({
+    namespace: "bound-successor-key",
+    operations: { query, mutation },
+  });
+  const original = createGraph({ contract });
+  const target = createGraph({ contract });
+  const originalContext = createBindingContext(original);
+  const targetContext = createBindingContext(target);
+  const originalBinding = bindOperation(original, query, {
+    context: originalContext,
+    profile,
+    fetch: async () => {
+      fetches += 1;
+      return 1;
+    },
+  });
+  const targetBinding = bindOperation(target, query, {
+    context: targetContext,
+    profile,
+    fetch: async () => {
+      fetches += 1;
+      return 1;
+    },
+  });
+  try {
+    const store = originalBinding.member(input);
+    await store.ready;
+    const predecessor = createTransferScope(original, originalBinding, store);
+    const carrier = {};
+    const operation = prepareTransferOperation(
+      [predecessor],
+      [{ role: "raw", source: original.api.mutation, input: carrier }],
+    );
+    const commit = operation.seal();
+    if (commit === undefined) throw new Error("The original operation did not seal");
+    commit.publish();
+    commit.notifications.deliver();
+    const prepare = () =>
+      prepareTransferScopeSuccessors([
+        {
+          operation: operation.operation,
+          predecessor,
+          graph: target,
+          source: targetBinding,
+          input,
+        },
+      ]);
+    keyCalls = 0;
+    const control = prepare();
+    expect(keyCalls).toBe(1);
+    expect(calls.at(-1)?.receiver).toBe(query);
+    expect(calls.at(-1)?.input).toBe(input);
+    control.discard();
+    await control.retired;
+
+    keyCalls = 0;
+    armed = true;
+    const unexpected: { value?: ReturnType<typeof prepare> } = {};
+    try {
+      expect(() => {
+        unexpected.value = prepare();
+      }).toThrow();
+    } finally {
+      unexpected.value?.discard();
+      if (unexpected.value !== undefined) await unexpected.value.retired;
+    }
+    expect(getterCalls).toBe(1);
+    expect(targetContext.active.get()).toBe(false);
+    expect(target.active).toBe(true);
+    expect(keyCalls).toBe(0);
+    expect(fetches).toBe(1);
+    await original.api.mutation(carrier);
+    const retirement = prepareTransferOperationRetirement(operation.operation);
+    const retirementCommit = retirement.seal();
+    if (retirementCommit === undefined) throw new Error("The original operation did not retire");
+    retirementCommit.publish();
+    retirementCommit.notifications.deliver();
+    await retirement.retired;
+  } finally {
+    original.dispose();
+    target.dispose();
+  }
+});
 
 for (const owner of ["query", "stream"] as const) {
   it(`does not configure a ${owner} store after its key callback retires the graph`, async () => {
@@ -2115,6 +2615,136 @@ it("removes query cancellation when retirement interrupts listener registration"
   }
 });
 
+it("retires a context skipped by prior write-restricted graph disposal", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-skipped-context", operations: {} }),
+  });
+  const context = createBindingContext(graph);
+  let disposalThrew = false;
+  let disposalCause: unknown;
+  let retirementOutcome:
+    | Promise<
+        { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }
+      >
+    | undefined;
+  try {
+    expect(context.active.get()).toBe(true);
+    try {
+      withoutWrites(() => graph.dispose());
+    } catch (cause) {
+      disposalThrew = true;
+      disposalCause = cause;
+    }
+    expect(disposalThrew).toBe(true);
+    expect(context.active.get()).toBe(true);
+
+    const retirement = graph.retire();
+    retirementOutcome = retirement.then(
+      () => ({ kind: "fulfilled" as const }),
+      (cause: unknown) => ({ kind: "rejected" as const, cause }),
+    );
+    expect(graph.retire()).toBe(retirement);
+    expect(context.active.get()).toBe(false);
+
+    const outcome = retirementOutcome;
+    if (outcome === undefined) throw new Error("Expected the cached retirement outcome");
+    const result = await outcome;
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") throw new Error("Expected the retained disposal failure");
+    expect(result.cause).toBe(disposalCause);
+  } finally {
+    try {
+      context.dispose();
+    } finally {
+      graph.dispose();
+      if (retirementOutcome !== undefined) await retirementOutcome;
+    }
+  }
+});
+
+it("joins the final mutation output adoption after abort-listener removal", async () => {
+  const backend = testBackend();
+  const finalization = Promise.withResolvers<void>();
+  const listenerRemoved = Promise.withResolvers<void>();
+  const controller = new AbortController();
+  const nativeAdd = controller.signal.addEventListener.bind(controller.signal);
+  const nativeRemove = controller.signal.removeEventListener.bind(controller.signal);
+  let linkedListener: EventListenerOrEventListenerObject | null = null;
+  let providerRead = false;
+  let finalOutputAdoption = false;
+  const signal = new Proxy(controller.signal, {
+    get(target, property) {
+      if (property === "addEventListener")
+        return (
+          type: string,
+          listener: Parameters<typeof nativeAdd>[1],
+          options?: Parameters<typeof nativeAdd>[2],
+        ) => {
+          nativeAdd(type, listener, options);
+          if (type === "abort") linkedListener = listener;
+        };
+      if (property === "removeEventListener")
+        return (
+          type: string,
+          listener: Parameters<typeof nativeRemove>[1],
+          options?: Parameters<typeof nativeRemove>[2],
+        ) => {
+          nativeRemove(type, listener, options);
+          if (type === "abort" && listener === linkedListener) {
+            finalOutputAdoption = true;
+            listenerRemoved.resolve();
+          }
+        };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const providerResult = Object.defineProperty({}, "then", {
+    get() {
+      if (!providerRead) {
+        providerRead = true;
+        return undefined;
+      }
+      if (!finalOutputAdoption) return undefined;
+      return (resolve: (value: string) => void, reject: (reason: unknown) => void) => {
+        finalization.promise.then(() => resolve("finalized"), reject);
+      };
+    },
+  });
+  const save = createMutation({
+    name: "retirement-output.save",
+    affects: [],
+    run: backend.perform<void, unknown>("retirement-output.save"),
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-output", operations: { save } }),
+  });
+  let call: (typeof backend.calls)[number] | undefined;
+  let providerResolved = false;
+  try {
+    const running = graph.api.save(undefined, { abortSignal: signal });
+    call = backend.pending("retirement-output.save")[0]!;
+    backend.resolve(call, providerResult);
+    providerResolved = true;
+    expect(providerRead).toBe(true);
+    await expectSettled(listenerRemoved.promise);
+    expect(finalOutputAdoption).toBe(true);
+
+    const retirement = graph.retire();
+    await expectPending(running);
+    await expectPending(retirement);
+
+    finalization.resolve();
+    await expect(running).resolves.toBe("finalized");
+    await retirement;
+    expect(backend.calls.map((entry) => entry.name)).toEqual(["retirement-output.save"]);
+  } finally {
+    if (!providerResolved && call !== undefined) backend.resolve(call, providerResult);
+    finalization.resolve();
+    graph.dispose();
+  }
+});
+
 it("does not resolve a mutation target after its selector retires the graph", async () => {
   let retirement: Promise<void> | undefined;
   let keys = 0;
@@ -2157,6 +2787,230 @@ it("does not resolve a mutation target after its selector retires the graph", as
     await result.catch(() => undefined);
     await retirement;
   } finally {
+    graph.dispose();
+  }
+});
+
+it.each(["stateful constructor and species", "custom then observer"] as const)(
+  "keeps retirement unacknowledged for a %s carrier",
+  async (mode) => {
+    const expectedConstructorReads = await nativeResolveThenConstructorReads();
+    const provider = Promise.withResolvers<unknown>();
+    const legacyCarrier = Promise.withResolvers<unknown>();
+    const callbackSettled = Promise.withResolvers<void>();
+    let callbackResult: unknown;
+    let callbackInput: unknown;
+    let callbackCalls = 0;
+    let observerCalls = 0;
+    let constructorReads = 0;
+    let releaseLegacy: (() => void) | undefined;
+    const heldSpecies = function (
+      executor: (resolve: (value: unknown) => void, reject: (cause: unknown) => void) => void,
+    ): Promise<unknown> {
+      executor(
+        (value) => {
+          callbackResult = value;
+          releaseLegacy = () => legacyCarrier.resolve(value);
+          callbackSettled.resolve();
+        },
+        (cause) => {
+          callbackResult = cause;
+          releaseLegacy = () => legacyCarrier.reject(cause);
+          callbackSettled.resolve();
+        },
+      );
+      return legacyCarrier.promise;
+    };
+    const speciesHolder = {
+      [Symbol.species]: mode === "stateful constructor and species" ? heldSpecies : Promise,
+    };
+    Object.defineProperty(provider.promise, "constructor", {
+      configurable: true,
+      get() {
+        constructorReads += 1;
+        if (constructorReads === 1) return Promise;
+        if (constructorReads === 2) return speciesHolder;
+        throw new Error(
+          "Promise carrier constructor was read beyond native normalization and then",
+        );
+      },
+    });
+    const nativeThen = Promise.prototype.then;
+    let customThenResult: string | undefined;
+    if (mode === "custom then observer")
+      Object.defineProperty(provider.promise, "then", {
+        configurable: true,
+        value: function (
+          this: Promise<unknown>,
+          onFulfilled: ((value: unknown) => unknown) | null | undefined,
+          onRejected: ((cause: unknown) => unknown) | null | undefined,
+        ): Promise<unknown> {
+          observerCalls += 1;
+          if (typeof onFulfilled !== "function")
+            throw new Error("Expected the public mutation success continuation");
+          const callbackCarrier = Reflect.apply(nativeThen, this, [
+            (value: unknown) => {
+              callbackCalls += 1;
+              callbackInput = value;
+              return onFulfilled(value);
+            },
+            onRejected,
+          ]) as Promise<unknown>;
+          void Reflect.apply(nativeThen, callbackCarrier, [
+            (value: unknown) => {
+              callbackResult = value;
+              callbackSettled.resolve();
+            },
+            (cause: unknown) => {
+              callbackResult = cause;
+              callbackSettled.resolve();
+            },
+          ]);
+          customThenResult = "independent custom result";
+          return legacyCarrier.promise;
+        },
+      });
+    const save = createMutation({
+      name: `retirement.ambiguous.${mode}`,
+      affects: [],
+      run: () => provider.promise,
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: `retirement-ambiguous-${mode}`,
+        operations: { save },
+      }),
+    });
+    let providerResolved = false;
+    try {
+      const running = graph.api.save(undefined);
+      expect(running).toBe(legacyCarrier.promise);
+      expect(constructorReads).toBe(expectedConstructorReads);
+      expect(observerCalls).toBe(mode === "custom then observer" ? 1 : 0);
+
+      const retirement = graph.retire();
+      await expectPending(retirement);
+      provider.resolve("provider result");
+      providerResolved = true;
+      await callbackSettled.promise;
+      if (mode === "custom then observer") {
+        expect(callbackInput).toBe("provider result");
+        expect(callbackCalls).toBe(1);
+        expect(callbackResult).toBe("provider result");
+        releaseLegacy = () => legacyCarrier.resolve(customThenResult);
+      } else {
+        expect(callbackResult).toBe("provider result");
+      }
+      await expectPending(running);
+      await expectPending(retirement);
+
+      if (releaseLegacy === undefined)
+        throw new Error("Expected the legacy carrier to retain its native completion");
+      releaseLegacy();
+      const expectedResult = mode === "custom then observer" ? customThenResult : "provider result";
+      await expect(running).resolves.toBe(expectedResult);
+      await expectPending(retirement);
+    } finally {
+      if (!providerResolved) provider.resolve("provider result");
+      if (releaseLegacy === undefined) legacyCarrier.resolve("cleanup result");
+      else releaseLegacy();
+      graph.dispose();
+    }
+  },
+);
+
+it("keeps retirement pending after post-bootstrap Promise descriptor changes", async () => {
+  const provider = Promise.withResolvers<unknown>();
+  const control = Promise.withResolvers<unknown>();
+  const originalConstructor = Object.getOwnPropertyDescriptor(Promise.prototype, "constructor");
+  const originalSpecies = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+  if (originalConstructor === undefined || originalSpecies === undefined)
+    throw new Error("Expected native Promise constructor and species descriptors");
+  const nativeResolve = Promise.resolve;
+  const nativeThen = Promise.prototype.then;
+  const reads = {
+    beforeRun: { constructor: 0, species: 0 },
+    baseline: { constructor: 0, species: 0 },
+    operation: { constructor: 0, species: 0 },
+  };
+  let phase: "beforeRun" | "baseline" | "operation" = "beforeRun";
+  let runCalls = 0;
+  const note = (kind: "constructor" | "species"): void => {
+    reads[phase][kind] += 1;
+  };
+  let baselineCarrier: Promise<unknown> | undefined;
+  let running: Promise<unknown> | undefined;
+  let baselineResolved = false;
+  let providerResolved = false;
+  const save = createMutation({
+    name: "retirement.descriptor-mutation",
+    affects: [],
+    run: () => {
+      runCalls += 1;
+      phase = "operation";
+      return provider.promise;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "retirement-descriptor-mutation",
+      operations: { save },
+    }),
+  });
+  try {
+    try {
+      Object.defineProperty(Promise.prototype, "constructor", {
+        configurable: true,
+        enumerable: originalConstructor.enumerable,
+        get() {
+          note("constructor");
+          return Promise;
+        },
+      });
+      Object.defineProperty(Promise, Symbol.species, {
+        configurable: true,
+        enumerable: originalSpecies.enumerable,
+        get() {
+          note("species");
+          return Promise;
+        },
+      });
+
+      phase = "beforeRun";
+      running = graph.api.save(undefined);
+
+      phase = "baseline";
+      const normalizedControl = Reflect.apply(nativeResolve, Promise, [
+        control.promise,
+      ]) as Promise<unknown>;
+      baselineCarrier = Reflect.apply(nativeThen, normalizedControl, [
+        (value: unknown) => value,
+      ]) as Promise<unknown>;
+    } finally {
+      Object.defineProperty(Promise.prototype, "constructor", originalConstructor);
+      Object.defineProperty(Promise, Symbol.species, originalSpecies);
+    }
+
+    expect(reads.beforeRun).toEqual({ constructor: 0, species: 0 });
+    expect(reads.operation.constructor).toBe(reads.baseline.constructor);
+    expect(reads.operation.species).toBe(reads.baseline.species);
+    expect(runCalls).toBe(1);
+    if (running === undefined || baselineCarrier === undefined)
+      throw new Error("Expected both native continuation carriers");
+
+    const retirement = graph.retire();
+    await expectPending(running);
+    await expectPending(retirement);
+    control.resolve("baseline result");
+    baselineResolved = true;
+    await expect(baselineCarrier).resolves.toBe("baseline result");
+    provider.resolve("legacy descriptor result");
+    providerResolved = true;
+    await expect(running).resolves.toBe("legacy descriptor result");
+    await expectPending(retirement);
+  } finally {
+    if (!baselineResolved) control.resolve("baseline result");
+    if (!providerResolved) provider.resolve("legacy descriptor result");
     graph.dispose();
   }
 });
@@ -2312,7 +3166,9 @@ for (const scenario of ["distinct", "same", "report"] as const) {
       graph.api.stream(0);
       graph.api.stream(1);
       await Promise.all(started.map((entry) => entry.promise));
+      expect(graph.active).toBe(true);
       const retirement = graph.retire();
+      expect(graph.active).toBe(false);
       expect(graph.retire()).toBe(retirement);
       let settlements = 0;
       let rejection: unknown;
@@ -2363,6 +3219,7 @@ for (const scenario of ["distinct", "same", "report"] as const) {
         expect(causes[1]).toBe(secondFailure);
       }
       expect(graph.retire()).toBe(retirement);
+      expect(graph.active).toBe(false);
       await flush();
       expect(settlements).toBe(1);
       expect(order).toEqual([0, 1]);
@@ -2589,12 +3446,12 @@ it.each(["Error", "undefined"] as const)(
       }
       await ready;
       expect(readySettlements).toBe(1);
-      await expectRetirementPending(retirement);
+      await expectPending(retirement);
 
       projectionReturn.resolve({ done: true, value: undefined });
-      await expectRetirementPending(retirement);
+      await expectPending(retirement);
       projectionPull.resolve({ done: true, value: undefined });
-      await expectRetirementPending(retirement);
+      await expectPending(retirement);
       original.resolve(42);
 
       const result = await outcome;
@@ -2651,10 +3508,10 @@ it("joins original queries after cancellation and prior void graph disposal", as
     await Promise.all([cancelledReady, disposedReady]);
     expect(cancelledCall.aborted).toBe(true);
     expect(disposedCall!.aborted).toBe(true);
-    await expectRetirementPending(retirement);
+    await expectPending(retirement);
     backend.resolve(disposedCall!, 84);
     disposedResolved = true;
-    await expectRetirementPending(retirement);
+    await expectPending(retirement);
     backend.resolve(cancelledCall, 42);
     cancelledResolved = true;
     await retirement;
@@ -2663,4 +3520,1008 @@ it("joins original queries after cancellation and prior void graph disposal", as
     if (!disposedResolved && disposedCall !== undefined) backend.resolve(disposedCall, 84);
     graph.dispose();
   }
+});
+
+it("exposes a protected, receiver-checked logical graph state", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "graph-active", operations: {} }),
+  });
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(graph, "active");
+    expect(graph.active).toBe(true);
+    expect(descriptor?.enumerable).toBe(true);
+    expect(descriptor?.configurable).toBe(false);
+    expect(descriptor?.set).toBeUndefined();
+    expect(Reflect.set(graph, "active", false)).toBe(false);
+    expect(() => Object.defineProperty(graph, "active", { value: false })).toThrow(TypeError);
+    expect(() => Reflect.get(graph, "active", {})).toThrow(TypeError);
+    await graph.reset();
+    graph.cancelPending();
+    expect(graph.active).toBe(true);
+    const retirement = graph.retire();
+    expect(graph.active).toBe(false);
+    await retirement;
+    expect(graph.active).toBe(false);
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("reports logical revocation after disposal or graph cancellation", () => {
+  const contract = defineContract({ namespace: "graph-active-abort", operations: {} });
+  const disposed = createGraph({ contract });
+  expect(disposed.active).toBe(true);
+  disposed.dispose();
+  expect(disposed.active).toBe(false);
+  const controller = new AbortController();
+  const graph = createGraph({ contract, abortSignal: controller.signal });
+  expect(graph.active).toBe(true);
+  controller.abort();
+  expect(graph.active).toBe(false);
+  const aborted = new AbortController();
+  aborted.abort();
+  const closed = createGraph({ contract, abortSignal: aborted.signal });
+  expect(closed.active).toBe(false);
+  graph.dispose();
+  closed.dispose();
+});
+
+it("allows retirement after a write-restricted first attempt", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-admission", operations: {} }),
+  });
+  let refusedPromise: Promise<void> | undefined;
+  let refusal: unknown;
+  try {
+    try {
+      withoutWrites(() => {
+        refusedPromise = graph.retire();
+        void refusedPromise.catch(() => undefined);
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Fault);
+    expect((refusal as Fault).kind).toBe("write-forbidden");
+    expect(refusedPromise).toBeUndefined();
+    expect(graph.active).toBe(true);
+    const writable = graph.at("still-open");
+    writable.set(1);
+    expect(writable.value.get()).toBe(1);
+    const retirement = graph.retire();
+    expect(graph.active).toBe(false);
+    expect(graph.retire()).toBe(retirement);
+    await retirement;
+  } finally {
+    graph.dispose();
+    await refusedPromise?.catch(() => undefined);
+  }
+});
+
+it("refuses retirement in the same write-restricted scope as a failed disposal", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-disposal-retry", operations: {} }),
+  });
+  const context = createBindingContext(graph);
+  let disposalCause: unknown;
+  let retirementCause: unknown;
+  let refusedPromise: Promise<void> | undefined;
+  try {
+    withoutWrites(() => {
+      try {
+        graph.dispose();
+      } catch (cause) {
+        disposalCause = cause;
+      }
+      try {
+        refusedPromise = graph.retire();
+        void refusedPromise.catch(() => undefined);
+      } catch (cause) {
+        retirementCause = cause;
+      }
+    });
+    expect(disposalCause).toBeInstanceOf(Fault);
+    expect((disposalCause as Fault).kind).toBe("write-forbidden");
+    expect(retirementCause).toBeInstanceOf(Fault);
+    expect((retirementCause as Fault).kind).toBe("write-forbidden");
+    expect(refusedPromise).toBeUndefined();
+    expect(graph.active).toBe(false);
+    expect(context.active.get()).toBe(true);
+
+    const retirement = graph.retire();
+    expect(graph.retire()).toBe(retirement);
+    expect(context.active.get()).toBe(false);
+    await expect(retirement).rejects.toBe(disposalCause);
+  } finally {
+    context.dispose();
+    graph.dispose();
+    await refusedPromise?.catch(() => undefined);
+  }
+});
+
+it("keeps retirement unstarted before and after disposal, then cleans up skipped contexts", async () => {
+  const graph = createGraph({
+    contract: defineContract({ namespace: "retirement-precondition", operations: {} }),
+  });
+  const openContext = createBindingContext(graph);
+  let preDisposeRefusedRetirement: Promise<void> | undefined;
+  let refusal: unknown;
+  try {
+    try {
+      withoutWrites(() => {
+        preDisposeRefusedRetirement = graph.retire();
+      });
+    } catch (cause) {
+      refusal = cause;
+    }
+    void preDisposeRefusedRetirement?.catch(() => undefined);
+    expect(refusal).toBeInstanceOf(Fault);
+    expect((refusal as Fault).kind).toBe("write-forbidden");
+    expect(preDisposeRefusedRetirement).toBeUndefined();
+    expect(openContext.active.get()).toBe(true);
+    const writable = graph.at("still-open");
+    writable.set(1);
+    expect(writable.value.get()).toBe(1);
+    const retirement = graph.retire();
+    expect(graph.retire()).toBe(retirement);
+    expect(openContext.active.get()).toBe(false);
+    await retirement;
+  } finally {
+    try {
+      openContext.dispose();
+    } finally {
+      graph.dispose();
+      await preDisposeRefusedRetirement?.catch(() => undefined);
+    }
+  }
+
+  const priorGraph = createGraph({
+    contract: defineContract({
+      namespace: "retirement-prior-disposal-precondition",
+      operations: {},
+    }),
+  });
+  const context = createBindingContext(priorGraph);
+  let disposalThrew = false;
+  let disposalCause: unknown;
+  let refusedRetirement: Promise<void> | undefined;
+  let retirementRefusal: unknown;
+  let retirement: Promise<void> | undefined;
+  let retirementOutcome:
+    | Promise<
+        { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }
+      >
+    | undefined;
+  try {
+    try {
+      withoutWrites(() => priorGraph.dispose());
+    } catch (cause) {
+      disposalThrew = true;
+      disposalCause = cause;
+    }
+    expect(disposalThrew).toBe(true);
+    if (!(disposalCause instanceof Fault))
+      throw new Error("Expected the first write restriction fault");
+    expect(disposalCause.kind).toBe("write-forbidden");
+    expect(context.active.get()).toBe(true);
+    expect(() => priorGraph.at("closed")).toThrow("disposed");
+
+    try {
+      withoutWrites(() => {
+        refusedRetirement = priorGraph.retire();
+      });
+    } catch (cause) {
+      retirementRefusal = cause;
+    }
+    void refusedRetirement?.catch(() => undefined);
+    expect(retirementRefusal).toBeInstanceOf(Fault);
+    expect((retirementRefusal as Fault).kind).toBe("write-forbidden");
+    expect(refusedRetirement).toBeUndefined();
+    expect(context.active.get()).toBe(true);
+    expect(() => priorGraph.at("still-closed")).toThrow("disposed");
+
+    retirement = priorGraph.retire();
+    retirementOutcome = retirement.then(
+      () => ({ kind: "fulfilled" as const }),
+      (cause: unknown) => ({ kind: "rejected" as const, cause }),
+    );
+    expect(priorGraph.retire()).toBe(retirement);
+    expect(context.active.get()).toBe(false);
+
+    const outcome = retirementOutcome;
+    if (outcome === undefined) throw new Error("Expected the cached retirement outcome");
+    const result = await outcome;
+    expect(result.kind).toBe("rejected");
+    if (result.kind !== "rejected") throw new Error("Expected the retained disposal failure");
+    expect(result.cause).toBe(disposalCause);
+  } finally {
+    try {
+      context.dispose();
+    } finally {
+      priorGraph.dispose();
+      await refusedRetirement?.catch(() => undefined);
+      if (retirementOutcome !== undefined) await retirementOutcome;
+    }
+  }
+});
+
+it.each(["single Error", "single undefined", "multiple"] as const)(
+  "retains cleanup causes in attempt order for %s after graph-owned work finishes",
+  async (mode) => {
+    const originalAggregate = new AggregateError([new Error("nested cause")], "first cleanup");
+    const secondFailure = new Error("second cleanup");
+    const failures: unknown[] =
+      mode === "single Error"
+        ? [new Error("iterator cleanup failed")]
+        : mode === "single undefined"
+          ? [undefined]
+          : [originalAggregate, secondFailure];
+    const activeCount = mode === "multiple" ? 2 : 1;
+    const pulls = [
+      Promise.withResolvers<IteratorResult<number>>(),
+      Promise.withResolvers<IteratorResult<number>>(),
+    ];
+    const cleanups = [
+      Promise.withResolvers<IteratorResult<number>>(),
+      Promise.withResolvers<IteratorResult<number>>(),
+    ];
+    const pullStarted = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const returnStarted = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    const returnOrder: number[] = [];
+    const stream = (index: number) =>
+      createStream({
+        name: `retirement.cleanup.${index}`,
+        key: () => `retirement-cleanup/${index}`,
+        open: (): AsyncIterable<number> => ({
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => {
+                pullStarted[index]!.resolve();
+                return pulls[index]!.promise;
+              },
+              return: () => {
+                returnOrder.push(index);
+                returnStarted[index]!.resolve();
+                return cleanups[index]!.promise;
+              },
+            };
+          },
+        }),
+      });
+    const first = stream(0);
+    const second = stream(1);
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "retirement-cleanup",
+        operations: { first, second },
+      }),
+    });
+    try {
+      graph.api.first(undefined);
+      if (activeCount === 2) graph.api.second(undefined);
+      await Promise.all(pullStarted.slice(0, activeCount).map((started) => started.promise));
+      graph.dispose();
+      await Promise.all(returnStarted.slice(0, activeCount).map((started) => started.promise));
+      expect(returnOrder).toEqual(activeCount === 2 ? [0, 1] : [0]);
+
+      const retirement = graph.retire();
+      expect(graph.retire()).toBe(retirement);
+      const outcome = retirement.then(
+        () => ({ kind: "fulfilled" as const }),
+        (cause: unknown) => ({ kind: "rejected" as const, cause }),
+      );
+      if (activeCount === 2) {
+        cleanups[1]!.reject(failures[1]);
+        await expectPending(retirement);
+        cleanups[0]!.reject(failures[0]);
+      } else {
+        cleanups[0]!.reject(failures[0]);
+      }
+      await expectPending(retirement);
+      for (let index = activeCount - 1; index >= 0; index -= 1)
+        pulls[index]!.resolve({ done: true, value: undefined });
+
+      const result = await outcome;
+      expect(result.kind).toBe("rejected");
+      if (result.kind !== "rejected") throw new Error("Expected cleanup rejection");
+      if (activeCount === 2) {
+        if (!(result.cause instanceof AggregateError))
+          throw new Error("Expected multiple cleanup causes to be aggregated");
+        expect(result.cause.errors).toHaveLength(2);
+        expect(result.cause.errors[0]).toBe(originalAggregate);
+        expect(result.cause.errors[1]).toBe(secondFailure);
+      } else {
+        expect(result.cause).toBe(failures[0]);
+      }
+      expect(graph.retire()).toBe(retirement);
+    } finally {
+      for (const pull of pulls) pull.resolve({ done: true, value: undefined });
+      for (const cleanup of cleanups) cleanup.resolve({ done: true, value: undefined });
+      graph.dispose();
+    }
+  },
+);
+
+it("retires one binding context without cancelling or joining other scopes", async () => {
+  type Scope = "first" | "second" | "raw";
+  type Input = { readonly scope: Scope };
+  const gates: Record<Scope, ReturnType<typeof Promise.withResolvers<number>>> = {
+    first: Promise.withResolvers<number>(),
+    second: Promise.withResolvers<number>(),
+    raw: Promise.withResolvers<number>(),
+  };
+  const signals: Partial<Record<Scope, AbortSignal>> = {};
+  const query = createQuery({
+    name: "context-retirement.query",
+    key: (input: Input) => input.scope,
+    fetch: (input: Input, options) => {
+      signals[input.scope] = options.abortSignal;
+      return gates[input.scope].promise;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "context-retirement", operations: { query } }),
+  });
+  const firstContext = createBindingContext(graph);
+  const secondContext = createBindingContext(graph);
+  const first = bindOperation(graph, query, {
+    context: firstContext,
+    profile: {},
+    fetch: query.fetch,
+  });
+  const second = bindOperation(graph, query, {
+    context: secondContext,
+    profile: {},
+    fetch: query.fetch,
+  });
+  const firstReady = first.member({ scope: "first" }).ready.then(
+    () => undefined,
+    () => undefined,
+  );
+  const secondReady = second.member({ scope: "second" }).ready.then(
+    () => undefined,
+    () => undefined,
+  );
+  const rawReady = graph.api.query({ scope: "raw" }).ready.then(
+    () => undefined,
+    () => undefined,
+  );
+  try {
+    expect(signals.first).toBeDefined();
+    expect(signals.second).toBeDefined();
+    expect(signals.raw).toBeDefined();
+    firstContext.dispose();
+    const retirement = firstContext.retire();
+    expect(signals.first!.aborted).toBe(true);
+    expect(signals.second!.aborted).toBe(false);
+    expect(signals.raw!.aborted).toBe(false);
+    await expectPending(retirement);
+    gates.first.resolve(1);
+    await expectSettled(retirement);
+  } finally {
+    gates.first.resolve(1);
+    gates.second.resolve(2);
+    gates.raw.resolve(3);
+    await Promise.all([firstReady, secondReady, rawReady]);
+    graph.dispose();
+  }
+});
+
+it("drains later contexts when context.active reenters graph retirement and joins each original", async () => {
+  type Scope = "first" | "second";
+  type Input = { readonly scope: Scope };
+  const originals: Record<Scope, ReturnType<typeof Promise.withResolvers<number>>> = {
+    first: Promise.withResolvers<number>(),
+    second: Promise.withResolvers<number>(),
+  };
+  const signals: Partial<Record<Scope, AbortSignal>> = {};
+  const aborts: Record<Scope, number> = { first: 0, second: 0 };
+  const closures: Record<Scope, number> = { first: 0, second: 0 };
+  const query = createQuery({
+    name: "context-phase-retirement.query",
+    key: (input: Input) => input.scope,
+    fetch: (input: Input, options) => {
+      signals[input.scope] = options.abortSignal;
+      options.abortSignal.addEventListener("abort", () => {
+        aborts[input.scope] += 1;
+      });
+      return originals[input.scope].promise;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "context-phase-retirement", operations: { query } }),
+  });
+  const firstContext = createBindingContext(graph);
+  const secondContext = createBindingContext(graph);
+  let retirement: Promise<void> | undefined;
+  let retirementOutcome:
+    | Promise<
+        { readonly kind: "fulfilled" } | { readonly kind: "rejected"; readonly cause: unknown }
+      >
+    | undefined;
+  let firstReady: Promise<void> | undefined;
+  let secondReady: Promise<void> | undefined;
+  let stopFirst = (): void => undefined;
+  let stopSecond = (): void => undefined;
+  const startRetirement = (): void => {
+    if (retirement !== undefined) return;
+    retirement = graph.retire();
+    retirementOutcome = retirement.then(
+      () => ({ kind: "fulfilled" as const }),
+      (cause: unknown) => ({ kind: "rejected" as const, cause }),
+    );
+  };
+  try {
+    const first = bindOperation(graph, query, {
+      context: firstContext,
+      profile: {},
+      fetch: query.fetch,
+    });
+    const second = bindOperation(graph, query, {
+      context: secondContext,
+      profile: {},
+      fetch: query.fetch,
+    });
+    firstReady = first.member({ scope: "first" }).ready.then(
+      () => undefined,
+      () => undefined,
+    );
+    secondReady = second.member({ scope: "second" }).ready.then(
+      () => undefined,
+      () => undefined,
+    );
+    stopFirst = subscribe(firstContext.active, (active) => {
+      if (active) return;
+      closures.first += 1;
+      startRetirement();
+    });
+    stopSecond = subscribe(secondContext.active, (active) => {
+      if (!active) closures.second += 1;
+    });
+    if (signals.first === undefined || signals.second === undefined)
+      throw new Error("Expected both context queries to start");
+
+    graph.dispose();
+
+    const retirementPromise = retirement;
+    const outcome = retirementOutcome;
+    if (retirementPromise === undefined || outcome === undefined)
+      throw new Error("Expected context closure to reenter graph retirement");
+    expect(graph.retire()).toBe(retirementPromise);
+    expect(firstContext.active.get()).toBe(false);
+    expect(secondContext.active.get()).toBe(false);
+    expect(closures).toEqual({ first: 1, second: 1 });
+    expect(aborts).toEqual({ first: 1, second: 1 });
+    expect(signals.first.aborted).toBe(true);
+    expect(signals.second.aborted).toBe(true);
+    await Promise.all([firstReady, secondReady]);
+    await expectPending(retirementPromise);
+
+    originals.first.resolve(1);
+    await expectPending(retirementPromise);
+    originals.second.resolve(2);
+    const result = await outcome;
+    expect(result.kind).toBe("fulfilled");
+    if (result.kind !== "fulfilled") throw new Error("Expected both originals to retire cleanly");
+  } finally {
+    originals.first.resolve(1);
+    originals.second.resolve(2);
+    try {
+      graph.dispose();
+    } finally {
+      stopFirst();
+      stopSecond();
+      const finalRetirement = retirement ?? graph.retire();
+      await finalRetirement.then(
+        () => undefined,
+        () => undefined,
+      );
+      if (firstReady !== undefined) await firstReady;
+      if (secondReady !== undefined) await secondReady;
+    }
+  }
+});
+
+it("keeps overlapping mutation coverage until both original carriers retire", async () => {
+  const backend = testBackend();
+  const query = createQuery({
+    name: "transfer-overlap.query",
+    key: () => "transfer-overlap/one",
+    fetch: backend.respond<void, number>("transfer-overlap.query"),
+  });
+  const mutate = createMutation({
+    name: "transfer-overlap.mutate",
+    run: backend.perform<object, void>("transfer-overlap.mutate"),
+    affects: [],
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "transfer-overlap", operations: { query, mutate } }),
+  });
+  const codec: RequiredTransferCodec = {
+    encodeValue: (value) => value as ClosedEncodedValue,
+    encodeFailure: (cause) => String(cause),
+    decodeValue: (value) => value,
+    decodeFailure: (failure) => new Error(String(failure)),
+  };
+  try {
+    const store = graph.api.query();
+    const ready = store.ready;
+    backend.resolve(backend.calls[0]!, 1);
+    await ready;
+    const value = computed(() => store.value.get());
+    expect(value.get()).toBe(1);
+    const construction = captureReactiveConstruction(value);
+    const captureOptions = {
+      graphs: [graph],
+      roots: [{ source: value, construction }],
+      codec,
+    } as const;
+    const scope = createTransferScope(graph, graph.api.query, store);
+    const firstInput = Object.freeze({ request: "first" });
+    const secondInput = Object.freeze({ request: "second" });
+    const firstOperation = prepareTransferOperation(
+      [scope],
+      [{ role: "raw", source: graph.api.mutate, input: firstInput }],
+    );
+    const firstCommit = firstOperation.seal();
+    if (firstCommit === undefined) throw new Error("The first operation did not seal");
+    firstCommit.publish();
+    firstCommit.notifications.deliver();
+    const secondOperation = prepareTransferOperation(
+      [scope],
+      [{ role: "raw", source: graph.api.mutate, input: secondInput }],
+    );
+    const secondCommit = secondOperation.seal();
+    if (secondCommit === undefined) throw new Error("The overlapping operation did not seal");
+    secondCommit.publish();
+    secondCommit.notifications.deliver();
+
+    const firstResult = graph.api.mutate(firstInput);
+    const secondResult = graph.api.mutate(secondInput);
+    const firstCall = backend.calls[1]!;
+    const secondCall = backend.calls[2]!;
+    expect(firstCall.input).toBe(firstInput);
+    expect(secondCall.input).toBe(secondInput);
+    expect(() => prepareRequiredTransferCapture(captureOptions)).toThrow(TypeError);
+
+    backend.resolve(firstCall, undefined);
+    backend.resolve(secondCall, undefined);
+    await Promise.all([firstResult, secondResult]);
+
+    const firstRetirement = prepareTransferOperationRetirement(firstOperation.operation);
+    const firstRetirementCommit = firstRetirement.seal();
+    if (firstRetirementCommit === undefined)
+      throw new Error("The first operation retirement did not seal");
+    firstRetirementCommit.publish();
+    firstRetirementCommit.notifications.deliver();
+    await firstRetirement.retired;
+    expect(() => prepareRequiredTransferCapture(captureOptions)).toThrow(TypeError);
+
+    const secondRetirement = prepareTransferOperationRetirement(secondOperation.operation);
+    const secondRetirementCommit = secondRetirement.seal();
+    if (secondRetirementCommit === undefined)
+      throw new Error("The second operation retirement did not seal");
+    secondRetirementCommit.publish();
+    secondRetirementCommit.notifications.deliver();
+    await secondRetirement.retired;
+
+    const availableCapture = prepareRequiredTransferCapture(captureOptions);
+    availableCapture.discard();
+    await availableCapture.retired;
+  } finally {
+    graph.dispose();
+  }
+});
+
+it("retains predecessor and successor address coverage for the same original operation until explicit retirement", async () => {
+  type QueryInput = { readonly key: string };
+  type MutationInput = { readonly request: string };
+  type CommitPort = {
+    readonly publish: () => void;
+    readonly notifications: { readonly deliver: () => void };
+  };
+  type PublicationPort = {
+    readonly retired: Promise<void>;
+    readonly seal: () => CommitPort | undefined;
+    readonly discard: () => void;
+  };
+  type HeldPublication = {
+    readonly publication: PublicationPort;
+    phase: "pending" | "sealed" | "published" | "discarded";
+    commit: CommitPort | undefined;
+    sealAttempted: boolean;
+    deliveryAttempted: boolean;
+    joined: boolean;
+  };
+  type PassiveClaim = ReturnType<typeof preparePassiveTransferClaim>;
+  type HeldClaim = {
+    readonly claim: PassiveClaim;
+    discarded: boolean;
+    joined: boolean;
+  };
+  type RefusalCheck =
+    | { readonly failed: false }
+    | { readonly failed: true; readonly error: unknown };
+
+  const backend = testBackend();
+  const queryName = "transfer-successor.query";
+  const mutationName = "transfer-successor.mutate";
+  const respondQuery = backend.respond<QueryInput, number>(queryName);
+  let queryFetchCalls = 0;
+  const fetchQuery = (
+    input: QueryInput,
+    options: Parameters<typeof respondQuery>[1],
+  ): Promise<number> => {
+    queryFetchCalls += 1;
+    return respondQuery(input, options);
+  };
+  const performMutation = backend.perform<MutationInput, void>(mutationName);
+  let mutationDispatches = 0;
+  const runMutation = (
+    input: MutationInput,
+    options: Parameters<typeof performMutation>[1],
+  ): Promise<void> => {
+    mutationDispatches += 1;
+    return performMutation(input, options);
+  };
+  const query = createQuery({
+    name: queryName,
+    key: (input: QueryInput) => input.key,
+    fetch: fetchQuery,
+  });
+  const mutation = createMutation({
+    name: mutationName,
+    run: runMutation,
+    affects: [],
+  });
+  const graph = createGraph({
+    contract: defineContract({
+      namespace: "transfer-successor",
+      operations: { query, mutation },
+    }),
+  });
+
+  const publications: HeldPublication[] = [];
+  const claims: HeldClaim[] = [];
+  const cleanupFailures: unknown[] = [];
+  let contextAForCleanup: { readonly retire: () => Promise<void> } | undefined;
+  let contextBForCleanup: { readonly retire: () => Promise<void> } | undefined;
+  let queryCallRecord: (typeof backend.calls)[number] | undefined;
+  let mutationCallRecord: (typeof backend.calls)[number] | undefined;
+  let predecessorReady: Promise<unknown> | undefined;
+  let predecessorReadyJoined = false;
+  let mutationResult: Promise<unknown> | undefined;
+  let mutationResultJoined = false;
+  let operationHandle: ReturnType<typeof prepareTransferOperation>["operation"] | undefined;
+  let operationPublication: HeldPublication | undefined;
+  let retirementPublication: HeldPublication | undefined;
+  let bodyFailed = false;
+  let bodyFailure: unknown;
+
+  const retainClaim = (claim: PassiveClaim): HeldClaim => {
+    const held = { claim, discarded: false, joined: false };
+    claims.push(held);
+    return held;
+  };
+  const discardClaim = (held: HeldClaim): void => {
+    if (held.discarded) return;
+    held.discarded = true;
+    held.claim.discard();
+  };
+  const joinClaim = async (held: HeldClaim): Promise<void> => {
+    try {
+      await held.claim.retired;
+    } finally {
+      held.joined = true;
+    }
+  };
+  const discardAndJoinClaim = async (held: HeldClaim): Promise<void> => {
+    discardClaim(held);
+    await joinClaim(held);
+  };
+  const retainPublication = (publication: PublicationPort): HeldPublication => {
+    const held: HeldPublication = {
+      publication,
+      phase: "pending",
+      commit: undefined,
+      sealAttempted: false,
+      deliveryAttempted: false,
+      joined: false,
+    };
+    publications.push(held);
+    return held;
+  };
+  const sealPublishAndDeliver = (held: HeldPublication): void => {
+    held.sealAttempted = true;
+    const commit = held.publication.seal();
+    if (commit === undefined) throw new Error("The transfer publication did not seal");
+    held.commit = commit;
+    held.phase = "sealed";
+    commit.publish();
+    held.phase = "published";
+    held.deliveryAttempted = true;
+    commit.notifications.deliver();
+  };
+  const deliverPublished = (held: HeldPublication): void => {
+    if (held.phase !== "published" || held.commit === undefined || held.deliveryAttempted) return;
+    held.deliveryAttempted = true;
+    held.commit.notifications.deliver();
+  };
+  const discardPending = (held: HeldPublication): void => {
+    if (held.phase !== "pending") return;
+    held.phase = "discarded";
+    held.publication.discard();
+  };
+  const joinPublication = async (held: HeldPublication): Promise<void> => {
+    try {
+      await held.publication.retired;
+    } finally {
+      held.joined = true;
+    }
+  };
+  const joinPredecessorReady = async (): Promise<void> => {
+    if (predecessorReady === undefined || predecessorReadyJoined) return;
+    try {
+      await predecessorReady;
+    } finally {
+      predecessorReadyJoined = true;
+    }
+  };
+  const joinMutationResult = async (): Promise<void> => {
+    if (mutationResult === undefined || mutationResultJoined) return;
+    try {
+      await mutationResult;
+    } finally {
+      mutationResultJoined = true;
+    }
+  };
+  const cleanupAttempt = async (action: () => void | Promise<void>): Promise<void> => {
+    try {
+      await action();
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+  };
+
+  try {
+    try {
+      const profile = {};
+      const input = Object.freeze({ key: "transfer-successor/one" });
+      const contextA = createBindingContext(graph);
+      const contextB = createBindingContext(graph);
+      contextAForCleanup = contextA;
+      contextBForCleanup = contextB;
+      const bindingA = bindOperation(graph, query, {
+        context: contextA,
+        profile,
+        fetch: fetchQuery,
+      });
+      const bindingB = bindOperation(graph, query, {
+        context: contextB,
+        profile,
+        fetch: fetchQuery,
+      });
+
+      const predecessorStore = bindingA.member(input);
+      const queryCall = backend.pending(queryName)[0];
+      if (queryCall === undefined)
+        throw new Error("The predecessor query did not reach the controlled backend");
+      queryCallRecord = queryCall;
+      predecessorReady = predecessorStore.ready;
+      if (!queryCall.settled) backend.resolve(queryCall, 1);
+      await joinPredecessorReady();
+      expect(queryCall.settled).toBe(true);
+      expect(queryFetchCalls).toBe(1);
+      expect(backend.calls).toHaveLength(1);
+
+      const controlA = retainClaim(preparePassiveTransferClaim(graph, bindingA, input));
+      const controlB = retainClaim(preparePassiveTransferClaim(graph, bindingB, input));
+      expect(controlA.claim.store.key).toBe(controlB.claim.store.key);
+      expect(controlA.claim.store.identity).not.toBe(controlB.claim.store.identity);
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(0);
+      await discardAndJoinClaim(controlA);
+      await discardAndJoinClaim(controlB);
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(0);
+      expect(backend.calls).toHaveLength(1);
+
+      const predecessorScope = createTransferScope(graph, bindingA, predecessorStore);
+      const carrier = Object.freeze({ request: "external-query-refresh" });
+      const operationPublicationValue = prepareTransferOperation(
+        [predecessorScope],
+        [{ role: "raw", source: graph.api.mutation, input: carrier }],
+      );
+      const operation = operationPublicationValue.operation;
+      operationHandle = operation;
+      const operationPublicationHeld = retainPublication(operationPublicationValue);
+      operationPublication = operationPublicationHeld;
+      sealPublishAndDeliver(operationPublicationHeld);
+      await joinPublication(operationPublicationHeld);
+
+      mutationResult = graph.api.mutation(carrier);
+      const mutationCall = backend.pending(mutationName)[0];
+      if (mutationCall === undefined)
+        throw new Error("The original mutation did not reach the controlled backend");
+      const originalMutationCall = mutationCall;
+      mutationCallRecord = originalMutationCall;
+      expect(originalMutationCall.input).toBe(carrier);
+      expect(originalMutationCall.settled).toBe(false);
+      expect(mutationDispatches).toBe(1);
+      expect(backend.calls).toHaveLength(2);
+      let unexpectedRetirement: ReturnType<typeof prepareTransferOperationRetirement> | undefined;
+      try {
+        expect(() => {
+          unexpectedRetirement = prepareTransferOperationRetirement(operation);
+        }).toThrow(TypeError);
+      } finally {
+        if (unexpectedRetirement !== undefined) retainPublication(unexpectedRetirement);
+      }
+
+      const successorPublicationValue = prepareTransferScopeSuccessors([
+        {
+          operation,
+          predecessor: predecessorScope,
+          graph,
+          source: bindingB,
+          input,
+        },
+      ]);
+      const successorPublication = retainPublication(successorPublicationValue);
+      sealPublishAndDeliver(successorPublication);
+      await joinPublication(successorPublication);
+      expect(successorPublicationValue.scopes).toHaveLength(1);
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(1);
+      expect(backend.calls).toHaveLength(2);
+
+      if (!originalMutationCall.settled) backend.resolve(originalMutationCall, undefined);
+      await joinMutationResult();
+      expect(originalMutationCall.settled).toBe(true);
+      const retirementValue = prepareTransferOperationRetirement(operation);
+      const retirementHeld = retainPublication(retirementValue);
+      retirementPublication = retirementHeld;
+
+      const expectClaimRefused = (source: typeof bindingA): RefusalCheck => {
+        let unexpectedClaim: PassiveClaim | undefined;
+        try {
+          expect(() => {
+            unexpectedClaim = preparePassiveTransferClaim(graph, source, input);
+          }).toThrow(TypeError);
+          return { failed: false };
+        } catch (error) {
+          return { failed: true, error };
+        } finally {
+          if (unexpectedClaim !== undefined) retainClaim(unexpectedClaim);
+        }
+      };
+      const predecessorRefusal = expectClaimRefused(bindingA);
+      const successorRefusal = expectClaimRefused(bindingB);
+      const refusalFailures: unknown[] = [];
+      if (predecessorRefusal.failed) refusalFailures.push(predecessorRefusal.error);
+      if (successorRefusal.failed) refusalFailures.push(successorRefusal.error);
+      if (refusalFailures.length === 1) throw refusalFailures[0];
+      if (refusalFailures.length > 1)
+        throw new AggregateError(
+          refusalFailures,
+          "Both covered addresses must refuse passive claims",
+        );
+
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(1);
+      expect(backend.calls).toHaveLength(2);
+
+      sealPublishAndDeliver(retirementHeld);
+      await joinPublication(retirementHeld);
+
+      const releasedA = retainClaim(preparePassiveTransferClaim(graph, bindingA, input));
+      const releasedB = retainClaim(preparePassiveTransferClaim(graph, bindingB, input));
+      expect(releasedA.claim.store.key).toBe(releasedB.claim.store.key);
+      expect(releasedA.claim.store.identity).not.toBe(releasedB.claim.store.identity);
+      await discardAndJoinClaim(releasedA);
+      await discardAndJoinClaim(releasedB);
+      expect(queryFetchCalls).toBe(1);
+      expect(mutationDispatches).toBe(1);
+      expect(backend.calls).toHaveLength(2);
+    } catch (error) {
+      bodyFailed = true;
+      bodyFailure = error;
+    }
+  } finally {
+    if (queryCallRecord === undefined)
+      queryCallRecord = backend.calls.find((call) => call.name === queryName);
+    if (mutationCallRecord === undefined)
+      mutationCallRecord = backend.calls.find((call) => call.name === mutationName);
+    const queryCallRecords = new Set(backend.calls.filter((call) => call.name === queryName));
+    const mutationCallRecords = new Set(backend.calls.filter((call) => call.name === mutationName));
+    if (queryCallRecord !== undefined) queryCallRecords.add(queryCallRecord);
+    if (mutationCallRecord !== undefined) mutationCallRecords.add(mutationCallRecord);
+    for (const call of queryCallRecords)
+      if (!call.settled) await cleanupAttempt(() => backend.resolve(call, 1));
+    for (const call of mutationCallRecords)
+      if (!call.settled) await cleanupAttempt(() => backend.resolve(call, undefined));
+    if (predecessorReady !== undefined && !predecessorReadyJoined) {
+      if (queryCallRecord !== undefined) await cleanupAttempt(joinPredecessorReady);
+      else
+        cleanupFailures.push(
+          new Error("The predecessor ready promise has no controlled CallRecord to settle"),
+        );
+    }
+    if (mutationResult !== undefined && !mutationResultJoined) {
+      if (mutationCallRecord !== undefined) await cleanupAttempt(joinMutationResult);
+      else
+        cleanupFailures.push(
+          new Error("The original mutation result has no controlled CallRecord to settle"),
+        );
+    }
+
+    for (const claim of claims) {
+      if (!claim.discarded) await cleanupAttempt(() => discardClaim(claim));
+    }
+    for (const claim of claims) {
+      if (!claim.joined) await cleanupAttempt(() => joinClaim(claim));
+    }
+
+    if (
+      operationPublication?.phase === "published" &&
+      operationHandle !== undefined &&
+      retirementPublication === undefined
+    ) {
+      await cleanupAttempt(() => {
+        retirementPublication = retainPublication(
+          prepareTransferOperationRetirement(operationHandle!),
+        );
+      });
+    }
+    if (
+      retirementPublication !== undefined &&
+      retirementPublication.phase === "pending" &&
+      !retirementPublication.sealAttempted &&
+      operationPublication?.phase === "published"
+    )
+      await cleanupAttempt(() => sealPublishAndDeliver(retirementPublication!));
+
+    for (const publication of publications) {
+      if (publication.phase === "pending") await cleanupAttempt(() => discardPending(publication));
+    }
+    for (const publication of publications) {
+      if (publication.phase === "published" && !publication.deliveryAttempted)
+        await cleanupAttempt(() => deliverPublished(publication));
+      if (publication.phase === "sealed")
+        cleanupFailures.push(
+          new Error("A sealed transfer publication could not be publicly completed"),
+        );
+    }
+    for (const publication of publications) {
+      if (
+        !publication.joined &&
+        (publication.phase === "published" || publication.phase === "discarded")
+      )
+        await cleanupAttempt(() => joinPublication(publication));
+    }
+
+    const ownerRetirements: Promise<void>[] = [];
+    const startRetirement = (owner: { readonly retire: () => Promise<void> } | undefined): void => {
+      if (owner === undefined) return;
+      try {
+        ownerRetirements.push(owner.retire());
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    };
+    startRetirement(contextAForCleanup);
+    startRetirement(contextBForCleanup);
+    startRetirement(graph);
+    for (const retirement of ownerRetirements) await cleanupAttempt(async () => retirement);
+  }
+  if (bodyFailed) {
+    if (cleanupFailures.length === 0) throw bodyFailure;
+    throw new AggregateError(
+      [bodyFailure, ...cleanupFailures],
+      "Successor coverage test and cleanup failed",
+    );
+  }
+  if (cleanupFailures.length === 1) throw cleanupFailures[0];
+  if (cleanupFailures.length > 1)
+    throw new AggregateError(cleanupFailures, "Successor coverage cleanup failed");
 });

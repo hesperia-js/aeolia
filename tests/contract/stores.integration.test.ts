@@ -4,6 +4,7 @@ import { computed, watch } from "../../src/reactive.ts";
 import { createGraph } from "../../src/contract/index.ts";
 import { defineContract, createQuery, createStore } from "../../src/contract/index.ts";
 import { testBackend } from "../../src/testing.ts";
+import { adopt, peekStore, snapshot } from "../../src/index.ts";
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -18,6 +19,51 @@ afterEach(() => {
 function contractWithStore<T, N extends string>(definition: ReturnType<typeof createStore<T, N>>) {
   return defineContract({ namespace: "graph-tests", operations: { local: definition } });
 }
+
+it.each([false, true])(
+  "refuses exhausted updater authority without overwriting a reentrant successor (reenter=%s)",
+  (reenter) => {
+    const definition = createStore({ name: "counter", initial: 4, snapshot: true });
+    const contract = contractWithStore(definition);
+    const source = createGraph({ contract });
+    const target = createGraph({ contract });
+    try {
+      source.api.local();
+      const store = target.api.local();
+      const encoded = snapshot(source, { version: 2 });
+      const generation = Number.MAX_SAFE_INTEGER - (reenter ? 2 : 1);
+      const incoming = {
+        ...encoded,
+        entries: encoded.entries.map((row) => ({ ...row, generation })),
+      } as unknown as typeof encoded;
+      adopt(target, incoming, {});
+      const before = peekStore(store);
+      let callbacks = 0;
+
+      expect(() =>
+        store.update(() => {
+          callbacks += 1;
+          store.set(101);
+          return 100;
+        }),
+      ).toThrow(RangeError);
+
+      expect(callbacks).toBe(reenter ? 1 : 0);
+      if (reenter) {
+        expect(store.value.get()).toBe(101);
+      } else {
+        expect(peekStore(store)).toEqual(before);
+        expect(store.value.get()).toBe(4);
+      }
+      expect(Number(snapshot(target, { version: 2 }).entries[0]?.generation)).toBe(
+        Number.MAX_SAFE_INTEGER,
+      );
+    } finally {
+      source.dispose();
+      target.dispose();
+    }
+  },
+);
 
 async function flush(): Promise<void> {
   await Promise.resolve();

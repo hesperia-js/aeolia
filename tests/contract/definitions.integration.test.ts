@@ -1,15 +1,19 @@
 import { expect, test } from "bun:test";
 import {
   affects,
+  createGraph,
   defineContract,
   createMutation,
   createQuery,
   createStore,
   createStream,
+  createPositionedStream,
   storeKey,
   type CallContext,
   type FetchOptions,
+  type PositionedStreamSource,
 } from "../../src/contract/index.ts";
+import { testBackend } from "../../src/testing.ts";
 
 test("contract definitions preserve kinds and reject duplicate names globally", () => {
   const query = createQuery({
@@ -105,6 +109,153 @@ test("creation functions retain ownership of definition discriminants", () => {
   expect(createQuery(queryInput).kind).toBe("query");
   expect(createStream(streamInput).kind).toBe("stream");
   expect(createMutation(mutationInput).kind).toBe("mutation");
+
+  let opens = 0;
+  const positioned = createPositionedStream({
+    name: "items.positioned",
+    key: (input: { readonly id: string }) => input.id,
+    source: {
+      open: async function* (_input: { readonly id: string }) {
+        opens += 1;
+        yield { position: 1, value: 1 };
+      },
+      validateReader: () => true,
+      isReaderCurrent: () => true,
+      acknowledge: () => undefined,
+      releaseReader: () => undefined,
+    },
+  });
+  expect(positioned.kind).toBe("positioned-stream");
+  expect(positioned.source.acquireReader).toBeUndefined();
+  const graph = createGraph({
+    contract: defineContract({ namespace: "positioned-factory", operations: { positioned } }),
+  });
+  try {
+    expect(typeof graph.api.positioned).toBe("function");
+    const structuralCopy = { ...positioned };
+    expect(() =>
+      createGraph({
+        contract: defineContract({
+          namespace: "positioned-copy",
+          operations: { positioned: structuralCopy },
+        }),
+      }),
+    ).toThrow(TypeError);
+    expect(opens).toBe(0);
+  } finally {
+    graph.dispose();
+  }
+});
+
+test("query declarations capture and validate acquisition policy", () => {
+  const input = {
+    name: "acquisition.query",
+    acquisition: "fetch" as "cache" | "fetch",
+    key: () => "acquisition",
+    fetch: async () => 1,
+  };
+  const query = createQuery(input);
+  input.acquisition = "cache";
+  expect(query.acquisition).toBe("fetch");
+  const defaultQuery = createQuery({
+    name: "default.query",
+    key: () => "default",
+    fetch: async () => 1,
+  });
+  expect(defaultQuery.acquisition).toBe("cache");
+  expect(
+    createQuery({
+      name: "undefined.query",
+      acquisition: undefined,
+      key: () => "undefined",
+      fetch: async () => 1,
+    }).acquisition,
+  ).toBe("cache");
+
+  let getterCalled = false;
+  const accessor = Object.defineProperty(
+    {
+      name: "accessor.query",
+      key: () => "accessor",
+      fetch: async () => 1,
+    },
+    "acquisition",
+    {
+      get() {
+        getterCalled = true;
+        return "fetch";
+      },
+    },
+  );
+  expect(() => createQuery(accessor as never)).toThrow(TypeError);
+  expect(getterCalled).toBe(false);
+
+  const inherited = Object.assign(Object.create({ acquisition: "fetch" }), {
+    name: "inherited.query",
+    key: () => "inherited",
+    fetch: async () => 1,
+  });
+  expect(() => createQuery(inherited as never)).toThrow(TypeError);
+
+  for (const acquisition of [false, null, "network"] as const) {
+    expect(() =>
+      createQuery({
+        name: "invalid.query",
+        acquisition,
+        key: () => "invalid",
+        fetch: async () => 1,
+      } as never),
+    ).toThrow(TypeError);
+  }
+});
+
+test("a graph retains the acquisition captured from a structural query", async () => {
+  const backend = testBackend();
+  const definition = {
+    kind: "query" as const,
+    name: "structural.acquisition",
+    acquisition: "fetch" as "cache" | "fetch",
+    key: (input: string) => input,
+    fetch: backend.respond<string, number>("structural.acquisition"),
+  };
+  let descriptorReads = 0;
+  const query = new Proxy(definition, {
+    getOwnPropertyDescriptor(target, property) {
+      if (property === "acquisition") {
+        descriptorReads += 1;
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: descriptorReads === 1 ? "fetch" : "cache",
+        };
+      }
+      return Reflect.getOwnPropertyDescriptor(target, property);
+    },
+  });
+  const operations = {
+    get query() {
+      descriptorReads = 0;
+      return query;
+    },
+  };
+  const graph = createGraph({
+    contract: defineContract({ namespace: "structural-acquisition", operations }),
+  });
+  definition.acquisition = "cache";
+
+  try {
+    const first = graph.api.query("structural-key");
+    backend.resolve(backend.calls[0]!, 1);
+    await expect(first.ready).resolves.toBe(1);
+
+    const second = graph.api.query("structural-key");
+    expect(backend.calls).toHaveLength(2);
+    backend.resolve(backend.calls[1]!, 2);
+    await expect(second.ready).resolves.toBe(2);
+  } finally {
+    graph.dispose();
+  }
 });
 
 test("contract validation rejects aliases, cycles, and orphan affected queries", () => {
@@ -160,4 +311,105 @@ test("contract validation rejects aliases, cycles, and orphan affected queries",
 test("store keys are branded at the boundary", () => {
   expect(String(storeKey("users/7"))).toBe("users/7");
   expect(() => storeKey("")).toThrow();
+});
+
+test("positioned declarations capture an optional acquisition without invoking it", async () => {
+  type Source = PositionedStreamSource<{ readonly id: string }, number, number, unknown>;
+  const controller = new AbortController();
+  const input = { id: "one" };
+  const checkpoint = { after: 5, latest: 2, values: [2] as const };
+  const request = { input, checkpoint, signal: controller.signal };
+  let thenReads = 0;
+  const opaque = Object.defineProperty({}, "then", {
+    get() {
+      thenReads++;
+      throw new Error("opaque Reader");
+    },
+  });
+  const readers: unknown[] = [undefined, Promise.resolve("opaque promise"), opaque];
+  for (const reader of readers) {
+    let captures = 0;
+    let calls = 0;
+    const result = { reader };
+    const original = Promise.resolve(result);
+    const source: Source = {
+      open: async function* () {
+        yield { position: 6, value: 3 };
+      },
+      validateReader: () => true,
+      isReaderCurrent: () => true,
+      acknowledge: () => undefined,
+      releaseReader: () => undefined,
+    };
+    const acquire: NonNullable<Source["acquireReader"]> = function (this: Source, actual) {
+      calls++;
+      expect(this).toBe(source);
+      expect(actual).toBe(request);
+      expect(actual.input).toBe(input);
+      expect(actual.checkpoint).toBe(checkpoint);
+      expect(actual.signal).toBe(controller.signal);
+      return original;
+    };
+    Object.defineProperty(source, "acquireReader", {
+      configurable: true,
+      get() {
+        captures++;
+        return acquire;
+      },
+    });
+    const declaration = createPositionedStream({
+      name: "acquisition.events",
+      key: (value: { readonly id: string }) => value.id,
+      source,
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "acquisition-envelope",
+        operations: { events: declaration },
+      }),
+    });
+    try {
+      expect(captures).toBe(1);
+      expect(calls).toBe(0);
+      Object.defineProperty(source, "acquireReader", {
+        value: () => {
+          throw new Error("captured callback changed");
+        },
+      });
+      const captured = declaration.source.acquireReader;
+      if (captured === undefined) throw new Error("The acquisition callback was not captured");
+      const returned = captured(request);
+      expect(returned).toBe(original);
+      const envelope = await returned;
+      expect(envelope).toBe(result);
+      expect(Object.getOwnPropertyDescriptor(envelope, "reader")?.value).toBe(reader);
+      expect(calls).toBe(1);
+      expect(captures).toBe(1);
+      expect(thenReads).toBe(0);
+    } finally {
+      await graph.retire();
+    }
+  }
+});
+
+test("positioned declarations reject a malformed optional acquisition callback", () => {
+  type Source = PositionedStreamSource<void, number, number, object>;
+  const source: Source = {
+    open: async function* () {
+      yield { position: 1, value: 1 };
+    },
+    validateReader: () => true,
+    isReaderCurrent: () => true,
+    acknowledge: () => undefined,
+    releaseReader: () => undefined,
+  };
+  for (const acquireReader of [null, false, 1, {}]) {
+    expect(() =>
+      createPositionedStream({
+        name: "invalid-acquisition",
+        key: () => "one",
+        source: { ...source, acquireReader } as unknown as Source,
+      }),
+    ).toThrow(TypeError);
+  }
 });

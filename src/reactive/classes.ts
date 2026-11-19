@@ -24,6 +24,9 @@ import type {
   WritableSignal,
   Observer as ObserverShape,
 } from "./types.ts";
+
+declare const __AEOLIA_DEV__: boolean | undefined;
+
 /**
  * Writable state signal with synchronous propagation.
  *
@@ -102,6 +105,8 @@ export class State<T> implements WritableSignal<T> {
    *
    * The updater runs before equality is checked. If the updater or equality
    * callback throws, this state write is aborted.
+   * Development exports diagnose a non-function updater with TypeError;
+   * read-only write scopes take precedence.
    *
    * @param next - Function that derives the candidate value from the current
    * state.
@@ -111,6 +116,12 @@ export class State<T> implements WritableSignal<T> {
       const node = nodeFor(this);
       if (node.kind !== "signal") throw new TypeError("Expected a Signal.State");
       ensureWritesAllowed(node);
+      if (
+        typeof __AEOLIA_DEV__ !== "undefined" &&
+        __AEOLIA_DEV__ === true &&
+        typeof next !== "function"
+      )
+        throw new TypeError("AEOLIA-DEV-STATE-UPDATE: update() expects next to be a function");
       writeNode(node, next(node.value));
     });
   }

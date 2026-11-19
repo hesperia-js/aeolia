@@ -1,15 +1,36 @@
-import type { Readable, Store, StoreDefinition, StreamStatus } from "./types.ts";
-import { storeKey } from "./identity.ts";
+import type { Readable, Store, StoreCapture, StoreDefinition, StreamStatus } from "./types.ts";
+import { nextValueRevision, storeKey, type StoreIdentity, type ValueRevision } from "./identity.ts";
 import { Fault } from "../fault.ts";
 import type { Unsubscribe } from "../fault.ts";
 import { storeSubscribe } from "../subscribe.ts";
 import { __internal as reactiveInternal, computed, signal, subscribe } from "../reactive.ts";
 import { assertStoreOpen, graphFault } from "./faults.ts";
-import type { GraphRuntimeState, Prediction, StoreRuntime } from "./runtime.ts";
-import { configureDeclaredStore, issue, recordLanding } from "./store-state.ts";
+import type {
+  BoundStreamSessionRuntime,
+  GraphRuntimeState,
+  Prediction,
+  StoreBindingRuntime,
+  StoreRuntime,
+} from "./runtime.ts";
+import { configureDeclaredStore, issue, nextGeneration, recordLanding } from "./store-state.ts";
 import { interact, isLive, scheduleSweep, touch, updateCollectionCandidate } from "./collection.ts";
 import { armStoreTimer } from "./query-request.ts";
-import { runtimeByStore } from "./registry.ts";
+import {
+  inheritTransferCoverage,
+  noteTransferChange,
+  registerTransferReadable,
+  registerTransferStore,
+} from "./query-policy.ts";
+import {
+  assertBindingContextOpen,
+  assertStoreHandlePublished,
+  beginStoreAddress,
+  boundStreamByStore,
+  captureStoreRuntime,
+  changeBoundAddress,
+  endStoreAddress,
+  runtimeByStore,
+} from "./registry.ts";
 
 export const STORE_ABSENT = Symbol("aeolia.store-absent");
 
@@ -20,51 +41,64 @@ export function storeEquals<T>(
 ): boolean {
   if (a === undefined && b === undefined) return true;
   if (a === undefined || b === undefined) return false;
+  const incarnation = runtime.incarnation;
+  const generation = runtime.generation;
+  let equal: boolean;
   try {
-    return runtime.equals(a, b);
+    equal = runtime.equals(a, b);
   } catch {
     graphFault(runtime.graph.__runtime, new Fault("equals", [runtime.key as string]));
-    return false;
+    equal = false;
   }
+  // Equality runs before signal storage; a revoked bound write must not follow its callout.
+  if (
+    runtime.binding !== undefined &&
+    (runtime.disposed || runtime.incarnation !== incarnation || runtime.generation !== generation)
+  )
+    return true;
+  return equal;
 }
 
 interface StoreReadableObservation {
   readonly isValue?: boolean;
   readonly armsFreshness?: boolean;
+  readonly metadata?: boolean;
 }
 
 export function observeStoreReadable<T>(
   runtime: StoreRuntime<T>,
   readable: Readable<unknown>,
   observation: StoreReadableObservation = {},
-): void {
+): readonly [Unsubscribe, Unsubscribe] {
   const state = runtime.graph.__runtime;
-  runtime.readStops.push(
-    reactiveInternal.onActualRead(readable, () => {
-      assertStoreOpen(runtime);
+  const readStop = reactiveInternal.onActualRead(readable, () => {
+    assertStoreOpen(runtime);
+    touch(runtime);
+  });
+  runtime.readStops.push(readStop);
+  const livenessStop = reactiveInternal.onLivenessChange(readable, (live) => {
+    runtime.liveReadableCount += live ? 1 : -1;
+    if (runtime.liveReadableCount < 0) runtime.liveReadableCount = 0;
+    if (observation.metadata === true) {
+      runtime.metadataReadableCount += live ? 1 : -1;
+      if (runtime.metadataReadableCount < 0) runtime.metadataReadableCount = 0;
+    }
+    if (observation.isValue === true) runtime.valueLive = live;
+    if (runtime.stream !== undefined) {
+      if (live) runtime.stream.unobservedSince = undefined;
+      else if (!isLive(runtime)) runtime.stream.unobservedSince = Date.now();
+    }
+    if (live) {
       touch(runtime);
-    }),
-  );
-  runtime.livenessStops.push(
-    reactiveInternal.onLivenessChange(readable, (live) => {
-      runtime.liveReadableCount += live ? 1 : -1;
-      if (runtime.liveReadableCount < 0) runtime.liveReadableCount = 0;
-      if (observation.isValue === true) runtime.valueLive = live;
-      if (runtime.stream !== undefined) {
-        if (live) runtime.stream.unobservedSince = undefined;
-        else if (!isLive(runtime)) runtime.stream.unobservedSince = Date.now();
-      }
-      if (live) {
-        touch(runtime);
-        runtime.onReadableActivation?.();
-        if (observation.armsFreshness === true) armStoreTimer(runtime);
-      }
-      updateCollectionCandidate(runtime);
-      scheduleSweep(state);
-    }),
-  );
+      if (observation.metadata !== true) runtime.onReadableActivation?.();
+      if (observation.armsFreshness === true) armStoreTimer(runtime);
+    }
+    updateCollectionCandidate(runtime);
+    scheduleSweep(state);
+  });
+  runtime.livenessStops.push(livenessStop);
+  return [readStop, livenessStop];
 }
-
 export function subscribeStore<T>(
   runtime: StoreRuntime<T>,
   observer: (value: T) => void,
@@ -72,8 +106,12 @@ export function subscribeStore<T>(
   assertStoreOpen(runtime);
   const presentValue = computed<symbol | T | undefined>(
     () => {
-      if (!runtime.presence.get()) return STORE_ABSENT;
-      return runtime.value.get();
+      runtime.lifecycle.get();
+      if (runtime.disposed || runtime.graph.__runtime.disposed || runtime.binding?.context.disposed)
+        return STORE_ABSENT;
+      const value = runtime.value.get();
+      if (!runtime.store.available.get()) return STORE_ABSENT;
+      return value;
     },
     {
       equals: () => false,
@@ -85,25 +123,52 @@ export function subscribeStore<T>(
   });
 }
 
-export function directWrite<T>(runtime: StoreRuntime<T>, value: T): void {
+export function directWrite<T>(
+  runtime: StoreRuntime<T>,
+  value: T,
+  expectedSession?: BoundStreamSessionRuntime<T>,
+): void {
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
-  interact(runtime.graph.__runtime);
-  issue(runtime);
+  nextGeneration(runtime.generation);
+  if (runtime.stream?.positioned !== undefined) {
+    noteTransferChange(runtime);
+    runtime.stream.positioned.diverged = true;
+  }
+  nextValueRevision(runtime.valueRevision);
+  if (runtime.binding === undefined) {
+    interact(runtime.graph.__runtime);
+    issue(runtime);
+  } else {
+    issue(runtime);
+    interact(runtime.graph.__runtime);
+  }
   // Direct writes issue a generation but intentionally do not abort a request.
   try {
-    recordLanding(runtime, value);
+    recordLanding(runtime, value, undefined, expectedSession);
   } finally {
     armStoreTimer(runtime);
   }
 }
 
+/**
+ * @internal Creates one canonical Store runtime.
+ * @param state - Owning graph runtime.
+ * @param key - Native graph-local Store key.
+ * @param definition - Optional declared Store policy.
+ * @param binding - Optional native binding owner.
+ * @param passive - Defers collection touching until the Store is published.
+ * @returns The canonical native Store runtime.
+ */
 export function makeStore<T>(
   state: GraphRuntimeState<any>,
   key: ReturnType<typeof storeKey>,
   definition?: StoreDefinition<T>,
+  binding?: StoreBindingRuntime,
+  passive = false,
 ): StoreRuntime<T> {
   let runtime!: StoreRuntime<T>;
+  const identity = Object.freeze({}) as StoreIdentity;
   const committed = signal<T | undefined>(definition?.initial, {
     label: `store:${String(key)}:committed`,
     equals: (a, b) => storeEquals(runtime, a, b),
@@ -148,18 +213,56 @@ export function makeStore<T>(
     { equals: (a, b) => storeEquals(runtime, a, b), label: `store:${String(key)}` },
   );
 
+  const available = computed(
+    () => {
+      lifecycle.get();
+      assertStoreOpen(runtime);
+      presence.get();
+      committed.get();
+      predictionStack.get();
+      const revision = runtime.valueRevision;
+      const incarnation = runtime.incarnation;
+      const epoch = state.resetEpoch;
+      reactiveInternal.nativePeek(
+        folded,
+        () =>
+          runtime.valueRevision === revision &&
+          runtime.incarnation === incarnation &&
+          state.resetEpoch === epoch &&
+          !runtime.disposed &&
+          !state.disposed,
+      );
+      assertStoreOpen(runtime);
+      return (
+        runtime.baseAvailable ||
+        reactiveInternal.signalValue(predictionStack).some((prediction) => !prediction.dead)
+      );
+    },
+    { label: `store:${String(key)}:available` },
+  );
+
   const store: Store<T> = {
+    identity,
     key,
     graph: state.graph.id,
     value: folded,
+    available,
     set(value: T): void {
       directWrite(runtime, value);
     },
     update(next: (current: T | undefined) => T): void {
       assertStoreOpen(runtime);
       reactiveInternal.assertWritesAllowed(runtime.committed);
+      nextValueRevision(runtime.valueRevision);
+      nextGeneration(runtime.generation);
+      noteTransferChange(runtime);
       interact(state);
-      directWrite(runtime, next(reactiveInternal.signalValue(runtime.committed)));
+      const addressWrite = beginStoreAddress(runtime);
+      try {
+        directWrite(runtime, next(reactiveInternal.signalValue(runtime.committed)));
+      } finally {
+        endStoreAddress(runtime, addressWrite);
+      }
     },
   };
   Object.defineProperty(store, storeSubscribe, {
@@ -167,8 +270,10 @@ export function makeStore<T>(
     enumerable: false,
     value: (observer: (value: T) => void): Unsubscribe => subscribeStore(runtime, observer),
   });
+  Object.defineProperty(store, "identity", { writable: false, configurable: false });
   runtime = {
     graph: state.graph,
+    identity,
     key,
     store,
     committed,
@@ -184,6 +289,8 @@ export function makeStore<T>(
     requests: new Set(),
     livenessStops: [],
     readStops: [],
+    ...(binding === undefined ? {} : { binding }),
+    incarnation: {},
     streamToken: undefined,
     ...(definition?.initial === undefined ? {} : { initial: definition.initial }),
     equals: definition?.equals ?? Object.is,
@@ -193,7 +300,11 @@ export function makeStore<T>(
     initialSpecified: definition != null,
     equalsSpecified: definition?.equals != null,
     snapshotSpecified: definition?.snapshot != null,
-    hasCommitted: definition != null,
+    baseAvailable: definition != null,
+    hasAcceptedLanding: definition != null,
+    valueRevision: (definition == null ? 0 : 1) as ValueRevision,
+    transferEligible: true,
+    transitioning: false,
     failing: false,
     recoveryDisarmed: false,
     invalidated: false,
@@ -203,6 +314,8 @@ export function makeStore<T>(
     lastInteraction: Date.now(),
     collectionIndex: -1,
     liveReadableCount: 0,
+    metadataReadableCount: 0,
+    progressReadableCount: 0,
     readyWaiterCount: 0,
     valueLive: false,
     dropped: false,
@@ -214,6 +327,7 @@ export function makeStore<T>(
     predictionStack,
     presence,
     folded,
+    available,
     lifecycle,
     errorCell,
     error,
@@ -222,27 +336,103 @@ export function makeStore<T>(
   ])
     reactiveInternal.bindReadable(readable, { graphId: state.graph.id, reportFault: report });
 
+  registerTransferStore(runtime);
+  registerTransferReadable(available, runtime, "available");
   observeStoreReadable(runtime, folded, { isValue: true, armsFreshness: true });
-  observeStoreReadable(runtime, presence);
+  observeStoreReadable(runtime, available, { metadata: true });
   observeStoreReadable(runtime, error, { armsFreshness: true });
   runtimeByStore.set(store, runtime as StoreRuntime<unknown>);
-  if (definition != null) touch(runtime);
+  if (definition != null && !passive) touch(runtime);
   return runtime;
 }
 
+/**
+ * Captures one coherent visible value without tracking or retaining the store.
+ * The frozen result borrows its authored value; it does not clone or freeze it.
+ * @param store - A genuine native store shell or returned query/stream wrapper.
+ * @returns Stable identity/revision/presence, or changed after a reentrant transition.
+ * @throws TypeError for a fabricated store; disposed Fault for a closed lifetime.
+ * Native read, predictor and propagation failures retain their original channel.
+ */
+export function peekStore<T>(store: Store<T>): StoreCapture<T> {
+  assertStoreHandlePublished(store);
+  const runtime = runtimeByStore.get(store) as StoreRuntime<T> | undefined;
+  if (runtime === undefined) throw new TypeError("The value is not an Aeolia store");
+  const bound = boundStreamByStore.get(store);
+  if (bound !== undefined) {
+    assertBindingContextOpen(bound.binding.context);
+    if (
+      bound.phase !== "active" ||
+      bound.session.ended ||
+      runtime.stream?.token !== bound.session.token
+    )
+      throw new TypeError("The bound stream wrapper no longer has active session authority");
+  }
+  return captureStoreRuntime(runtime);
+}
+
+/** Deferred callers validate configuration before admitting this physical shell. */
 export function getOrCreateStore<T>(
   state: GraphRuntimeState<any>,
   key: ReturnType<typeof storeKey>,
   definition?: StoreDefinition<T>,
+  binding?: StoreBindingRuntime,
+  acquire = true,
 ): StoreRuntime<T> {
   interact(state);
-  const existing = state.stores.get(String(key));
+  if (binding?.context.disposed) throw new Fault("disposed", [String(state.graph.id)]);
+  const existing =
+    binding === undefined ? state.stores.get(String(key)) : binding.stores.get(String(key));
   if (existing != null) {
+    inheritTransferCoverage(existing as StoreRuntime<T>);
     if (definition != null) configureDeclaredStore(existing as StoreRuntime<T>, definition);
-    touch(existing);
+    if (acquire) admitStore(existing);
     return existing as StoreRuntime<T>;
   }
-  const runtime = makeStore(state, key, definition);
-  state.stores.set(String(key), runtime as StoreRuntime<unknown>);
+  const runtime = makeStore(state, key, definition, binding);
+  if (!acquire && definition === undefined) {
+    noteTransferChange(runtime);
+    runtime.incarnation = undefined;
+    runtime.dropped = true;
+  }
+  inheritTransferCoverage(runtime);
+  changeBoundAddress(runtime);
+  if (binding !== undefined) binding.stores.set(String(key), runtime as StoreRuntime<unknown>);
+  state.stores.set(
+    binding === undefined ? String(key) : runtime.identity,
+    runtime as StoreRuntime<unknown>,
+  );
+  if (acquire) admitStore(runtime);
   return runtime;
+}
+
+/** Establish a fresh off-graph incarnation without collection or address effects. */
+export function admitDetachedStore<T>(runtime: StoreRuntime<T>): object {
+  assertStoreOpen(runtime);
+  const state = runtime.graph.__runtime;
+  const graphKey = runtime.binding === undefined ? String(runtime.key) : runtime.identity;
+  if (
+    state.stores.get(graphKey) === runtime ||
+    runtime.binding?.stores.get(String(runtime.key)) === runtime ||
+    runtime.baseAvailable ||
+    runtime.requests.size > 0 ||
+    runtime.callers.length > 0
+  )
+    throw new TypeError("Only an unexposed empty Store can be passively admitted");
+  if (runtime.incarnation === undefined || runtime.dropped) {
+    noteTransferChange(runtime);
+    runtime.incarnation = {};
+    runtime.dropped = false;
+  }
+  return runtime.incarnation;
+}
+
+/** Establish current authority only after the native owner accepts acquisition. */
+export function admitStore<T>(runtime: StoreRuntime<T>): void {
+  assertStoreOpen(runtime);
+  if (runtime.incarnation === undefined || runtime.dropped) noteTransferChange(runtime);
+  changeBoundAddress(runtime);
+  if (runtime.incarnation === undefined) runtime.incarnation = {};
+  runtime.dropped = false;
+  touch(runtime);
 }
