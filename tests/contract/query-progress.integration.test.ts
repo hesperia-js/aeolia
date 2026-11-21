@@ -127,6 +127,92 @@ afterEach(() => {
 });
 
 describe("query progress", () => {
+  it("collects an undispatched request superseded by an active progress observer", async () => {
+    let calls = 0;
+    let replacement: Promise<unknown> | undefined;
+    const query = createQuery({
+      name: "progress.pre-dispatch-replacement",
+      key: () => "one",
+      fetch: async () => ++calls + 1,
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "progress-pre-dispatch", operations: { query } }),
+      idleMs: 2,
+    });
+    const store = graph.api.query(undefined, { initial: 1 });
+    const stop = observeQueryProgress(store).subscribe(({ kind, snapshot }) => {
+      if (kind === "lifecycle" && snapshot.status === "active" && replacement === undefined)
+        replacement = store.revalidate();
+    });
+    await store.revalidate();
+    await replacement;
+    expect(calls).toBe(1);
+    expect(store.value.peek()).toBe(2);
+    stop();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    jest.advanceTimersByTime(100);
+    expect(store.available.peek()).toBe(false);
+    graph.dispose();
+  });
+
+  for (const kind of ["raw", "bound"] as const) {
+    it(`interrupts displaced ${kind} progress during V2 adoption`, async () => {
+      const held = deferred<number>();
+      let report!: (value: string) => void;
+      const query = createQuery<string, number, string, string>({
+        name: `progress.v2.${kind}`,
+        key: (input) => input,
+        fetch: (_input, options) => {
+          report = options.reportProgress;
+          return held.promise;
+        },
+      });
+      const contract = defineContract({ namespace: `progress-v2-${kind}`, operations: { query } });
+      const source = createGraph({ contract });
+      const target = createGraph({ contract });
+      const sourceBinding = bindOperation(source, query, {
+        context: createBindingContext(source),
+        profile: {},
+        fetch: async () => 17,
+      });
+      const targetBinding = bindOperation(target, query, {
+        context: createBindingContext(target),
+        profile: {},
+        fetch: (_input, options) => {
+          report = options.reportProgress;
+          return held.promise;
+        },
+      });
+      const sourceStore =
+        kind === "raw" ? source.api.query("one", { initial: 17 }) : sourceBinding.member("one");
+      await sourceStore.ready;
+      const store = kind === "raw" ? target.api.query("one") : targetBinding.member("one");
+      const events: string[] = [];
+      const stop = observeQueryProgress(store).subscribe(({ kind: eventKind, snapshot }) => {
+        if (eventKind === "lifecycle") events.push(snapshot.status);
+      });
+      const reference = "query";
+      const image = snapshot(source, {
+        version: 2,
+        bindings: [{ binding: sourceBinding, reference }],
+      });
+      adopt(target, image, { bindings: [{ binding: targetBinding, reference }] });
+      report("late");
+      held.resolve(19);
+      await held.promise;
+      await Promise.resolve();
+      expect(store.value.peek()).toBe(17);
+      expect(store.pending.peek()).toBe(false);
+      expect(observeQueryProgress(store).capture()).toMatchObject({
+        status: "interrupted",
+        reportRevision: 0,
+      });
+      expect(events.filter((status) => status === "interrupted")).toHaveLength(1);
+      stop();
+      source.dispose();
+      target.dispose();
+    });
+  }
   for (const kind of ["raw", "bound"] as const) {
     it(`enrolls both ${kind} call listeners before synchronous reports`, async () => {
       let calls = 0;

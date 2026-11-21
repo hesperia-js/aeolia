@@ -567,6 +567,72 @@ describe("genuine context-bound stream sessions", () => {
   });
 });
 
+it.each(["raw graph", "bound context", "bound graph"] as const)(
+  "retains a caller unlink failure through delayed iterator cleanup for %s",
+  async (owner) => {
+    const caller = new AbortController();
+    const cause = new Error("listener unlink failed");
+    const nativeRemove = caller.signal.removeEventListener.bind(caller.signal);
+    let removals = 0;
+    Object.defineProperty(caller.signal, "removeEventListener", {
+      value(...args: Parameters<AbortSignal["removeEventListener"]>) {
+        removals += 1;
+        nativeRemove(...args);
+        throw cause;
+      },
+    });
+    const reading = Promise.withResolvers<void>();
+    const read = Promise.withResolvers<IteratorResult<number>>();
+    const close = Promise.withResolvers<IteratorResult<number>>();
+    let returns = 0;
+    const stream = createStream({
+      name: "unlink",
+      key: () => "one",
+      open: (): AsyncIterable<number> => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              reading.resolve();
+              return read.promise;
+            },
+            return() {
+              returns += 1;
+              read.resolve({ done: true, value: undefined });
+              return close.promise;
+            },
+          };
+        },
+      }),
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "unlink-failure", operations: { stream } }),
+    });
+    const context = createBindingContext(graph);
+    const member =
+      owner === "raw graph"
+        ? graph.api.stream
+        : bindStream(graph, stream, graph.api.stream, { context }).member;
+    try {
+      member(undefined, { abortSignal: caller.signal });
+      await reading.promise;
+      const retired = (owner === "bound context" ? context : graph).retire();
+      await expectPending(retired);
+      expect(removals).toBe(1);
+      expect(returns).toBe(1);
+      close.resolve({ done: true, value: undefined });
+      await expect(retired).rejects.toBe(cause);
+      await expect(graph.retire()).rejects.toBe(cause);
+      if (owner !== "raw graph") await expect(context.retire()).rejects.toBe(cause);
+      expect(removals).toBe(1);
+      expect(returns).toBe(1);
+    } finally {
+      read.resolve({ done: true, value: undefined });
+      close.resolve({ done: true, value: undefined });
+      await graph.retire().catch(() => undefined);
+    }
+  },
+);
+
 it("unlinks a real caller signal whose registration completes after reentrant reset", async () => {
   const backend = testBackend();
   const stream = createStream({

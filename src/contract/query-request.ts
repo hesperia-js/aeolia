@@ -628,7 +628,12 @@ export function startQueryRequest<T>(
         request.generation !== runtime.generation ||
         request.resetEpoch !== state.resetEpoch
       ) {
-        finishPhysicalWork(original);
+        try {
+          if (request.superseded && !request.settled)
+            settleQueryFailure(runtime, request, controller.signal.reason);
+        } finally {
+          finishPhysicalWork(original);
+        }
         return request;
       }
       fetched = nativeApply(fetch, caller.query, [caller.input, options]);

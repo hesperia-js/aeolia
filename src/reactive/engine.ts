@@ -2119,6 +2119,8 @@ export function transferPrepare(
     },
     current: (): boolean => {
       if (published || !witness.current()) return false;
+      for (let index = 0; index < preparedWrites.length; index += 1)
+        ensureWritesAllowed(preparedWrites[index]!.node);
       for (let index = 0; index < preparedAdoptions.length; index += 1) {
         const semanticCurrent = preparedAdoptions[index]!.baseline.semanticCurrent;
         if (semanticCurrent !== undefined && !semanticCurrent()) return false;

@@ -121,7 +121,7 @@ export interface TransferCallerRecord {
   readonly runtime: StoreRuntime<any>;
   readonly store: QueryStore<any, any>;
 }
-const sourceLists = new WeakMap<object, TransferSourceRegistration[]>();
+const rawSources = new WeakMap<Graph, Map<object, TransferSourceRegistration>>();
 interface WorkMembership {
   readonly set: Set<object>;
   rows: object[];
@@ -203,19 +203,14 @@ export function registerTransferSource(source: object, info: TransferSourceRegis
   if (info.binding !== undefined) {
     sources.set(info.binding, info);
     book(info.binding);
+    return;
   }
-  const list = sourceLists.get(info.graph) ?? [];
-  if (
-    !list.some(
-      (entry) =>
-        entry.kind === info.kind &&
-        entry.definition === info.definition &&
-        entry.binding === info.binding,
-    )
-  ) {
-    list.push(info);
-    sourceLists.set(info.graph, list);
+  let graphSources = rawSources.get(info.graph);
+  if (graphSources === undefined) {
+    graphSources = new Map();
+    rawSources.set(info.graph, graphSources);
   }
+  if (!graphSources.has(info.definition)) graphSources.set(info.definition, info);
 }
 /** @internal Registers an actual native Store and its canonical reactive facets. */
 export function registerTransferStore<T>(runtime: StoreRuntime<T>): void {
@@ -256,16 +251,14 @@ export function registerTransferStoreHandle<T>(
   nativeSource?: TransferSourceRegistration,
 ): void {
   stores.set(handle, runtime);
-  const entries = sourceLists.get(runtime.graph);
+  const definition = runtime.source?.query ?? runtime.streamSource?.stream;
   const info =
     nativeSource ??
-    entries?.find(
-      (entry) =>
-        entry.binding === runtime.binding &&
-        (runtime.binding !== undefined ||
-          entry.definition === runtime.source?.query ||
-          entry.definition === runtime.streamSource?.stream),
-    );
+    (runtime.binding === undefined
+      ? definition === undefined
+        ? undefined
+        : rawSources.get(runtime.graph)?.get(definition)
+      : sources.get(runtime.binding));
   if (info !== undefined) storeSources.set(handle, info);
 }
 /** @internal Registers a real caller/progress facet against its owning physical Store. */
@@ -347,11 +340,6 @@ export function transferStore(handle: object): StoreRuntime<any> | undefined {
 export function transferReadableStore(readable: object): StoreRuntime<any> | undefined {
   return readables.get(readable);
 }
-/** @internal Sources actually constructed by the graph and binding owners. */
-export function transferGraphSources(graph: Graph): readonly TransferSourceRegistration[] {
-  return sourceLists.get(graph) ?? [];
-}
-
 /** @internal Pending actual native argument/key/options admission. */
 export interface TransferAdmission {
   readonly state: GraphRuntimeState<any>;
@@ -614,14 +602,20 @@ export interface TransferNotifications {
 }
 /** Preallocated native-owned result of a successful final seal. */
 export interface TransferCommit {
-  /** Publishes once on the same synchronous stack as the successful seal. */
+  /**
+   * Publishes once immediately after a successful seal on the same synchronous stack.
+   * Keep authored callouts and write-permission changes outside this interval.
+   */
   publish(): void;
   /** Preallocated delivery port. */
   readonly notifications: TransferNotifications;
 }
 /** One pending, discardable native publication. */
 export interface TransferPublication {
-  /** Returns the exact prepared commit if all native witnesses are still current. */
+  /**
+   * Returns the exact prepared commit if all native witnesses are still current.
+   * @throws If staged State writes are forbidden in the current scope.
+   */
   seal(): TransferCommit | undefined;
   /** Releases pending registration custody; published ownership is retained. */
   discard(): void;

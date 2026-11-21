@@ -364,6 +364,7 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
       }
       if (binding?.kind === "stream" && boundAddressOccupied(binding, key)) return undefined;
       const operation = beginBindingAddress(binding, key);
+      let notifyProgress: (() => void) | undefined;
       try {
         const definition = binding === undefined ? state.declaredStores.get(key) : undefined;
         const runtime = getOrCreateStore(state, storeKey(key), definition, binding, false);
@@ -426,9 +427,10 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
         )
           return undefined;
         const next = nextValueRevision(before);
-        const adoptedGeneration = nextGeneration(runtime.generation, foreignGeneration);
+        const adoptionIssue = prepareAdoptionIssue(runtime, foreignGeneration);
+        const adoptedGeneration = adoptionIssue.generation;
         reactiveInternal.assertWritesAllowed(runtime.committed);
-        runtime.generation = adoptedGeneration;
+        adoptionIssue.publish();
         let stamp:
           | { readonly identity: StoreIdentity; readonly valueRevision: ValueRevision }
           | undefined;
@@ -465,12 +467,14 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
           },
         );
         if (!landed || stamp === undefined) throw new Fault("snapshot", [key]);
+        notifyProgress = adoptionIssue.notify;
         touch(runtime);
         writeAllStatuses(runtime);
         armStoreTimer(runtime);
         return stamp;
       } finally {
         endBindingAddress(binding, key, operation);
+        notifyProgress?.();
       }
     },
   };
@@ -861,13 +865,25 @@ function normalizeMutationCall(
   return { input: call.input, options: call.options };
 }
 
-function closePendingPositionedStores(owner: GraphRuntimeState<any> | BindingContextRuntime): void {
-  const pending = owner.pendingPositionedStores;
-  if (pending === undefined) return;
-  const failures: unknown[] = [];
-  for (const runtime of [...pending]) {
+function capturePendingPositionedStores(owner: GraphRuntimeState<any> | BindingContextRuntime) {
+  return [...(owner.pendingPositionedStores ?? [])].flatMap((runtime) => {
     const session = runtime.stream;
-    if (session?.positioned?.preparation?.published !== false) continue;
+    return session?.positioned?.preparation?.published === false ? [{ runtime, session }] : [];
+  });
+}
+
+function closePendingPositionedStores(
+  owner: GraphRuntimeState<any> | BindingContextRuntime,
+  pending = capturePendingPositionedStores(owner),
+): void {
+  const failures: unknown[] = [];
+  for (const { runtime, session } of pending) {
+    if (
+      !owner.pendingPositionedStores?.has(runtime) ||
+      runtime.stream !== session ||
+      session.positioned?.preparation?.published !== false
+    )
+      continue;
     try {
       discardPositionedStoreSession(runtime, session);
     } catch (cause) {
@@ -883,6 +899,7 @@ function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?:
   if (state.disposed) return;
   const cancellation = reason === undefined ? new AbortError("Graph work was canceled.") : reason;
   const operation = state.resetOperation;
+  const pendingPositioned = capturePendingPositionedStores(state);
   const controllers = [...state.activeControllers];
   const controllerSet = new Set(controllers);
   const resetRequests =
@@ -926,7 +943,7 @@ function cancelPending<C extends Contract>(state: GraphRuntimeState<C>, reason?:
       endStream(runtime, session, "closed", undefined, { abortReason: cancellation });
     });
   for (const cancel of projections) attempt(() => cancel(cancellation));
-  attempt(() => closePendingPositionedStores(state));
+  attempt(() => closePendingPositionedStores(state, pendingPositioned));
   if (failures.length > 0)
     throw new AggregateError(failures, "Several graph cancellation operations failed");
 }

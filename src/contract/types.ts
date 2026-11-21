@@ -537,8 +537,10 @@ export interface QueryProgressObservation<P> {
   capture(): QueryProgressSnapshot<P>;
 
   /**
-   * Subscribe to one current seed followed by each newer report and lifecycle
-   * transition in FIFO, non-reentrant order. Past events are not replayed.
+   * Subscribe to one current seed followed by eligible reports and lifecycle
+   * transitions in FIFO, non-reentrant order. Completion and failure preserve
+   * queued events; replacement or interruption discards queued events from the
+   * displaced execution. Past events are not replayed.
    * A throwing seed callback removes this subscription and throws synchronously
    * unless the seed was deferred by an active delivery, in which case the fault
    * is reported through the graph continuation channel. Later delivery failures
