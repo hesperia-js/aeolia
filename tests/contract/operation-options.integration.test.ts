@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import {
+  bindOperation,
+  createBindingContext,
+  predictionFor,
+  profileEffect,
   createGraph,
   createMutation,
   createQuery,
@@ -134,6 +138,246 @@ describe("branded operation options", () => {
       expect(call.aborted).toBe(true);
       backend.resolve(call, "saved");
       await expect(task).resolves.toBe("saved");
+    } finally {
+      graph.dispose();
+    }
+  });
+});
+
+describe("bound mutation options and capability validation", () => {
+  it("normalizes branded empty/options-only forms and preserves explicit option-like business input", async () => {
+    const backend = testBackend();
+    const empty = createMutation({
+      name: "empty",
+      run: backend.perform<void, string>("empty"),
+      affects: [],
+    });
+    const business = createMutation({
+      name: "business",
+      run: backend.perform<{ readonly optimistic: string }, string>("business"),
+      affects: [],
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "bound-options", operations: { empty, business } }),
+    });
+    try {
+      const context = createBindingContext(graph);
+      const inputless = bindOperation(graph, empty, {
+        context,
+        profile: {},
+        run: empty.run,
+        effects: [],
+      });
+      const required = bindOperation(graph, business, {
+        context,
+        profile: {},
+        run: business.run,
+        effects: [],
+      });
+      const first = inputless.member(queryOptions({}));
+      expect(backend.pending("empty")[0]!.input).toBeUndefined();
+      backend.resolve(backend.pending("empty")[0]!, "one");
+      await first;
+      const original = new AbortController();
+      const selected = new AbortController();
+      const second = inputless.member(queryOptions({ abortSignal: original.signal }), {
+        abortSignal: selected.signal,
+      });
+      const call = backend.pending("empty")[0]!;
+      original.abort();
+      expect(call.aborted).toBe(false);
+      selected.abort();
+      expect(call.aborted).toBe(true);
+      backend.resolve(call, "two");
+      await second;
+      const data = { optimistic: "business data" };
+      const third = required.member(data, {});
+      expect(backend.pending("business")[0]!.input).toBe(data);
+      backend.resolve(backend.pending("business")[0]!, "three");
+      await third;
+      const structural: AbortSignal = {
+        aborted: false,
+        onabort: null,
+        reason: undefined,
+        addEventListener: selected.signal.addEventListener.bind(selected.signal),
+        removeEventListener: selected.signal.removeEventListener.bind(selected.signal),
+        dispatchEvent: selected.signal.dispatchEvent.bind(selected.signal),
+        throwIfAborted: () => undefined,
+      };
+      const fourth = inputless.member({ abortSignal: structural });
+      expect(backend.pending("empty")[0]!.aborted).toBe(false);
+      backend.resolve(backend.pending("empty")[0]!, "four");
+      await fourth;
+    } finally {
+      graph.dispose();
+    }
+  });
+
+  it.each(["inherited", "non-enumerable"] as const)(
+    "reads actual %s option fields once for cancellation and physical overrides",
+    async (shape) => {
+      const backend = testBackend();
+      let selections = 0;
+      let producerCalls = 0;
+      const reads: Record<string, number> = {};
+      const structural = <T extends object>(data: T): T => {
+        const owner = {};
+        for (const field of Object.keys(data))
+          Object.defineProperty(owner, field, {
+            enumerable: shape === "inherited",
+            get: () => {
+              reads[field] = (reads[field] ?? 0) + 1;
+              return Reflect.get(data, field);
+            },
+          });
+        return (shape === "inherited" ? Object.create(owner) : owner) as T;
+      };
+      const query = createQuery({ name: "query", key: () => "same", fetch: async () => 1 });
+      const mutation = createMutation({
+        name: "save",
+        run: backend.perform<void, string>("save"),
+        affects: [
+          affects(query, {
+            select: () => {
+              selections += 1;
+              return undefined;
+            },
+          }),
+        ],
+      });
+      const graph = createGraph({
+        contract: defineContract({
+          namespace: "structural-bound-options",
+          operations: { query, mutation },
+        }),
+      });
+      try {
+        const context = createBindingContext(graph);
+        const first = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+        const second = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+        const a = first.member(undefined, { initial: 1 });
+        const b = second.member(undefined, { initial: 2 });
+        const effect = profileEffect(mutation, 0, query, {
+          prepare: (phase) => phase.existing(undefined).map((target) => phase.prepare(target)),
+          settle: () => [],
+        });
+        const bound = bindOperation(graph, mutation, {
+          context,
+          profile: {},
+          effects: [effect],
+          run: mutation.run,
+        });
+        const override = predictionFor(mutation, first.target(a)!, () => {
+          producerCalls += 1;
+          return 10;
+        });
+        const canceled = new AbortController();
+        canceled.abort();
+        const denied = bound.member(
+          undefined,
+          structural({ abortSignal: canceled.signal, optimistic: [override] }),
+        );
+        expect(backend.calls).toHaveLength(0);
+        expect(selections).toBe(0);
+        expect(producerCalls).toBe(0);
+        await expect(denied).rejects.toMatchObject({ name: "AbortError" });
+        expect(reads).toEqual({ abortSignal: 1, optimistic: 1 });
+        expect([a.value.get(), b.value.get()]).toEqual([1, 2]);
+        const live = new AbortController();
+        const running = bound.member(
+          undefined,
+          structural({ abortSignal: live.signal, optimistic: [override] }),
+        );
+        expect(reads).toEqual({ abortSignal: 2, optimistic: 2 });
+        expect([a.value.get(), b.value.get()]).toEqual([10, 2]);
+        expect(producerCalls).toBeGreaterThan(0);
+        expect(backend.calls).toHaveLength(1);
+        backend.resolve(backend.pending("save")[0]!, "saved");
+        await expect(running).resolves.toBe("saved");
+        expect(selections).toBe(2);
+      } finally {
+        graph.dispose();
+      }
+    },
+  );
+
+  it("rejects fabricated, foreign and duplicate overrides before selectors or run, while equal keys remain distinct", async () => {
+    let selections = 0;
+    let runs = 0;
+    const query = createQuery({ name: "query", key: () => "same", fetch: async () => 1 });
+    const mutation = createMutation({
+      name: "mutation",
+      affects: [
+        affects(query, {
+          select: () => {
+            selections += 1;
+            return undefined;
+          },
+        }),
+      ],
+      run: async () => {
+        runs += 1;
+        return "ok";
+      },
+    });
+    const other = createMutation({
+      name: "other",
+      affects: [affects(query, {})],
+      run: async () => "other",
+    });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "checked-overrides",
+        operations: { query, mutation, other },
+      }),
+    });
+    try {
+      const context = createBindingContext(graph);
+      const first = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+      const second = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+      const foreign = bindOperation(graph, query, {
+        context: createBindingContext(graph),
+        profile: {},
+        fetch: query.fetch,
+      });
+      const a = first.member(undefined, { initial: 1 });
+      const b = second.member(undefined, { initial: 2 });
+      const c = foreign.member(undefined, { initial: 3 });
+      const effect = profileEffect(mutation, 0, query, {
+        prepare: (phase) => phase.existing(undefined).map((target) => phase.prepare(target)),
+        settle: () => [],
+      });
+      const profile = {};
+      const options = { context, profile, run: mutation.run, effects: [effect] };
+      const bound = bindOperation(graph, mutation, options);
+      const invoke = bound.member as (...args: unknown[]) => Promise<unknown>;
+      const p = predictionFor(mutation, first.target(a)!, () => 10);
+      const q = predictionFor(mutation, second.target(b)!, () => 20);
+      const invalid: unknown[] = [
+        {},
+        Object.create(p),
+        predictionFor(other, first.target(a)!, () => 4),
+        predictionFor(mutation, foreign.target(c)!, () => 4),
+      ];
+      for (const optimistic of invalid)
+        expect(() => invoke(undefined, { optimistic: [optimistic] })).toThrow(TypeError);
+      expect(() => invoke(undefined, { optimistic: [p, p] })).toThrow(TypeError);
+      expect(() => invoke(undefined, { optimistic: new Map() })).toThrow(TypeError);
+      expect(() => invoke(undefined, { abortSignal: {} })).toThrow(TypeError);
+      expect(() => predictionFor(mutation, Object.create(first.target(a)!), () => 8)).toThrow(
+        TypeError,
+      );
+      expect(() => bindOperation(graph, mutation, options)).toThrow(TypeError);
+      expect(() =>
+        bindOperation(graph, mutation, { ...options, profile: {}, effects: [] }),
+      ).toThrow(TypeError);
+      expect(() =>
+        profileEffect(mutation, 1, query, { prepare: () => [], settle: () => [] }),
+      ).toThrow(TypeError);
+      expect([selections, runs]).toEqual([0, 0]);
+      await bound.member(undefined, { optimistic: [p, q] });
+      expect([a.value.get(), b.value.get(), c.value.get()]).toEqual([10, 20, 3]);
+      expect([selections, runs]).toEqual([2, 1]);
     } finally {
       graph.dispose();
     }

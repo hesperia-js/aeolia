@@ -11,7 +11,7 @@ export function validateContract(contract: Contract): void {
 }
 
 interface ContractWalk {
-  readonly queries: Set<QueryDefinition<any, any, any>>;
+  readonly queries: Set<QueryDefinition<any, any, any, any>>;
   readonly mutations: MutationDefinition<any, any>[];
 }
 
@@ -32,7 +32,7 @@ export function validateContractTree(tree: OperationTree): ContractWalk {
   const storeNames = new Set<string>();
   const active = new WeakSet<object>();
   const seen = new WeakSet<object>();
-  const queries = new Set<QueryDefinition<any, any, any>>();
+  const queries = new Set<QueryDefinition<any, any, any, any>>();
   const mutations: MutationDefinition<any, any>[] = [];
 
   const visit = (node: unknown): void => {

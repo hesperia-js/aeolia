@@ -1,0 +1,9 @@
+{
+  "name": "@aeolia/build-tools",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "tsdown": "0.23.0",
+    "typescript": "7.0.2"
+  }
+}

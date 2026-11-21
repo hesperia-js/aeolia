@@ -42,6 +42,13 @@ bun run test:package
 On Linux, `bunx playwright install --with-deps chromium` also installs the browser's
 system dependencies. The command can run inside a container, but does not create one.
 
+To use a specific compatible Chrome executable for the package check, set
+`AEOLIA_CHROME_EXECUTABLE_PATH` to its absolute path. If the variable is set,
+the runner rejects an empty, relative, missing, or non-file path. A launch failure
+is reported without falling back to Playwright's installed Chromium. To require an
+exact browser runtime version, set `AEOLIA_CHROME_EXPECTED_VERSION` alongside the
+executable path. The runner checks the version before either browser workflow.
+
 `test:package` builds Aeolia, runs the existing export and runtime-name checks,
 packs an archive, and installs it in a fresh directory under the operating system's
 temporary directory. To check an archive that has already been built, run
@@ -55,14 +62,31 @@ and uses offline mode.
 
 The check copies the existing consumer type fixtures into that directory and
 checks them with declaration checking enabled and no ambient package types.
-One JavaScript workflow imports all four public entry points and runs in Bun,
-Node, and Chromium. It verifies cross-entry signal propagation, a query refreshed
-by a mutation, reset through a preserved handle, and disposal of pending work.
-Chromium loads the installed JavaScript through an import map without rebundling it.
+The type fixtures run under the default and development conditions. Both resolve
+the same declarations.
 
-A deliberate invalid query declaration also verifies that Node's source-map support
-reports the original TypeScript line that threw. This checks the packed maps, not
-just whether map files exist. Runtime failures and missing prerequisites fail the
+The archive includes the default `dist/` profile and the development profile under
+`dist/development/`. The `development` condition uses the existing `aeolia`,
+`aeolia/reactive`, `aeolia/contract`, and `aeolia/testing` specifiers.
+
+The installed consumer runs under Bun and Node with default package conditions and
+under both runtimes with the `development` condition. Each run checks `State.update`
+behavior and verifies that root, reactive, and contract imports share one runtime. It
+exercises the test backend through a Graph created by the contract entry point.
+The workflow retains cross-entry signal propagation, query refresh after a
+mutation, reset through a preserved handle, and disposal of pending work.
+Chromium runs the same workflow against the default and development routes from the
+installed manifest, using separate import maps that point to actual files in that
+one archive.
+
+The runner checks executable `.js` bytes for development-marker removal. It checks
+that the diagnostic appears only in the development profile. It does not scan
+source maps, whose `sourcesContent` may retain authored code.
+
+The existing invalid query declaration still maps to its TypeScript throw line.
+The development `State.update` diagnostic maps to its TypeScript throw line too.
+The runner follows real exceptions through the packed maps instead of checking
+only that map files exist. Runtime failures and missing prerequisites fail the
 command; temporary files and the browser are cleaned up on success or failure.
 
 Run this command before a release. `prepublishOnly` also runs it when publishing

@@ -6,6 +6,10 @@ export function publishStreamEvent<T>(
   session: StreamSession<T>,
   event: StreamEvent<T>,
 ): void {
+  if (event.kind === "value" && event.hasPosition === true) {
+    session.position = event.position;
+    session.hasPosition = true;
+  }
   const listeners = Array.from(session.listeners);
   for (const listener of listeners) {
     if (!session.listeners.has(listener)) continue;

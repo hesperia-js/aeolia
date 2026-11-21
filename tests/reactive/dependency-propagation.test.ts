@@ -1,6 +1,14 @@
 import { describe, expect, it } from "bun:test";
 
-import { Signal } from "../../src/index.ts";
+import {
+  Signal,
+  captureReactiveConstruction,
+  createGraph,
+  defineContract,
+  prepareRequiredTransferAdoption,
+  prepareRequiredTransferCapture,
+} from "../../src/index.ts";
+import type { ClosedEncodedValue, RequiredTransferCodec } from "../../src/index.ts";
 
 describe("canonical Signals graph behavior", () => {
   it("settles an uneven reconverging graph exactly once per pull", () => {
@@ -308,5 +316,203 @@ describe("canonical Signals graph behavior", () => {
     route.set("primary");
     expect(selected.get()).toBe(30);
     expect(primaryRuns).toBe(2);
+  });
+
+  it("refuses required adoption when a browser dependency conflicts with its cached Computed", async () => {
+    const contract = defineContract({
+      namespace: "required-transfer-browser-dependency",
+      operations: {},
+    });
+    const sourceGraph = createGraph({ contract });
+    const targetGraph = createGraph({ contract });
+    const codec: RequiredTransferCodec = {
+      encodeValue: (value) => value as ClosedEncodedValue,
+      encodeFailure: (cause) => String(cause),
+      decodeValue: (value) => value,
+      decodeFailure: (failure) => new Error(String(failure)),
+    };
+    let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
+    let capturePublished = false;
+
+    try {
+      const sourceState = new Signal.State(1);
+      const sourceDerived = new Signal.Computed(() => sourceState.get() * 2);
+      const sourceServerState = new Signal.State("server");
+      expect(sourceDerived.get()).toBe(2);
+      const sourceDerivedConstruction = captureReactiveConstruction(sourceDerived);
+      const sourceServerConstruction = captureReactiveConstruction(sourceServerState);
+      capture = prepareRequiredTransferCapture({
+        graphs: [sourceGraph],
+        roots: [
+          { source: sourceDerived, construction: sourceDerivedConstruction },
+          { source: sourceServerState, construction: sourceServerConstruction },
+        ],
+        codec,
+      });
+      const captureCommit = capture.seal();
+      if (captureCommit === undefined) throw new Error("The required capture did not seal");
+      captureCommit.publish();
+      capturePublished = true;
+      captureCommit.notifications.deliver();
+      await capture.retired;
+
+      const targetState = new Signal.State(1);
+      let targetDerivedRuns = 0;
+      const targetDerived = new Signal.Computed(() => {
+        targetDerivedRuns += 1;
+        return targetState.get() * 2;
+      });
+      const targetServerState = new Signal.State("browser");
+      const targetStateConstruction = captureReactiveConstruction(targetState);
+      const targetDerivedConstruction = captureReactiveConstruction(targetDerived);
+      const targetServerConstruction = captureReactiveConstruction(targetServerState);
+      targetState.set(5);
+
+      const image = capture.image;
+      const derivedSlot = image.roots[0]!;
+      const derivedRow = image.nodes.find((node) => node.slot === derivedSlot);
+      if (derivedRow === undefined) throw new Error("The required computed node is missing");
+      const sourceStateSlot = derivedRow.sources[0];
+      if (sourceStateSlot === undefined) throw new Error("The computed dependency is missing");
+      const serverStateSlot = image.roots[1]!;
+      expect(() =>
+        prepareRequiredTransferAdoption(image, {
+          graphs: [targetGraph],
+          sources: [],
+          reactive: [
+            { slot: sourceStateSlot, target: targetState, construction: targetStateConstruction },
+            { slot: derivedSlot, target: targetDerived, construction: targetDerivedConstruction },
+            {
+              slot: serverStateSlot,
+              target: targetServerState,
+              construction: targetServerConstruction,
+            },
+          ],
+          codec,
+          mappedStateWrites: [],
+        }),
+      ).toThrow(TypeError);
+
+      expect(targetState.get()).toBe(5);
+      expect(targetDerivedRuns).toBe(0);
+      expect(targetServerState.get()).toBe("browser");
+      expect(targetDerived.get()).toBe(10);
+      expect(targetDerivedRuns).toBe(1);
+    } finally {
+      if (!capturePublished) capture?.discard();
+      if (capture !== undefined)
+        await capture.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      sourceGraph.dispose();
+      targetGraph.dispose();
+    }
+  });
+
+  it("preserves an already-run browser Computed during a compatible required publication", async () => {
+    const contract = defineContract({
+      namespace: "required-transfer-warm-browser-cache",
+      operations: {},
+    });
+    const sourceGraph = createGraph({ contract });
+    const targetGraph = createGraph({ contract });
+    const codec: RequiredTransferCodec = {
+      encodeValue: (value) => value as ClosedEncodedValue,
+      encodeFailure: (cause) => String(cause),
+      decodeValue: (value) => value,
+      decodeFailure: (failure) => new Error(String(failure)),
+    };
+    let capture: ReturnType<typeof prepareRequiredTransferCapture> | undefined;
+    let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+    let capturePublished = false;
+    let adoptionPublished = false;
+
+    try {
+      const sourceState = new Signal.State(1);
+      const sourceDerived = new Signal.Computed(() => sourceState.get() * 2);
+      const sourceServerState = new Signal.State("server");
+      expect(sourceDerived.get()).toBe(2);
+      capture = prepareRequiredTransferCapture({
+        graphs: [sourceGraph],
+        roots: [
+          { source: sourceDerived, construction: captureReactiveConstruction(sourceDerived) },
+          {
+            source: sourceServerState,
+            construction: captureReactiveConstruction(sourceServerState),
+          },
+        ],
+        codec,
+      });
+      const captureCommit = capture.seal();
+      if (captureCommit === undefined) throw new Error("The required capture did not seal");
+      captureCommit.publish();
+      capturePublished = true;
+      captureCommit.notifications.deliver();
+      await capture.retired;
+
+      const targetState = new Signal.State(1);
+      let targetRuns = 0;
+      const targetDerived = new Signal.Computed(() => {
+        targetRuns += 1;
+        return targetState.get() * 2;
+      });
+      const targetServerState = new Signal.State("browser");
+      const targetStateConstruction = captureReactiveConstruction(targetState);
+      const targetDerivedConstruction = captureReactiveConstruction(targetDerived);
+      const targetServerConstruction = captureReactiveConstruction(targetServerState);
+      expect(targetDerived.get()).toBe(2);
+      targetState.set(5);
+      expect(targetDerived.get()).toBe(10);
+      expect(targetRuns).toBe(2);
+
+      const image = capture.image;
+      const derivedSlot = image.roots[0]!;
+      const derivedRow = image.nodes.find((node) => node.slot === derivedSlot);
+      if (derivedRow === undefined) throw new Error("The required computed node is missing");
+      const sourceStateSlot = derivedRow.sources[0];
+      if (sourceStateSlot === undefined) throw new Error("The computed dependency is missing");
+      adoption = prepareRequiredTransferAdoption(image, {
+        graphs: [targetGraph],
+        sources: [],
+        reactive: [
+          { slot: sourceStateSlot, target: targetState, construction: targetStateConstruction },
+          { slot: derivedSlot, target: targetDerived, construction: targetDerivedConstruction },
+          {
+            slot: image.roots[1]!,
+            target: targetServerState,
+            construction: targetServerConstruction,
+          },
+        ],
+        codec,
+        mappedStateWrites: [],
+      });
+      const adoptionCommit = adoption.seal();
+      if (adoptionCommit === undefined)
+        throw new Error("The compatible warm adoption did not seal");
+      adoptionCommit.publish();
+      adoptionPublished = true;
+      expect(targetState.get()).toBe(5);
+      expect(targetDerived.get()).toBe(10);
+      expect(targetRuns).toBe(2);
+      expect(targetServerState.get()).toBe("server");
+      adoptionCommit.notifications.deliver();
+      await adoption.retired;
+    } finally {
+      if (!adoptionPublished) adoption?.discard();
+      if (!capturePublished) capture?.discard();
+      if (adoption !== undefined)
+        await adoption.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      if (capture !== undefined)
+        await capture.retired.then(
+          () => undefined,
+          () => undefined,
+        );
+      sourceGraph.dispose();
+      targetGraph.dispose();
+    }
   });
 });

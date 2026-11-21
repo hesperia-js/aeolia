@@ -1,14 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from "bun:test";
 import {
+  capturePositionedStore,
   createGraph,
+  createPositionedStream,
   defineContract,
   createStream,
   snapshot,
+  observePositionedStoreCaptureState,
+  project,
+  subscribe,
   watch,
   type Graph,
   type StreamDefinition,
   type StreamStore,
   type ValueOptions,
+  type PositionedStoreCaptureNotice,
+  type Readable,
 } from "../../src/index.ts";
 import { testBackend, type TestBackend } from "../../src/testing.ts";
 import { __internal as graphInternal } from "../../src/contract/engine.ts";
@@ -28,6 +35,19 @@ async function flush(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function waitForCaptureNotice(
+  readable: Readable<PositionedStoreCaptureNotice>,
+  matches: (notice: PositionedStoreCaptureNotice) => boolean,
+): Promise<PositionedStoreCaptureNotice> {
+  let stop: (() => void) | undefined;
+  const pending = new Promise<PositionedStoreCaptureNotice>((resolve) => {
+    stop = subscribe(readable, (notice) => {
+      if (matches(notice)) resolve(notice);
+    });
+  });
+  return pending.finally(() => stop?.());
 }
 
 function streamGraph<T>(stream: StreamDefinition<void, T>): Graph {
@@ -53,6 +73,145 @@ function streamMember<T>(graph: Graph): StreamStore<T> {
 }
 
 describe("stream stores", () => {
+  it("does not reopen a raw stream on reset for an available-only observer", async () => {
+    const backend = testBackend();
+    const graph = streamGraph(numberStream(backend, "reset-available"));
+    const store = streamMember<number>(graph);
+    const stop = subscribe(store.available, () => undefined);
+    try {
+      expect(store.available.get()).toBe(false);
+      expect(backend.calls).toHaveLength(1);
+      await expect(graph.reset()).resolves.toBeUndefined();
+      expect(backend.calls).toHaveLength(1);
+      expect(backend.calls[0]!.aborted).toBe(true);
+      expect(store.available.get()).toBe(false);
+    } finally {
+      stop();
+      graph.dispose();
+    }
+  });
+
+  for (const phase of ["open", "iterator"] as const) {
+    it(`retires a stream cancelled during ${phase} and admits a later session`, async () => {
+      const backend = testBackend();
+      const openSuccessor = backend.stream<void, number>("cancel-setup.successor");
+      const reason = new Error(`cancel during ${phase}`);
+      let opens = 0;
+      let acquisitions = 0;
+      let nextCalls = 0;
+      let returns = 0;
+      let firstSignal: AbortSignal | undefined;
+      const stream = createStream({
+        name: "cancel-setup",
+        key: () => "cancel-setup/one",
+        open: (input: void, options): AsyncIterable<number> => {
+          opens += 1;
+          if (opens > 1) return openSuccessor(input, options);
+          firstSignal = options.abortSignal;
+          if (phase === "open") graph.cancelPending(reason);
+          return {
+            [Symbol.asyncIterator]() {
+              acquisitions += 1;
+              if (phase === "iterator") graph.cancelPending(reason);
+              return {
+                next: () => {
+                  nextCalls += 1;
+                  return Promise.resolve({ done: false as const, value: 99 });
+                },
+                return: () => {
+                  returns += 1;
+                  return Promise.resolve({ done: true as const, value: undefined });
+                },
+              };
+            },
+          };
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({ namespace: "cancel-setup", operations: { stream } }),
+      });
+      try {
+        const cancelled = graph.api.stream(undefined, { initial: 7 });
+        expect(firstSignal!.reason).toBe(reason);
+        expect(cancelled.status.get()).toBe("closed");
+        expect(cancelled.pending.get()).toBe(false);
+        expect(cancelled.value.get()).toBe(7);
+        expect(acquisitions).toBe(phase === "open" ? 0 : 1);
+        expect(returns).toBe(phase === "open" ? 0 : 1);
+        expect(nextCalls).toBe(0);
+        const successor = graph.api.stream(undefined);
+        const received = Promise.withResolvers<void>();
+        const stop = subscribe(successor.value, (value) => {
+          if (value === 8) received.resolve();
+        });
+        try {
+          backend.emit("cancel-setup.successor", 8);
+          await received.promise;
+        } finally {
+          stop();
+        }
+        expect(successor.value.get()).toBe(8);
+        expect(successor.status.get()).toBe("live");
+        expect(backend.calls[0]!.aborted).toBe(false);
+        expect(nextCalls).toBe(0);
+        expect(opens).toBe(2);
+        expect(graph.resetVersion.get()).toBe(0);
+      } finally {
+        graph.dispose();
+      }
+    });
+  }
+
+  it("keeps a same-epoch successor failure when old iterator cleanup reopens and closes the source", () => {
+    const failure = new Error("successor cannot open");
+    const signals: AbortSignal[] = [];
+    let opens = 0;
+    let returns = 0;
+    const stream = createStream({
+      name: "cancel-successor",
+      key: () => "cancel-successor/one",
+      open: (_input: void, options): AsyncIterable<number> => {
+        opens += 1;
+        signals.push(options.abortSignal);
+        if (opens === 2) throw failure;
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => new Promise<IteratorResult<number>>(() => undefined),
+              return: () => {
+                returns += 1;
+                graph.api.stream(undefined);
+                return Promise.resolve({ done: true as const, value: undefined });
+              },
+            };
+          },
+        };
+      },
+    });
+    const graph = createGraph({
+      contract: defineContract({ namespace: "cancel-successor", operations: { stream } }),
+    });
+    try {
+      const store = graph.api.stream(undefined, { initial: 4 });
+      const reason = new Error("cancel old source");
+      graph.cancelPending(reason);
+      expect(opens).toBe(2);
+      expect(returns).toBe(1);
+      expect(signals[0]!.reason).toBe(reason);
+      expect(signals[1]!.aborted).toBe(true);
+      expect(store.status.get()).toBe("failed");
+      expect(store.error.get()).toBe(failure);
+      expect(store.value.get()).toBe(4);
+      expect(graph.resetVersion.get()).toBe(0);
+      graph.cancelPending();
+      expect(returns).toBe(1);
+      expect(store.status.get()).toBe("failed");
+      expect(store.error.get()).toBe(failure);
+    } finally {
+      graph.dispose();
+    }
+  });
+
   it("accepts a later explicit snapshot policy after an opener omitted it", () => {
     const backend = testBackend();
     const stream = numberStream(backend, "snapshot-policy");
@@ -367,4 +526,194 @@ describe("stream stores", () => {
     expect(runtime.generation).toBe(afterWrite + 1);
     graph.dispose();
   });
+
+  it("preserves close and falsy positioned source failures without another pull", async () => {
+    type Event = { readonly position: number; readonly value: number };
+    type Ending =
+      | { readonly kind: "closed" }
+      | { readonly kind: "failed"; readonly cause: unknown };
+    const endings: readonly Ending[] = [
+      { kind: "closed" },
+      { kind: "failed", cause: undefined },
+      { kind: "failed", cause: false },
+      { kind: "failed", cause: 0 },
+      { kind: "failed", cause: "" },
+    ];
+
+    for (const ending of endings) {
+      let resolveNext: ((result: IteratorResult<Event>) => void) | undefined;
+      let rejectNext: ((cause: unknown) => void) | undefined;
+      let nextCalls = 0;
+      const name = "capture-terminal";
+      const stream = createPositionedStream<void, number, string, number, object>({
+        name,
+        key: () => "capture-terminal/one",
+        source: {
+          open: (): AsyncIterable<Event> => ({
+            [Symbol.asyncIterator]() {
+              return {
+                next: () => {
+                  nextCalls += 1;
+                  return new Promise<IteratorResult<Event>>((resolve, reject) => {
+                    resolveNext = resolve;
+                    rejectNext = reject;
+                  });
+                },
+                return: () => Promise.resolve({ done: true as const, value: undefined }),
+              };
+            },
+          }),
+          initialBoundary: () => ({ available: true, after: 0 }),
+          validateReader: () => false,
+          isReaderCurrent: () => false,
+          acknowledge: () => undefined,
+          releaseReader: () => undefined,
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({ namespace: name, operations: { events: stream } }),
+      });
+      const source = graph.api.events();
+      const projection = project(source, {
+        kind: "reduce",
+        initial: 0,
+        step: (sum: number, value: number) => sum + value,
+      });
+      const checkpoint = capturePositionedStore(source, [projection] as const);
+      const captureState = observePositionedStoreCaptureState(checkpoint);
+
+      try {
+        expect(checkpoint.present).toBe(false);
+        const terminal = waitForCaptureNotice(
+          captureState,
+          (notice) => notice.kind === "closed" || notice.kind === "failed",
+        );
+        if (ending.kind === "closed") {
+          if (resolveNext === undefined) throw new Error("The source has no pending first next");
+          resolveNext({ done: true, value: undefined });
+        } else {
+          if (rejectNext === undefined) throw new Error("The source has no pending first next");
+          rejectNext(ending.cause);
+        }
+        const notice = await terminal;
+        expect(notice).toStrictEqual(ending);
+        expect(nextCalls).toBe(1);
+        expect(source.status.get()).toBe(ending.kind);
+        expect(source.error.get()).toBe(ending.kind === "failed" ? ending.cause : undefined);
+        expect(source.available.get()).toBe(false);
+        expect(projection.value.get()).toBe(0);
+      } finally {
+        graph.dispose();
+      }
+    }
+  });
+
+  it.each(["reset", "abort"] as const)(
+    "keeps a positioned capture closed through %s and explicit reentry",
+    async (mode) => {
+      type Event = { readonly position: number; readonly value: number };
+      type Session = {
+        nextCalls: number;
+        returnCalls: number;
+        resolveNext?: (result: IteratorResult<Event>) => void;
+      };
+      const sessions: Session[] = [];
+      const stream = createPositionedStream<void, number, string, number, object>({
+        name: "capture-reset-reentry",
+        key: () => "capture-reset-reentry/one",
+        source: {
+          open: (): AsyncIterable<Event> => {
+            const session: Session = { nextCalls: 0, returnCalls: 0 };
+            sessions.push(session);
+            return {
+              [Symbol.asyncIterator]() {
+                return {
+                  next: () => {
+                    session.nextCalls += 1;
+                    return new Promise<IteratorResult<Event>>((resolve) => {
+                      session.resolveNext = resolve;
+                    });
+                  },
+                  return: () => {
+                    session.returnCalls += 1;
+                    session.resolveNext?.({ done: true, value: undefined });
+                    return Promise.resolve({ done: true as const, value: undefined });
+                  },
+                };
+              },
+            };
+          },
+          initialBoundary: () => ({ available: true, after: 0 }),
+          validateReader: () => false,
+          isReaderCurrent: () => false,
+          acknowledge: () => undefined,
+          releaseReader: () => undefined,
+        },
+      });
+      const graph = createGraph({
+        contract: defineContract({
+          namespace: "capture-reset-reentry",
+          operations: { events: stream },
+        }),
+      });
+      const owner = new AbortController();
+      let stopFirst: (() => void) | undefined;
+      let stopLate: (() => void) | undefined;
+      let stopReopened: (() => void) | undefined;
+
+      try {
+        const first = graph.api.events(
+          undefined,
+          mode === "abort" ? { abortSignal: owner.signal } : undefined,
+        );
+        const firstProjection = project(first, {
+          kind: "reduce",
+          initial: 0,
+          step: (sum: number, value: number) => sum + value,
+        });
+        const firstCheckpoint = capturePositionedStore(first, [firstProjection] as const);
+        const firstState = observePositionedStoreCaptureState(firstCheckpoint);
+        const firstNotices: PositionedStoreCaptureNotice[] = [];
+        stopFirst = subscribe(firstState, (notice) => firstNotices.push(notice));
+        expect(firstNotices[0]?.kind).toBe("changed");
+        const terminal = waitForCaptureNotice(
+          firstState,
+          (notice) => notice.kind === "closed" || notice.kind === "invalidated",
+        );
+
+        if (mode === "reset") await graph.reset();
+        else owner.abort(new Error("owner stopped"));
+        const closed = await terminal;
+        expect(closed).toStrictEqual({ kind: "closed" });
+        expect(firstNotices.map((notice) => notice.kind)).toStrictEqual(["changed", "closed"]);
+
+        const lateNotices: PositionedStoreCaptureNotice[] = [];
+        stopLate = subscribe(firstState, (notice) => lateNotices.push(notice));
+        expect(lateNotices).toStrictEqual([closed]);
+
+        const reopened = graph.api.events();
+        const reopenedProjection = project(reopened, {
+          kind: "reduce",
+          initial: 0,
+          step: (sum: number, value: number) => sum + value,
+        });
+        const reopenedCheckpoint = capturePositionedStore(reopened, [reopenedProjection] as const);
+        const reopenedState = observePositionedStoreCaptureState(reopenedCheckpoint);
+        const reopenedNotices: PositionedStoreCaptureNotice[] = [];
+        stopReopened = subscribe(reopenedState, (notice) => reopenedNotices.push(notice));
+        expect(reopenedCheckpoint.sessionIdentity).not.toBe(firstCheckpoint.sessionIdentity);
+        expect(reopenedNotices[0]?.kind).toBe("changed");
+        expect(firstNotices.map((notice) => notice.kind)).toStrictEqual(["changed", "closed"]);
+        expect(sessions).toHaveLength(2);
+        expect(sessions[0]!.nextCalls).toBe(1);
+        expect(sessions[0]!.returnCalls).toBe(1);
+        expect(sessions[1]!.nextCalls).toBe(1);
+      } finally {
+        stopFirst?.();
+        stopLate?.();
+        stopReopened?.();
+        graph.dispose();
+      }
+    },
+  );
 });

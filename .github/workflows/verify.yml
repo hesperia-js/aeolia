@@ -50,8 +50,8 @@ jobs:
             import { releaseVersion } from "./scripts/ci/check-release.ts";
             const branch = process.env.AEOLIA_HEAD_BRANCH;
             assert.ok(
-              /^(feature|fix)\/.+$/.test(branch) || branch.startsWith("release/"),
-              "Use feature/<name>, fix/<name>, or release/<VERSION> for repository branches",
+              /^(feature|fix|work)\/.+$/.test(branch) || branch.startsWith("release/"),
+              "Use feature/<name>, fix/<name>, work/<name>, or release/<VERSION> for repository branches",
             );
             if (branch.startsWith("release/")) {
               const { version } = releaseVersion(branch.slice("release/".length));
@@ -156,19 +156,76 @@ jobs:
         with:
           name: aeolia-package
           path: ${{ runner.temp }}/aeolia-package
-      - name: Install Chromium
+      - name: Install Chromium system dependencies
+        if: needs.checks.outputs.package == 'true' && runner.os == 'Linux'
+        run: bunx --no-install playwright install-deps chromium
+      - name: Provision Chrome for Testing
+        id: chrome
         if: needs.checks.outputs.package == 'true'
-        shell: bash
+        shell: pwsh
         run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            bunx --no-install playwright install --with-deps chromium
-          else
-            bunx --no-install playwright install chromium
-          fi
+          $ErrorActionPreference = "Stop"
+          # Google lists .50/.51 as the security release; .78 is a later Stable build.
+          # https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop_018223192.html
+          $version = "157.0.8103.78"
+          if ($env:RUNNER_ARCH -ne "X64") { throw "Unsupported Chrome for Testing architecture" }
+          if ($env:RUNNER_OS -eq "Linux") {
+            $platform = "linux64"
+            $relativeExecutable = "chrome-linux64/chrome"
+          } elseif ($env:RUNNER_OS -eq "Windows") {
+            $platform = "win64"
+            $relativeExecutable = "chrome-win64/chrome.exe"
+          } else {
+            throw "Unsupported Chrome for Testing platform"
+          }
+          $url = "https://storage.googleapis.com/chrome-for-testing-public/$version/$platform/chrome-$platform.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "aeolia-cft-$version"
+          if (Test-Path -LiteralPath $destination) { throw "Chrome destination already exists" }
+          New-Item -ItemType Directory -Path $destination | Out-Null
+          $archive = Join-Path $destination "chrome.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive -MaximumRedirection 0
+          $archiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($env:RUNNER_OS -eq "Linux") {
+            & unzip -q $archive -d $destination
+            if ($LASTEXITCODE -ne 0) { throw "Chrome archive extraction failed" }
+          } else {
+            Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          }
+          $executable = Get-Item -LiteralPath (Join-Path $destination $relativeExecutable)
+          if ($executable -isnot [System.IO.FileInfo] -or $executable.LinkType) {
+            throw "Chrome executable must be a regular file"
+          }
+          if (-not [System.IO.Path]::IsPathFullyQualified($executable.FullName)) {
+            throw "Chrome executable path must be absolute"
+          }
+          if ($env:RUNNER_OS -eq "Linux") {
+            $reported = & $executable.FullName --version | Out-String
+            $exitCode = $LASTEXITCODE
+            $captured = ConvertTo-Json -InputObject $reported -Compress
+            Write-Output "PowerShell Chrome version text (JSON): $captured"
+            if ($exitCode -ne 0) { throw "Chrome version check failed: $exitCode" }
+            $match = [regex]::Match($reported.Trim(), '^Google Chrome for Testing (\d+\.\d+\.\d+\.\d+)$')
+            if (-not $match.Success) { throw "Unexpected Chrome version output: $captured" }
+            $actualVersion = $match.Groups[1].Value
+          } else {
+            $info = $executable.VersionInfo
+            $actualVersion = "$($info.ProductMajorPart).$($info.ProductMinorPart).$($info.ProductBuildPart).$($info.ProductPrivatePart)"
+          }
+          if ($actualVersion -ne $version) { throw "Unexpected Chrome version: $actualVersion" }
+          $executableHash = (Get-FileHash -LiteralPath $executable.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Output "Chrome for Testing URL: $url"
+          Write-Output "Observed archive SHA-256: $archiveHash"
+          Write-Output "Chrome executable: $($executable.FullName)"
+          Write-Output "Observed executable SHA-256: $executableHash"
+          Write-Output "Executable version: $actualVersion"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "path=$($executable.FullName)" -Encoding utf8
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version" -Encoding utf8
       - name: Test installed candidate
         if: needs.checks.outputs.package == 'true'
         env:
           AEOLIA_ARCHIVE: ${{ runner.temp }}/aeolia-package/aeolia.tgz
+          AEOLIA_CHROME_EXECUTABLE_PATH: ${{ steps.chrome.outputs.path }}
+          AEOLIA_CHROME_EXPECTED_VERSION: ${{ steps.chrome.outputs.version }}
         shell: bash
         run: bun tests/package/run.ts "$AEOLIA_ARCHIVE"
       - name: Save coverage
