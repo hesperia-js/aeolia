@@ -141,6 +141,9 @@ any of its writes are published. The Computed stays cold; its next normal
 browser cache only when the complete required mapping remains compatible.
 
 Required reactive publication separates writes from notification delivery.
+Seal and publish immediately on the same synchronous stack, without authored
+callbacks or changes to write permission between them. A seal that would write
+State inside `withoutWrites` throws before any native publication.
 `TransferCommit.publish()` installs the staged State values and compatible
 caches synchronously. The caller then invokes
 `TransferCommit.notifications.deliver()` at its chosen boundary. If a watcher

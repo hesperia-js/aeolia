@@ -619,8 +619,8 @@ function endBoundStream<T>(
       );
     session.listeners.clear();
     if (runtime.stream === session) runtime.stream = undefined;
-    if (removeCallerAbort !== undefined) attempt(removeCallerAbort, false);
-    if (removeControllerAbort !== undefined) attempt(removeControllerAbort, false);
+    if (removeCallerAbort !== undefined) attempt(removeCallerAbort);
+    if (removeControllerAbort !== undefined) attempt(removeControllerAbort);
     attempt(() => session.controller.abort(options?.abortReason));
     if (iterator !== undefined)
       attempt(() => returnStreamIterator(session, iterator, false), false);

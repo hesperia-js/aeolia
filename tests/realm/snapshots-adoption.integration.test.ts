@@ -29,6 +29,7 @@ import {
   prepareRequiredTransferCapture,
   signal,
   watch,
+  withoutWrites,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 import type {
@@ -1440,6 +1441,30 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
         { target: mappedState, construction: mappedConstruction, value: "published" },
       ],
     });
+    expect(() => peekStore(claim.store)).toThrow("still dormant");
+    const forbidden: { commit?: ReturnType<typeof adoptionPlan.seal> } = {};
+    let refusal: unknown;
+    try {
+      withoutWrites(() => {
+        forbidden.commit = adoptionPlan!.seal();
+        forbidden.commit?.publish();
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    if (forbidden.commit !== undefined) {
+      adoptionPublished = true;
+      try {
+        forbidden.commit.notifications.deliver();
+      } catch {
+        // The existing watcher intentionally fails after publication.
+      }
+    }
+    expect(refusal).toBeInstanceOf(Fault);
+    expect((refusal as Fault).kind).toBe("write-forbidden");
+    expect(mappedState.get()).toBe("before");
+    expect(() => peekStore(claim.store)).toThrow("still dormant");
+    expect(notifications).toEqual([]);
     const commit = adoptionPlan.seal();
     if (commit === undefined) throw new Error("The stable required adoption did not seal");
     const retirementOutcome = adoptionPlan.retired.then(

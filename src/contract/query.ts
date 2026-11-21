@@ -486,9 +486,11 @@ export function makeQueryStore<T, P = never>(
  * Observe the authoritative progress of an already acquired query store.
  *
  * `capture()` reads plain owner state without reactive tracking. `subscribe()`
- * gives one current seed and then every newer accepted report and lifecycle
- * event in FIFO order, even when `store.progress` coalesces several writes in
- * one reactive pass. Observation does not start work, touch query freshness, or
+ * gives one current seed and then eligible reports and lifecycle events in FIFO
+ * order, even when `store.progress` coalesces several writes in one reactive
+ * pass. Completion and failure preserve queued events; replacement or
+ * interruption discards queued events from the displaced execution. Observation
+ * does not start work, touch query freshness, or
  * make the observer an owner of request cancellation.
  *
  * @param store - Genuine query-store wrapper returned by an Aeolia graph.

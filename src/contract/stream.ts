@@ -151,11 +151,8 @@ export async function consumeStream<T>(
       }
       const done = result.done;
       if (!isCurrentSession(runtime, session)) return;
-      let positionedLatest: T | undefined;
-      if (!done && positioned !== undefined) {
-        positionedLatest = result.value;
-        if (!isCurrentSession(runtime, session)) return;
-      }
+      const value = done ? undefined : result.value;
+      if (!isCurrentSession(runtime, session)) return;
       if (!done) nextGeneration(runtime.generation);
       noteTransferChange(runtime);
       noteTransferChange(session);
@@ -180,7 +177,7 @@ export async function consumeStream<T>(
           identity: Object.freeze({}),
           ordinal: positioned.nextOrdinal++,
           position: hasPosition ? position : undefined,
-          latest: positionedLatest as T,
+          latest: value as T,
         };
         positioned.dispatch = event;
         positioned.diverged = !hasPosition;
@@ -189,7 +186,7 @@ export async function consumeStream<T>(
       session.emitted = true;
       try {
         reactiveInternal.batch(() =>
-          recordLanding(runtime, result.value, undefined, session.bound, session),
+          recordLanding(runtime, value as T, undefined, session.bound, session),
         );
       } catch (error) {
         if (isCurrentSession(runtime, session))
@@ -200,8 +197,8 @@ export async function consumeStream<T>(
         runtime,
         session,
         session.hasPosition
-          ? { kind: "value", value: result.value, hasPosition: true, position: session.position }
-          : { kind: "value", value: result.value },
+          ? { kind: "value", value: value as T, hasPosition: true, position: session.position }
+          : { kind: "value", value: value as T },
       );
       if (!isCurrentSession(runtime, session)) return;
       try {

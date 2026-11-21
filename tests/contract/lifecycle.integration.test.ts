@@ -4,6 +4,7 @@ import {
   createGraph,
   createQuery,
   createStream,
+  createPositionedStream,
   createMutation,
   affects,
   bindOperation,
@@ -22,7 +23,11 @@ import {
   captureReactiveConstruction,
   prepareRequiredTransferCapture,
 } from "../../src/index.ts";
-import type { ClosedEncodedValue, RequiredTransferCodec } from "../../src/index.ts";
+import type {
+  ClosedEncodedValue,
+  PositionedStoreRestoreSeed,
+  RequiredTransferCodec,
+} from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
 let ownsFakeTimers = false;
@@ -567,6 +572,79 @@ for (const preAborted of [false, true]) {
     expect(() => graph.cancelPending()).not.toThrow();
   });
 }
+
+it("leaves a dormant positioned reader prepared by an abort listener for the next cancellation", async () => {
+  const lifetime = new AbortController();
+  const seed: PositionedStoreRestoreSeed<number, number, readonly [number]> = {
+    boundary: { kind: "event", after: 5 },
+    base: { present: true, value: 3 },
+    values: [3],
+  };
+  const releases: string[] = [];
+  let opens = 0;
+  const current = (input: string, reader: { key: string }, after: number, boundary: unknown) =>
+    reader.key === input && after === 5 && boundary === seed && !releases.includes(input);
+  const stream = createPositionedStream<string, number, string, number, { key: string }>({
+    name: "positioned",
+    key: (input) => input,
+    source: {
+      open() {
+        opens += 1;
+        return { async *[Symbol.asyncIterator]() {} };
+      },
+      validateReader: (input, reader, after, _checkpoint, boundary) =>
+        current(input, reader, after, boundary),
+      isReaderCurrent: current,
+      readerLifetime: () => ({ signal: lifetime.signal }),
+      acknowledge: () => undefined,
+      releaseReader: (input) => {
+        releases.push(input);
+      },
+    },
+  });
+  const work = Promise.withResolvers<void>();
+  const mutate = createMutation({
+    name: "mutate",
+    affects: [],
+    run: (_input: void, { abortSignal }) => {
+      abortSignal.addEventListener(
+        "abort",
+        () => {
+          next = prepare("next");
+        },
+        { once: true },
+      );
+      return work.promise;
+    },
+  });
+  const graph = createGraph({
+    contract: defineContract({ namespace: "cancel-positioned", operations: { stream, mutate } }),
+  });
+  const prepare = (key: string) =>
+    preparePassiveTransferClaim(graph, graph.api.stream, key, undefined, {
+      policies: [{ kind: "reduce", initial: 0, step: (sum: number, value: number) => sum + value }],
+      seed,
+      reader: { key },
+    });
+  let next: ReturnType<typeof prepare> | undefined;
+  const entry = prepare("entry");
+  const pending = graph.api.mutate();
+  try {
+    graph.cancelPending();
+    expect(next).toBeDefined();
+    expect(releases).toEqual(["entry"]);
+    graph.cancelPending();
+    await Promise.all([entry.restoration.retired, next?.restoration.retired]);
+    expect(releases).toEqual(["entry", "next"]);
+    expect(opens).toBe(0);
+  } finally {
+    entry.discard();
+    next?.discard();
+    work.resolve();
+    await pending;
+    await graph.retire();
+  }
+});
 
 it("retains prearmed freshness and collection timers after cancelling the entry work", async () => {
   const backend = testBackend();

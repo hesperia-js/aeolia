@@ -53,11 +53,12 @@ export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation)
   return generation;
 }
 
-/** Prepare a V1 adoption authority change and its real progress interruption. */
+/** Prepare the adoption generation change and its progress interruption. */
 export function prepareAdoptionIssue<T>(
   runtime: StoreRuntime<T>,
   minimum: number,
 ): {
+  readonly generation: Generation;
   publish(): void;
   notify(): void;
 } {
@@ -74,6 +75,7 @@ export function prepareAdoptionIssue<T>(
       ? request
       : undefined;
   return {
+    generation,
     publish: () => {
       noteTransferChange(runtime);
       runtime.generation = generation;
@@ -99,58 +101,42 @@ export function recordLanding<T>(
     const epoch = state.resetEpoch;
     const generation = runtime.generation;
     const incarnation = runtime.incarnation;
-    const current = (): boolean =>
+    const current = (expectedRevision: number): boolean =>
       !state.disposed &&
       !runtime.disposed &&
       state.resetEpoch === epoch &&
       runtime.generation === generation &&
       runtime.incarnation === incarnation &&
-      runtime.valueRevision === revision &&
+      runtime.valueRevision === expectedRevision &&
       (expectedPositionedSession === undefined ||
         (runtime.stream === expectedPositionedSession &&
           !expectedPositionedSession.ended &&
           runtime.streamToken === expectedPositionedSession.token &&
           expectedPositionedSession.resetEpoch === epoch));
-    runtime.valueRevision = revision;
-    runtime.lastLandingAt = Date.now();
-    runtime.failing = false;
-    runtime.invalidated = false;
-    runtime.refreshOnActivation = false;
-    runtime.dropped = false;
-    runtime.transferEligible = true;
-    const errors: unknown[] = [];
-    try {
-      runtime.errorCell.set(undefined);
-    } catch (error) {
-      errors.push(error);
-    }
-    let landed = false;
-    try {
-      landed = reactiveInternal.guardedWrite(runtime.committed, value, current, () => undefined);
-    } catch (error) {
-      errors.push(error);
-    }
-    if (!landed && errors.length === 0) return;
-    if (!current()) {
-      if (errors.length === 1) throw errors[0];
-      if (errors.length > 1) throw new AggregateError(errors, "Store landing propagation failed");
-      return;
-    }
-    runtime.baseAvailable = true;
-    runtime.hasAcceptedLanding = true;
-    try {
-      runtime.presence.set(true);
-    } catch (error) {
-      errors.push(error);
-    }
-    touch(runtime);
-    try {
+    const previousRevision = runtime.valueRevision;
+    reactiveInternal.batch(() => {
+      const landed = reactiveInternal.guardedWrite(
+        runtime.committed,
+        value,
+        () => current(previousRevision),
+        () => {
+          runtime.valueRevision = revision;
+          runtime.lastLandingAt = Date.now();
+          runtime.failing = false;
+          runtime.invalidated = false;
+          runtime.refreshOnActivation = false;
+          runtime.dropped = false;
+          runtime.transferEligible = true;
+          runtime.baseAvailable = true;
+          runtime.hasAcceptedLanding = true;
+          runtime.errorCell.set(undefined);
+          runtime.presence.set(true);
+        },
+      );
+      if (!landed || !current(revision)) return;
+      touch(runtime);
       writeAllStatuses(runtime, Date.now(), landingGeneration);
-    } catch (error) {
-      errors.push(error);
-    }
-    if (errors.length === 1) throw errors[0];
-    if (errors.length > 1) throw new AggregateError(errors, "Store landing propagation failed");
+    });
     return;
   }
   const addressWrite = beginStoreAddress(runtime);

@@ -866,8 +866,10 @@ not retain the query.
 Each `QueryStore` exposes `progress`, a readable snapshot of the latest query
 execution. `observeQueryProgress(store)` provides a non-coalescing observation
 with `capture()` and `subscribe()`. A subscription receives one current seed,
-then every accepted progress report and lifecycle transition in FIFO order.
-The stream does not replay older events. Capturing does not retain or activate
+then eligible progress reports and lifecycle transitions in FIFO order. Normal
+completion or failure preserves queued events from that execution. Replacement
+or interruption discards queued events from the displaced execution. The stream
+does not replay older events. Capturing does not retain or activate
 the query. A subscription retains the query until you unsubscribe.
 
 A snapshot identifies its execution and reports whether it has a progress
@@ -882,7 +884,8 @@ To observe reports that can occur synchronously during query acquisition, call
 `callQueryWithProgress(member, args, entries)`. Aeolia registers the eligible entries
 together at one current progress frontier before it starts the call's ordinary
 query work. Each entry receives a current seed and subsequent progress events in
-FIFO order. Reports from before the cohort joined are not replayed. If progress
+FIFO order, subject to the same replacement and interruption rules. Reports from
+before the cohort joined are not replayed. If progress
 delivery is already active, the seeds are queued and can arrive after the query
 member returns.
 

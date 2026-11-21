@@ -146,6 +146,29 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
+it("retains genuine sibling transfer discovery after another binding context retires", async () => {
+  const world = makeWorld();
+  const input = { key: "same-key" };
+  const retiredStore = world.queryBinding.member(input);
+  try {
+    await expect(retiredStore.ready).resolves.toBe("bound:same-key");
+    await world.queryBinding.context.retire();
+    const sibling = world.siblingQueryBinding.member(input);
+    await expect(sibling.ready).resolves.toBe("sibling:same-key");
+    expect(() => createTransferScope(world.graph, world.queryBinding, retiredStore)).toThrow(
+      TypeError,
+    );
+    expect(() => createTransferScope(world.graph, world.siblingQueryBinding, retiredStore)).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      createTransferScope(world.graph, world.siblingQueryBinding, sibling),
+    ).not.toThrow();
+  } finally {
+    await world.graph.retire();
+  }
+});
+
 it("round-trips equal-key raw, query, and stream addresses without activating imported bindings", async () => {
   const source = makeWorld("shared");
   const target = makeWorld("shared");
