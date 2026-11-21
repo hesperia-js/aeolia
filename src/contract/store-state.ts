@@ -277,18 +277,7 @@ export function configureDeclaredStore<T>(
   runtime.equalsSpecified = definition.equals != null;
   runtime.snapshot = definition.snapshot ?? false;
   runtime.snapshotSpecified = definition.snapshot != null;
-  if (!runtime.baseAvailable) {
-    if (runtime.binding === undefined) {
-      runtime.valueRevision = nextValueRevision(runtime.valueRevision);
-      runtime.baseAvailable = true;
-      runtime.hasAcceptedLanding = true;
-      runtime.lastLandingAt = Date.now();
-      runtime.committed.set(definition.initial);
-      runtime.presence.set(true);
-    } else {
-      recordLanding(runtime, definition.initial);
-    }
-  }
+  if (!runtime.baseAvailable) seedInitialValue(runtime, definition.initial);
   touch(runtime);
 }
 
@@ -301,12 +290,34 @@ function seedInitialValue<T>(
     recordLanding(runtime, initial, undefined, expectedSession);
     return;
   }
-  runtime.valueRevision = nextValueRevision(runtime.valueRevision);
-  runtime.lastLandingAt = Date.now();
-  runtime.committed.set(initial);
-  runtime.baseAvailable = true;
-  runtime.hasAcceptedLanding = true;
-  runtime.presence.set(true);
+  const state = runtime.graph.__runtime;
+  const epoch = state.resetEpoch;
+  const generation = runtime.generation;
+  const incarnation = runtime.incarnation;
+  const before = runtime.valueRevision;
+  const revision = nextValueRevision(before);
+  reactiveInternal.batch(() => {
+    reactiveInternal.guardedWrite(
+      runtime.committed,
+      initial,
+      () =>
+        !state.disposed &&
+        !runtime.disposed &&
+        state.resetEpoch === epoch &&
+        runtime.incarnation === incarnation &&
+        runtime.generation === generation &&
+        runtime.valueRevision === before &&
+        !runtime.baseAvailable,
+      () => {
+        noteTransferChange(runtime);
+        runtime.lastLandingAt = Date.now();
+        runtime.valueRevision = revision;
+        runtime.baseAvailable = true;
+        runtime.hasAcceptedLanding = true;
+        runtime.presence.set(true);
+      },
+    );
+  });
 }
 
 export function configureKeyedValue<T>(

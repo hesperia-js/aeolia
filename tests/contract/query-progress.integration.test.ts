@@ -7,6 +7,7 @@ import {
   createQuery,
   defineContract,
   observeQueryProgress,
+  peekStore,
   queryOptions,
 } from "../../src/contract/index.ts";
 import { Fault } from "../../src/fault.ts";
@@ -29,6 +30,7 @@ import type {
   QueryProgressCohortEntry,
   QueryStore,
   RequiredTransferCodec,
+  StoreCapture,
 } from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
@@ -127,33 +129,59 @@ afterEach(() => {
 });
 
 describe("query progress", () => {
-  it("collects an undispatched request superseded by an active progress observer", async () => {
-    let calls = 0;
-    let replacement: Promise<unknown> | undefined;
-    const query = createQuery({
-      name: "progress.pre-dispatch-replacement",
-      key: () => "one",
-      fetch: async () => ++calls + 1,
-    });
-    const graph = createGraph({
-      contract: defineContract({ namespace: "progress-pre-dispatch", operations: { query } }),
-      idleMs: 2,
-    });
-    const store = graph.api.query(undefined, { initial: 1 });
-    const stop = observeQueryProgress(store).subscribe(({ kind, snapshot }) => {
-      if (kind === "lifecycle" && snapshot.status === "active" && replacement === undefined)
-        replacement = store.revalidate();
-    });
-    await store.revalidate();
-    await replacement;
-    expect(calls).toBe(1);
-    expect(store.value.peek()).toBe(2);
-    stop();
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
-    jest.advanceTimersByTime(100);
-    expect(store.available.peek()).toBe(false);
-    graph.dispose();
-  });
+  it.each(["revalidate", "write", "adopt"] as const)(
+    "collects an undispatched request displaced by active progress: %s",
+    async (action) => {
+      let calls = 0;
+      let fired = false;
+      let replacement: Promise<unknown> | undefined;
+      const query = createQuery({
+        name: "progress.pre-dispatch-replacement",
+        key: () => "one",
+        fetch: async () => ++calls + 1,
+      });
+      const contract = defineContract({
+        namespace: "progress-pre-dispatch",
+        operations: { query },
+      });
+      const graph = createGraph({ contract, idleMs: 2 });
+      const donor = createGraph({ contract });
+      donor.api.query(undefined, { initial: 17 });
+      const image = snapshot(donor, { version: 2 });
+      const store = graph.api.query(undefined, { initial: 1 });
+      const caller = new AbortController();
+      const nativeRemove = caller.signal.removeEventListener.bind(caller.signal);
+      let removals = 0;
+      Object.defineProperty(caller.signal, "removeEventListener", {
+        value(...args: Parameters<AbortSignal["removeEventListener"]>) {
+          removals += 1;
+          nativeRemove(...args);
+        },
+      });
+      const stop = observeQueryProgress(store).subscribe(({ kind, snapshot }) => {
+        if (fired || kind !== "lifecycle" || snapshot.status !== "active") return;
+        fired = true;
+        if (action === "revalidate") replacement = store.revalidate();
+        else if (action === "write") store.set(17);
+        else adopt(graph, image, {});
+      });
+      try {
+        await store.revalidate({ abortSignal: caller.signal });
+        await replacement;
+        expect(calls).toBe(action === "revalidate" ? 1 : 0);
+        expect(store.value.peek()).toBe(action === "revalidate" ? 2 : 17);
+        expect(store.pending.peek()).toBe(false);
+        stop();
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+        jest.advanceTimersByTime(100);
+        expect(peekStore(store)).toMatchObject({ kind: "stable", present: false });
+        expect(removals).toBe(1);
+      } finally {
+        stop();
+        await Promise.all([graph.retire(), donor.retire()]);
+      }
+    },
+  );
 
   for (const kind of ["raw", "bound"] as const) {
     it(`interrupts displaced ${kind} progress during V2 adoption`, async () => {
@@ -188,8 +216,12 @@ describe("query progress", () => {
       await sourceStore.ready;
       const store = kind === "raw" ? target.api.query("one") : targetBinding.member("one");
       const events: string[] = [];
+      let interruptedCapture: StoreCapture<number> | undefined;
+      const stopValue = subscribe(store.value, () => {});
       const stop = observeQueryProgress(store).subscribe(({ kind: eventKind, snapshot }) => {
-        if (eventKind === "lifecycle") events.push(snapshot.status);
+        if (eventKind !== "lifecycle") return;
+        events.push(snapshot.status);
+        if (snapshot.status === "interrupted") interruptedCapture = peekStore(store);
       });
       const reference = "query";
       const image = snapshot(source, {
@@ -197,6 +229,7 @@ describe("query progress", () => {
         bindings: [{ binding: sourceBinding, reference }],
       });
       adopt(target, image, { bindings: [{ binding: targetBinding, reference }] });
+      const adopted = peekStore(store);
       report("late");
       held.resolve(19);
       await held.promise;
@@ -209,10 +242,60 @@ describe("query progress", () => {
       });
       expect(events.filter((status) => status === "interrupted")).toHaveLength(1);
       stop();
+      stopValue();
       source.dispose();
       target.dispose();
+      expect(adopted).toMatchObject({ kind: "stable", present: true, value: 17 });
+      expect(interruptedCapture).toStrictEqual(adopted);
     });
   }
+
+  it("interrupts displaced progress when a nested Store write rejects the V2 row", async () => {
+    const held = deferred<number>();
+    let writeDuringComparison: (() => void) | undefined;
+    let report!: (value: string) => void;
+    const query = createQuery<string, number, string, string>({
+      name: "progress.v2.rejected",
+      key: (input) => input,
+      fetch: (_input, options) => {
+        report = options.reportProgress;
+        return held.promise;
+      },
+      equals(previous, proposed) {
+        if (proposed === 17) writeDuringComparison?.();
+        return Object.is(previous, proposed);
+      },
+    });
+    const contract = defineContract({ namespace: "progress-v2-rejected", operations: { query } });
+    const donor = createGraph({ contract });
+    const graph = createGraph({ contract });
+    donor.api.query("one", { initial: 17 });
+    const store = graph.api.query("one", { initial: 1 });
+    const progress = observeQueryProgress(store);
+    const events: string[] = [];
+    const stop = progress.subscribe(({ kind, snapshot }) => {
+      if (kind === "lifecycle") events.push(snapshot.status);
+    });
+    try {
+      const original = store.revalidate();
+      writeDuringComparison = () => {
+        writeDuringComparison = undefined;
+        store.set(42);
+      };
+      expect(() => adopt(graph, snapshot(donor, { version: 2 }), {})).toThrow(Fault);
+      report("late");
+      held.resolve(99);
+      await original;
+      expect(store.value.peek()).toBe(42);
+      expect(store.pending.peek()).toBe(false);
+      expect(progress.capture()).toMatchObject({ status: "interrupted", reportRevision: 0 });
+      expect(events).toStrictEqual(["active", "interrupted"]);
+    } finally {
+      held.resolve(99);
+      stop();
+      await Promise.all([graph.retire(), donor.retire()]);
+    }
+  });
   for (const kind of ["raw", "bound"] as const) {
     it(`enrolls both ${kind} call listeners before synchronous reports`, async () => {
       let calls = 0;

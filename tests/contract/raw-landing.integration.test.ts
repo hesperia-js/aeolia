@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
   createGraph,
+  createQuery,
+  createStore,
   createStream,
   peekStore,
   project,
@@ -48,6 +50,93 @@ test("raw first landing exposes value, presence and revision together during not
   stop();
   await graph.retire();
 });
+
+for (const member of ["query", "stream"] as const) {
+  test(`raw ${member} initial seeding publishes value and presence together`, async () => {
+    const query = createQuery({
+      name: "query",
+      key: (key: string) => key,
+      fetch: async (): Promise<number | undefined> => 99,
+    });
+    const stream = createStream<string, number | undefined, string>({
+      name: "stream",
+      key: (key) => key,
+      open: () => ({ async *[Symbol.asyncIterator]() {} }),
+    });
+    const graph = createGraph({
+      contract: { namespace: "raw-seeding", operations: { query, stream } },
+    });
+    try {
+      for (const [key, initial] of [
+        ["number", 7],
+        ["undefined", undefined],
+      ] as const) {
+        const store = graph.at(key);
+        const seen: Array<{ value: unknown; available: boolean; capture: StoreCapture<unknown> }> =
+          [];
+        const observe = (value: unknown) =>
+          seen.push({ value, available: store.available.get(), capture: peekStore(store) });
+        const stop =
+          initial === undefined ? subscribe(store, observe) : subscribe(store.value, observe);
+        try {
+          expect(peekStore(store)).toMatchObject({ kind: "stable", present: false });
+          if (initial !== undefined) seen.length = 0;
+          graph.api[member](key, { initial });
+          const after = peekStore(store);
+          expect(after).toMatchObject({
+            kind: "stable",
+            identity: store.identity,
+            present: true,
+            value: initial,
+            valueRevision: 1,
+          });
+          expect(Object.hasOwn(after, "value")).toBe(true);
+          expect(seen).toStrictEqual([{ value: initial, available: true, capture: after }]);
+        } finally {
+          stop();
+        }
+      }
+    } finally {
+      await graph.retire();
+    }
+  });
+}
+
+test.each(["cold", "subscribed"] as const)(
+  "captures the winning nested equality write with a %s value",
+  async (mode) => {
+    const live = mode === "subscribed";
+    const definition = createStore({
+      name: "nested",
+      initial: 0,
+      equals(previous, proposed) {
+        if (previous === 0 && proposed === 1) {
+          store.set(2);
+          during = peekStore(store);
+        }
+        return Object.is(previous, proposed);
+      },
+    });
+    const graph = createGraph({
+      contract: { namespace: "raw-capture", operations: { definition } },
+    });
+    const store = graph.api.definition();
+    let during: StoreCapture<number> | undefined;
+    const deliveries: Array<number | undefined> = [];
+    store.value.get();
+    const stop = live ? subscribe(store.value, (value) => deliveries.push(value)) : () => {};
+    try {
+      store.set(1);
+      const after = peekStore(store);
+      expect(after).toMatchObject({ kind: "stable", present: true, value: 2, valueRevision: 2 });
+      expect(during).toStrictEqual(after);
+      if (live) expect(deliveries).toEqual([0, 2]);
+    } finally {
+      stop();
+      await graph.retire();
+    }
+  },
+);
 
 test("a revoked raw stream getter cannot advance its successor and the successor can land", async () => {
   const first = Promise.withResolvers<IteratorResult<number>>();

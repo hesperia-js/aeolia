@@ -88,6 +88,31 @@ function reportRequestOutcome(
   request.resolveOutcome(outcome);
 }
 
+function retireUndispatchedRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest): void {
+  if (request.settled) return;
+  const state = runtime.graph.__runtime;
+  const signal = request.controller.signal;
+  const reason =
+    state.disposed || runtime.disposed || bindingContextClosed(runtime)
+      ? new Fault("disposed", [String(runtime.key)])
+      : signal.aborted
+        ? signal.reason
+        : new AbortError("Query request was superseded before dispatch.");
+  request.superseded = true;
+  reportRequestOutcome(request, { ok: false, error: reason });
+  try {
+    finishRequest(runtime, request);
+  } catch (cleanupError) {
+    reportContinuationError(state, cleanupError);
+  } finally {
+    if (runtime.activeRequest === request) {
+      noteTransferChange(runtime);
+      runtime.activeRequest = undefined;
+    }
+    scheduleSweep(state);
+  }
+}
+
 function mayPublishSettledProgress<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   const state = runtime.graph.__runtime;
   return (
@@ -547,14 +572,7 @@ export function startQueryRequest<T>(
       runtime.disposed ||
       bindingContextClosed(runtime)
     ) {
-      if (runtime.binding !== undefined)
-        settleQueryFailure(
-          runtime,
-          request,
-          state.disposed || runtime.disposed || runtime.binding.context.disposed
-            ? new Fault("disposed", [String(runtime.key)])
-            : new AbortError("Query request was superseded before dispatch."),
-        );
+      retireUndispatchedRequest(runtime, request);
       if (setupFailed) reportContinuationError(state, setupError);
       return request;
     }
@@ -587,14 +605,7 @@ export function startQueryRequest<T>(
       runtime.disposed ||
       bindingContextClosed(runtime)
     ) {
-      if (runtime.binding !== undefined)
-        settleQueryFailure(
-          runtime,
-          request,
-          runtime.disposed || runtime.binding.context.disposed
-            ? new Fault("disposed", [String(runtime.key)])
-            : new AbortError("Query request was superseded before dispatch."),
-        );
+      retireUndispatchedRequest(runtime, request);
       return request;
     }
     const original = beginPhysicalWork(owner, "query");
@@ -629,8 +640,7 @@ export function startQueryRequest<T>(
         request.resetEpoch !== state.resetEpoch
       ) {
         try {
-          if (request.superseded && !request.settled)
-            settleQueryFailure(runtime, request, controller.signal.reason);
+          retireUndispatchedRequest(runtime, request);
         } finally {
           finishPhysicalWork(original);
         }

@@ -390,7 +390,7 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
         const beforeGeneration = runtime.generation;
         const beforeSession = runtime.stream;
         const beforeGuard = address?.guard;
-        const owns = (expectedGeneration = beforeGeneration): boolean =>
+        const owns = (): boolean =>
           !state.disposed &&
           !runtime.disposed &&
           binding?.context.disposed !== true &&
@@ -398,7 +398,7 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
           lookup() === runtime &&
           runtime.incarnation === beforeIncarnation &&
           runtime.valueRevision === before &&
-          runtime.generation === expectedGeneration &&
+          runtime.generation === beforeGeneration &&
           runtime.stream === beforeSession &&
           runtime.boundRetirement === undefined &&
           (address === undefined ||
@@ -430,7 +430,6 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
         const adoptionIssue = prepareAdoptionIssue(runtime, foreignGeneration);
         const adoptedGeneration = adoptionIssue.generation;
         reactiveInternal.assertWritesAllowed(runtime.committed);
-        adoptionIssue.publish();
         let stamp:
           | { readonly identity: StoreIdentity; readonly valueRevision: ValueRevision }
           | undefined;
@@ -438,10 +437,9 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
           runtime.committed,
           value,
           () =>
-            owns(adoptedGeneration) &&
-            runtime.snapshot === effectiveSnapshot &&
-            runtime.equals === effectiveEquals,
+            owns() && runtime.snapshot === effectiveSnapshot && runtime.equals === effectiveEquals,
           () => {
+            adoptionIssue.publish();
             if (runtime.incarnation === undefined) runtime.incarnation = {};
             runtime.valueRevision = next;
             runtime.baseAvailable = true;
