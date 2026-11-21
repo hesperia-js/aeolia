@@ -465,7 +465,11 @@ function ensureFreshComputed<T>(node: ComputedNode<T>): void {
       return;
     }
     if (node.live) {
-      if (!node.marked && propagation.pendingSeeds.size === 0) {
+      if (
+        !node.marked &&
+        propagation.pendingSeeds.size === 0 &&
+        (nativeReadDepth === 0 || propagation.batchSeeds.size === 0)
+      ) {
         if (node.hasError) throw node.error;
         return;
       }
@@ -2237,7 +2241,7 @@ export const __internal = Object.freeze({
 
   /** Prepare fixed reactive publication and deferred notification. */
   transferPrepare,
-  /** Read the existing computed without outer tracking or retention callbacks. */
+  /** Read the computed through committed batch writes without tracking or retention callbacks. */
   nativePeek: <T>(readable: Readable<T>, current: () => boolean = () => true): T => {
     const node = nodeFor(readable);
     nativeReadDepth += 1;
