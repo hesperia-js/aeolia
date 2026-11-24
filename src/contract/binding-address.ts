@@ -135,8 +135,8 @@ function readerAddressSnapshotCurrent(snapshot: ReaderAddressSnapshot): boolean 
 interface AddressFacts {
   readonly binding: StoreBindingRuntime;
   readonly key: string;
-  readonly address: BindingAddressRuntime;
-  readonly guard: object;
+  readonly address?: BindingAddressRuntime;
+  readonly guard?: object;
   readonly epoch: number;
   readonly runtime?: StoreRuntime<unknown>;
   readonly readerStores: readonly StoreRuntime<unknown>[];
@@ -219,8 +219,8 @@ function factsCurrent(facts: AddressFacts): boolean {
     !binding.context.disposed &&
     state.resetEpoch === facts.epoch &&
     binding.addresses.get(facts.key) === address &&
-    address.guard === facts.guard &&
-    address.operations.size === facts.operations &&
+    address?.guard === facts.guard &&
+    (address?.operations.size ?? 0) === facts.operations &&
     binding.stores.get(facts.key) === runtime &&
     readerStores.length === facts.readerStores.length &&
     readerStores.every((reader, index) => reader === facts.readerStores[index]) &&
@@ -274,14 +274,15 @@ export function inspectBoundAddress(
       throw new TypeError("Address stamp does not belong to this binding and key");
     if (!factsCurrent(previous)) return Object.freeze({ kind: "changed" });
   }
-  const address = bindingAddress(binding, checkedKey);
+  // The first native transition installs a row that stays until reset or retirement.
+  const address = binding.addresses.get(checkedKey);
   const runtime = binding.stores.get(checkedKey);
   const state = binding.context.state;
   const facts: AddressFacts = {
     binding,
     key: checkedKey,
     address,
-    guard: address.guard,
+    guard: address?.guard,
     epoch: state.resetEpoch,
     runtime,
     readerStores: readerStoreRuntimes(binding).filter(
@@ -295,7 +296,7 @@ export function inspectBoundAddress(
     retirement: runtime?.boundRetirement,
     request: runtime?.activeRequest,
     requests: runtime?.requests.size ?? 0,
-    operations: address.operations.size,
+    operations: address?.operations.size ?? 0,
     empty: false,
   };
   if (!factsCurrent(facts)) return Object.freeze({ kind: "changed" });

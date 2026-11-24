@@ -1083,8 +1083,10 @@ independent projection behavior retain their existing policies.
 `inspectBoundAddress(binding, key, { expected? })` accepts a genuine query or
 stream binding and an already-authored nonempty `StoreKey`. It invokes no member,
 key callback, acquisition, read subscription, transport or idle renewal. Inspecting
-a missing key can allocate scalar address metadata, but creates no store or store
-identity. Its stable result reports separate visible `present` and committed
+a missing key creates no store or store identity. The returned stamp and condition
+hold the inspection facts for as long as the caller keeps either. The binding does
+not retain a history of keys that were only inspected. A stable result reports
+separate visible `present` and committed
 `basePresent` facts. An address is occupied while it has visible/base data, a
 native active or draining operation, a finite query attempt, or a retiring stream.
 An opening session can be occupied with both presence flags false.

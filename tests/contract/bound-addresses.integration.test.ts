@@ -143,6 +143,13 @@ function emptyCondition(
   return inspected.condition;
 }
 
+function emptyStamp(binding: Parameters<typeof inspectBoundAddress>[0], key: string) {
+  const inspected = inspectBoundAddress(binding, storeKey(key));
+  if (inspected.kind !== "stable" || inspected.state !== "empty")
+    throw new Error("Expected an empty native address");
+  return inspected.stamp;
+}
+
 const transferReference = { module: "rooms", operation: "updates" };
 
 function importedStream(value: number | undefined) {
@@ -256,16 +263,21 @@ it("permanently invalidates an empty condition across an empty opening and one-u
   const f = fixture();
   try {
     const key = storeKey("one");
-    const original = inspectBoundAddress(f.binding, key);
-    if (original.kind !== "stable" || original.state !== "empty")
-      throw new Error("Expected missing address");
-    const a = f.binding.member("one", { expectEmpty: original.condition });
+    const firstStamp = emptyStamp(f.binding, "one");
+    const independentStamp = emptyStamp(f.binding, "one");
+    const condition = emptyCondition(f.binding, "one");
+    expect(inspectBoundAddress(f.binding, key, { expected: firstStamp })).toMatchObject({
+      state: "empty",
+    });
+    expect(inspectBoundAddress(f.binding, key, { expected: independentStamp })).toMatchObject({
+      state: "empty",
+    });
+    const a = f.binding.member("one", { expectEmpty: condition });
     f.backend.end("events");
     await f.binding.session(a).detached;
-    expect(inspectBoundAddress(f.binding, key, { expected: original.stamp })).toEqual({
-      kind: "changed",
-    });
-    expect(() => f.binding.member("one", { expectEmpty: original.condition })).toThrow(TypeError);
+    for (const expected of [firstStamp, independentStamp])
+      expect(inspectBoundAddress(f.binding, key, { expected })).toEqual({ kind: "changed" });
+    expect(() => f.binding.member("one", { expectEmpty: condition })).toThrow(TypeError);
     expect(f.backend.calls).toHaveLength(1);
     const current = emptyCondition(f.binding, "one");
     const b = f.binding.member("one", { expectEmpty: current });
