@@ -200,19 +200,12 @@ function ensureReadableOperationAllowed(node: Node<unknown>): void {
   if (predictionReadRefusalDepth > 0) throw new Fault("prediction", [node.name]);
 }
 
-function recordDependency(node: Node<unknown>): ComputationFrame | undefined {
-  const frame = trackingStack[trackingStack.length - 1];
-  if (frame === undefined || trackingSuppressed > 0) return undefined;
+function recordDependencyRead(frame: ComputationFrame | undefined, node: Node<unknown>): void {
+  if (frame === undefined || trackingSuppressed > 0) return;
   if (!frame.dependencySet.has(node)) {
     frame.dependencySet.add(node);
     frame.dependencies.push(node);
-    frame.dependencyTokens.set(node, node.token);
   }
-  return frame;
-}
-
-function recordDependencyRead(frame: ComputationFrame | undefined, node: Node<unknown>): void {
-  if (frame === undefined) return;
   frame.dependencyTokens.set(node, node.token);
   if (isComputedFrame(frame)) frame.dependencyEpochs.set(node, node.semanticEpoch);
 }
@@ -702,9 +695,7 @@ function recompute<T>(node: ComputedNode<T>): void {
 
 export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
   ensureReadableOperationAllowed(node as Node<unknown>);
-  const frame = shouldTrack
-    ? recordDependency(node as Node<unknown>)
-    : trackingStack[trackingStack.length - 1];
+  const frame = trackingStack[trackingStack.length - 1];
   notifyRead(node as Node<unknown>, shouldTrack ? "get" : "peek");
   if (node.kind === "signal") {
     checkGraph(node as Node<unknown>, frame);
@@ -721,6 +712,7 @@ export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
     readFailure = error;
   } finally {
     checkGraph(node as Node<unknown>, frame);
+    // A permitted read of a failed child still observes its error.
     if (shouldTrack) recordDependencyRead(frame, node as Node<unknown>);
   }
   const value = node.value as T;
