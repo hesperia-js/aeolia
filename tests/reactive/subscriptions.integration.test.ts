@@ -61,6 +61,88 @@ describe("Aeolia value subscriptions", () => {
     expect(first.get()).toBe(3);
   });
 
+  it.each([
+    { earlierSide: false, hookReadsSide: true, explicitTail: false },
+    { earlierSide: true, hookReadsSide: true, explicitTail: false },
+    { earlierSide: false, hookReadsSide: false, explicitTail: true },
+    { earlierSide: false, hookReadsSide: true, explicitTail: true },
+  ])("introspects distinct sources in first-read order during a watched hook: %j", (options) => {
+    const branch = signal(false);
+    const side = signal(100);
+    const left = signal(1);
+    let activeOuter: Readable<number> | null = null;
+    const trace: string[] = [];
+    const right = signal(2, {
+      [Signal.subtle.watched]() {
+        if (options.hookReadsSide) {
+          expect(Signal.subtle.currentComputed()).toBe(activeOuter);
+          trace.push("hook");
+          side.get();
+        }
+      },
+    });
+    const child = computed(() => (branch.get() ? right.get() : left.get()));
+    const stop = watch(child, () => {});
+    try {
+      branch.set(true);
+      const outer = computed(() => {
+        if (options.earlierSide) side.get();
+        trace.push("enter child");
+        const result = child.get();
+        trace.push("return from child");
+        if (options.explicitTail) side.get();
+        return result;
+      });
+      activeOuter = outer;
+      expect(outer.get()).toBe(2);
+      expect(trace).toEqual(
+        options.hookReadsSide
+          ? ["enter child", "hook", "return from child"]
+          : ["enter child", "return from child"],
+      );
+      const sources = Signal.subtle.introspectSources(outer);
+      expect(sources).toHaveLength(2);
+      expect(sources[0]).toBe(options.earlierSide ? side : child);
+      expect(sources[1]).toBe(options.earlierSide ? child : side);
+    } finally {
+      stop();
+    }
+  });
+
+  it("orders a source at its first admitted read when an earlier attempt was rejected", async () => {
+    const entry = createStore({ name: "entry", initial: 1 });
+    const local = createGraph({ contract: { namespace: "ordered-local", operations: { entry } } });
+    const foreign = createGraph({
+      contract: { namespace: "ordered-foreign", operations: { entry } },
+    });
+    const localStore = local.api.entry();
+    const foreignStore = foreign.api.entry();
+    const side = signal(100);
+    const switchGraph = signal(false);
+    const child = computed(() => (switchGraph.get() ? localStore : foreignStore).value.get());
+    const outer = computed(() => {
+      localStore.value.get();
+      try {
+        child.get();
+      } catch (error) {
+        if (!(error instanceof Fault) || error.kind !== "cross-graph") throw error;
+        side.get();
+        switchGraph.set(true);
+      }
+      return child.get();
+    });
+    try {
+      expect(outer.get()).toBe(1);
+      const sources = Signal.subtle.introspectSources(outer);
+      expect(sources).toHaveLength(3);
+      expect(sources[0]).toBe(localStore.value);
+      expect(sources[1]).toBe(side);
+      expect(sources[2]).toBe(child);
+    } finally {
+      await Promise.all([local.retire(), foreign.retire()]);
+    }
+  });
+
   it("publishes a computed fallback after a caught self-read", () => {
     let runs = 0;
     const view: Readable<number> = computed(() => {

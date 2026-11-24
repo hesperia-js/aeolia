@@ -32,8 +32,10 @@ interface SubscriptionRecord {
 interface ComputationFrame {
   readonly owner: ComputedNode<unknown> | ObserverState;
   readonly dependencies: Node<unknown>[];
-  readonly dependencySet: Set<Node<unknown>>;
+  readonly firstReads: Map<Node<unknown>, number>;
   readonly dependencyTokens: Map<Node<unknown>, number>;
+  nextReadIndex: number;
+  reorderDependencies: boolean;
   graphId?: string;
 }
 
@@ -200,14 +202,29 @@ function ensureReadableOperationAllowed(node: Node<unknown>): void {
   if (predictionReadRefusalDepth > 0) throw new Fault("prediction", [node.name]);
 }
 
-function recordDependencyRead(frame: ComputationFrame | undefined, node: Node<unknown>): void {
-  if (frame === undefined || trackingSuppressed > 0) return;
-  if (!frame.dependencySet.has(node)) {
-    frame.dependencySet.add(node);
-    frame.dependencies.push(node);
+function recordDependencyRead(
+  frame: ComputationFrame | undefined,
+  node: Node<unknown>,
+  readIndex: number | undefined,
+): void {
+  if (frame === undefined) return;
+  if (readIndex !== undefined) {
+    const first = frame.firstReads.get(node);
+    if (first === undefined) frame.dependencies.push(node);
+    if (first === undefined || readIndex < first) {
+      frame.firstReads.set(node, readIndex);
+      if (readIndex + 1 < frame.nextReadIndex) frame.reorderDependencies = true;
+    }
   }
   frame.dependencyTokens.set(node, node.token);
   if (isComputedFrame(frame)) frame.dependencyEpochs.set(node, node.semanticEpoch);
+}
+
+function orderDependencies(frame: ComputationFrame): void {
+  if (!frame.reorderDependencies) return;
+  frame.dependencies.sort(
+    (left, right) => frame.firstReads.get(left)! - frame.firstReads.get(right)!,
+  );
 }
 
 function isComputedFrame(frame: ComputationFrame): frame is ComputedFrame {
@@ -526,8 +543,10 @@ function computedFrame<T>(node: ComputedNode<T>, graphId = node.explicitGraphId)
   return {
     owner: node as ComputedNode<unknown>,
     dependencies: [],
-    dependencySet: new Set(),
+    firstReads: new Map(),
     dependencyTokens: new Map(),
+    nextReadIndex: 0,
+    reorderDependencies: false,
     dependencyEpochs: new Map(),
     ...(graphId === undefined ? {} : { graphId }),
   };
@@ -548,6 +567,7 @@ function evaluateInFrame<T, R>(node: ComputedNode<T>, frame: ComputedFrame, eval
     }
     trackingSuppressed = previousTrackingSuppressed;
     node.computing = false;
+    orderDependencies(frame);
   }
 }
 
@@ -610,8 +630,7 @@ function evaluateNativeBatchRead<T>(
 
 function includeEqualityDependencies(frame: ComputedFrame, comparison: ComputedFrame): void {
   for (const dependency of comparison.dependencies) {
-    if (frame.dependencySet.has(dependency)) continue;
-    frame.dependencySet.add(dependency);
+    if (frame.dependencyTokens.has(dependency)) continue;
     frame.dependencies.push(dependency);
     frame.dependencyTokens.set(dependency, comparison.dependencyTokens.get(dependency)!);
   }
@@ -696,10 +715,17 @@ function recompute<T>(node: ComputedNode<T>): void {
 export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
   ensureReadableOperationAllowed(node as Node<unknown>);
   const frame = trackingStack[trackingStack.length - 1];
+  const trackedFrame = shouldTrack && trackingSuppressed === 0 ? frame : undefined;
+  const source = node as Node<unknown>;
+  // A watched hook can finish another read before this one passes its guards.
+  const readIndex =
+    trackedFrame !== undefined && !trackedFrame.firstReads.has(source)
+      ? trackedFrame.nextReadIndex++
+      : undefined;
   notifyRead(node as Node<unknown>, shouldTrack ? "get" : "peek");
   if (node.kind === "signal") {
     checkGraph(node as Node<unknown>, frame);
-    if (shouldTrack) recordDependencyRead(frame, node as Node<unknown>);
+    recordDependencyRead(trackedFrame, source, readIndex);
     return node.value;
   }
   if (node.computing) throw cycleFault(node as ComputedNode<unknown>);
@@ -713,7 +739,7 @@ export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
   } finally {
     checkGraph(node as Node<unknown>, frame);
     // A permitted read of a failed child still observes its error.
-    if (shouldTrack) recordDependencyRead(frame, node as Node<unknown>);
+    recordDependencyRead(trackedFrame, source, readIndex);
   }
   const value = node.value as T;
   let notificationFailure: unknown;
@@ -1369,8 +1395,10 @@ export function observerTrack<T>(observer: Observer, run: () => T): T {
   const frame: ComputationFrame = {
     owner: state,
     dependencies: [],
-    dependencySet: new Set(),
+    firstReads: new Map(),
     dependencyTokens: new Map(),
+    nextReadIndex: 0,
+    reorderDependencies: false,
   };
   const previousTrackingSuppressed = trackingSuppressed;
   state.tracking = true;
@@ -1398,6 +1426,7 @@ export function observerTrack<T>(observer: Observer, run: () => T): T {
   if (state.active) {
     state.pending = false;
     pendingObserverNotifications.delete(state);
+    orderDependencies(frame);
     replaceObserverDependencies(state, frame.dependencies, frame.dependencyTokens);
     for (const dependency of frame.dependencies) {
       if (dependency.token !== frame.dependencyTokens.get(dependency)) {
