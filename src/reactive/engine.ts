@@ -37,6 +37,10 @@ interface ComputationFrame {
   graphId?: string;
 }
 
+interface ComputedFrame extends ComputationFrame {
+  readonly dependencyEpochs: Map<Node<unknown>, number>;
+}
+
 type FaultReporter = (fault: Fault) => void;
 type LivenessObserver = (live: boolean) => void;
 type ReadObserver = (operation: "get" | "peek") => void;
@@ -89,12 +93,10 @@ interface ComputedNode<T> extends NodeBase<T> {
 }
 
 interface ComputedEvaluation<T> {
-  readonly frame: ComputationFrame;
-  readonly hadValue: boolean;
+  readonly frame: ComputedFrame;
   readonly result: T | undefined;
   readonly thrown: unknown;
   readonly succeeded: boolean;
-  readonly changed: boolean;
 }
 
 type Node<T> = SignalNode<T> | ComputedNode<T>;
@@ -200,13 +202,23 @@ function ensureReadableOperationAllowed(node: Node<unknown>): void {
 
 function recordDependency(node: Node<unknown>): ComputationFrame | undefined {
   const frame = trackingStack[trackingStack.length - 1];
-  if (frame === undefined || trackingSuppressed > 0) return frame;
+  if (frame === undefined || trackingSuppressed > 0) return undefined;
   if (!frame.dependencySet.has(node)) {
     frame.dependencySet.add(node);
     frame.dependencies.push(node);
     frame.dependencyTokens.set(node, node.token);
   }
   return frame;
+}
+
+function recordDependencyRead(frame: ComputationFrame | undefined, node: Node<unknown>): void {
+  if (frame === undefined) return;
+  frame.dependencyTokens.set(node, node.token);
+  if (isComputedFrame(frame)) frame.dependencyEpochs.set(node, node.semanticEpoch);
+}
+
+function isComputedFrame(frame: ComputationFrame): frame is ComputedFrame {
+  return "dependencyEpochs" in frame;
 }
 
 function checkGraph(node: Node<unknown>, frame: ComputationFrame | undefined): void {
@@ -369,11 +381,12 @@ function deactivate(node: Node<unknown>): void {
   notifyLiveness(node, false);
 }
 
-function replaceDependencies(node: ComputedNode<unknown>, next: Node<unknown>[]): void {
+function replaceDependencies(node: ComputedNode<unknown>, frame: ComputationFrame): void {
+  const next = frame.dependencies;
   const previous = new Set(node.dependencies);
   const incoming = new Set(next);
   node.dependencies = next;
-  node.dependencyTokens = new Map(next.map((dependency) => [dependency, dependency.token]));
+  node.dependencyTokens = frame.dependencyTokens;
   node.captureEpoch += 1;
   node.semanticEpoch += 1;
   node.adoptedBaseline = undefined;
@@ -435,7 +448,8 @@ function dependenciesChanged(
       }
       if (dependency.token !== recordedToken) return true;
     }
-    return false;
+    // A later dependency can run authored code that changes an earlier one.
+    return dependencies.some((dependency) => dependency.token !== dependencyTokens.get(dependency));
   });
 }
 
@@ -515,37 +529,24 @@ function flushLinkedEvaluationSeeds(): void {
   beginPropagation([]);
 }
 
-function evaluateComputed<T>(node: ComputedNode<T>): ComputedEvaluation<T> {
-  const frame: ComputationFrame = {
+function computedFrame<T>(node: ComputedNode<T>, graphId = node.explicitGraphId): ComputedFrame {
+  return {
     owner: node as ComputedNode<unknown>,
     dependencies: [],
     dependencySet: new Set(),
     dependencyTokens: new Map(),
-    ...(node.explicitGraphId === undefined ? {} : { graphId: node.explicitGraphId }),
+    dependencyEpochs: new Map(),
+    ...(graphId === undefined ? {} : { graphId }),
   };
-  const hadValue = node.hasValue;
-  const previous = node.value as T;
+}
+
+function evaluateInFrame<T, R>(node: ComputedNode<T>, frame: ComputedFrame, evaluate: () => R): R {
   node.computing = true;
   trackingStack.push(frame);
-
-  let result: T | undefined;
-  let thrown: unknown;
-  let succeeded = false;
-  let changed = true;
   const previousTrackingSuppressed = trackingSuppressed;
   trackingSuppressed = 0;
   try {
-    result = node.compute.call(node.api);
-    if (isPromiseLike(result)) {
-      thrown = new Fault("async-compute", [node.name]);
-    } else {
-      succeeded = true;
-      // Keep this frame active through equality. Reads in an equality
-      // callback belong to this computed, not to an outer computation.
-      if (hadValue) changed = !node.equals.call(node.api, previous, result as T);
-    }
-  } catch (error) {
-    thrown = error;
+    return evaluate();
   } finally {
     if (trackingStack[trackingStack.length - 1] === frame) trackingStack.pop();
     else {
@@ -555,15 +556,38 @@ function evaluateComputed<T>(node: ComputedNode<T>): ComputedEvaluation<T> {
     trackingSuppressed = previousTrackingSuppressed;
     node.computing = false;
   }
+}
 
-  return { frame, hadValue, result, thrown, succeeded, changed };
+function evaluateComputed<T>(node: ComputedNode<T>): ComputedEvaluation<T> {
+  const frame = computedFrame(node);
+  try {
+    const result = evaluateInFrame(node, frame, () => {
+      const value = node.compute.call(node.api);
+      if (isPromiseLike(value)) throw new Fault("async-compute", [node.name]);
+      return value;
+    });
+    return { frame, result, thrown: undefined, succeeded: true };
+  } catch (thrown) {
+    return { frame, result: undefined, thrown, succeeded: false };
+  }
+}
+
+function inputsCurrent(frame: ComputedFrame): boolean {
+  return frame.dependencies.every(
+    (dependency) => dependency.semanticEpoch === frame.dependencyEpochs.get(dependency),
+  );
 }
 
 function currentNativeBatchRead<T>(node: ComputedNode<T>): ComputedEvaluation<T> | undefined {
   const read = node.nativeBatchRead;
   if (read === undefined || read.epoch !== node.semanticEpoch) return undefined;
-  const { dependencies, dependencyTokens } = read.evaluation.frame;
-  if (dependenciesChanged(dependencies, dependencyTokens) || read.epoch !== node.semanticEpoch)
+  const frame = read.evaluation.frame;
+  if (
+    dependenciesChanged(frame.dependencies, frame.dependencyTokens) ||
+    !inputsCurrent(frame) ||
+    read !== node.nativeBatchRead ||
+    read.epoch !== node.semanticEpoch
+  )
     return undefined;
   return read.evaluation;
 }
@@ -582,23 +606,75 @@ function evaluateNativeBatchRead<T>(
   )
     return undefined;
 
-  // Compare against the last published evaluation until propagation owns the commit.
+  // Cache the value independently of the equality decision made at publication.
   const epoch = node.semanticEpoch;
   const evaluation = evaluateComputed(node);
-  if (!evaluation.succeeded || evaluation.thrown != null) throw evaluation.thrown;
-  if (node.live && current() && epoch === node.semanticEpoch)
+  if (!evaluation.succeeded) throw evaluation.thrown;
+  if (node.live && current() && epoch === node.semanticEpoch && inputsCurrent(evaluation.frame))
     node.nativeBatchRead = { epoch, evaluation };
   return evaluation;
+}
+
+function includeEqualityDependencies(frame: ComputedFrame, comparison: ComputedFrame): void {
+  for (const dependency of comparison.dependencies) {
+    if (frame.dependencySet.has(dependency)) continue;
+    frame.dependencySet.add(dependency);
+    frame.dependencies.push(dependency);
+    frame.dependencyTokens.set(dependency, comparison.dependencyTokens.get(dependency)!);
+  }
+  if (comparison.graphId !== undefined) frame.graphId = comparison.graphId;
+}
+
+function prepareComputedPublication<T>(
+  node: ComputedNode<T>,
+  hadValue: boolean,
+  previous: T,
+): ComputedEvaluation<T> & { readonly changed: boolean } {
+  let evaluation = currentNativeBatchRead(node);
+  node.nativeBatchRead = undefined;
+  for (let attempt = 0; attempt < MAX_CONSECUTIVE_WRITES; attempt += 1) {
+    evaluation ??= evaluateComputed(node);
+    const { frame } = evaluation;
+    if (!evaluation.succeeded) return { ...evaluation, changed: true };
+    if (!inputsCurrent(frame)) {
+      evaluation = undefined;
+      continue;
+    }
+    if (!hadValue) return { ...evaluation, changed: true };
+
+    const comparison = computedFrame(node, frame.graphId);
+    let changed = true;
+    let thrown: unknown;
+    try {
+      const result = evaluation.result as T;
+      changed = evaluateInFrame(
+        node,
+        comparison,
+        () => !node.equals.call(node.api, previous, result),
+      );
+    } catch (cause) {
+      thrown = cause;
+    }
+    const valueCurrent = inputsCurrent(frame);
+    if (thrown != null || (valueCurrent && inputsCurrent(comparison))) {
+      includeEqualityDependencies(frame, comparison);
+      return { ...evaluation, changed, thrown };
+    }
+    if (!valueCurrent) evaluation = undefined;
+  }
+  throw new Fault("propagation", [node.name]);
 }
 
 function recompute<T>(node: ComputedNode<T>): void {
   const linkedFirstRun = !node.hasRun && node.linkedBaseline !== undefined && node.live;
   const previousToken = node.token;
-  const nativeRead = currentNativeBatchRead(node);
-  node.nativeBatchRead = undefined;
-  const { frame, hadValue, result, thrown, succeeded, changed } =
-    nativeRead ?? evaluateComputed(node);
-  replaceDependencies(node as ComputedNode<unknown>, frame.dependencies);
+  const hadValue = node.hasValue;
+  const { frame, result, thrown, succeeded, changed } = prepareComputedPublication(
+    node,
+    hadValue,
+    node.value as T,
+  );
+  replaceDependencies(node as ComputedNode<unknown>, frame);
   if (node.explicitGraphId === undefined) node.graphId = frame.graphId;
   node.hasRun = true;
   node.marked = false;
@@ -632,6 +708,7 @@ export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
   notifyRead(node as Node<unknown>, shouldTrack ? "get" : "peek");
   if (node.kind === "signal") {
     checkGraph(node as Node<unknown>, frame);
+    if (shouldTrack) recordDependencyRead(frame, node as Node<unknown>);
     return node.value;
   }
   if (node.computing) throw cycleFault(node as ComputedNode<unknown>);
@@ -644,9 +721,7 @@ export function readNode<T>(node: Node<T>, shouldTrack: boolean): T {
     readFailure = error;
   } finally {
     checkGraph(node as Node<unknown>, frame);
-    if (frame !== undefined && node.kind === "computed") {
-      frame.dependencyTokens.set(node as Node<unknown>, node.token);
-    }
+    if (shouldTrack) recordDependencyRead(frame, node as Node<unknown>);
   }
   const value = node.value as T;
   let notificationFailure: unknown;

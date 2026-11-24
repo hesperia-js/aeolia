@@ -41,6 +41,24 @@ describe("Aeolia value subscriptions", () => {
     stop();
   });
 
+  it("rechecks an earlier cached dependency after refreshing a later one", () => {
+    const first = signal(1);
+    const trigger = signal(false);
+    const later = computed(() => {
+      if (trigger.get()) first.set(3);
+      return 0;
+    });
+    const view = computed(() => {
+      const value = first.get();
+      later.get();
+      return value;
+    });
+    expect(view.get()).toBe(1);
+    trigger.set(true);
+    expect(view.get()).toBe(3);
+    expect(first.get()).toBe(3);
+  });
+
   it("allows safe callback reads without tracking an enclosing computed", () => {
     const source = signal(1);
     const stable = signal(10);
