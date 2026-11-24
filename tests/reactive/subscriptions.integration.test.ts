@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createGraph, createStore } from "../../src/index.ts";
 import { Fault } from "../../src/fault.ts";
 import {
   Signal,
@@ -6,6 +7,7 @@ import {
   signal,
   subscribe,
   watch,
+  type Readable,
   type WritableSignal,
 } from "../../src/reactive.ts";
 
@@ -58,6 +60,114 @@ describe("Aeolia value subscriptions", () => {
     expect(view.get()).toBe(3);
     expect(first.get()).toBe(3);
   });
+
+  it("publishes a computed fallback after a caught self-read", () => {
+    let runs = 0;
+    const view: Readable<number> = computed(() => {
+      runs += 1;
+      try {
+        return view.get();
+      } catch (error) {
+        if (!(error instanceof Fault) || error.kind !== "cycle") throw error;
+        return 7;
+      }
+    });
+    expect(view.get()).toBe(7);
+    expect(view.get()).toBe(7);
+    expect(runs).toBe(1);
+    const unhandled: Readable<number> = computed(() => unhandled.get());
+    expect(() => unhandled.get()).toThrow(expect.objectContaining({ kind: "cycle" }));
+  });
+
+  it("keeps local dependencies when a computed catches a rejected foreign Store read", async () => {
+    const entry = createStore({ name: "entry", initial: 1 });
+    const local = createGraph({ contract: { namespace: "local", operations: { entry } } });
+    const foreign = createGraph({ contract: { namespace: "foreign", operations: { entry } } });
+    const localStore = local.api.entry();
+    const foreignStore = foreign.api.entry();
+    let runs = 0;
+    const view = computed(() => {
+      runs += 1;
+      const own = localStore.value.get();
+      try {
+        return (own ?? 0) + (foreignStore.value.get() ?? 0);
+      } catch (error) {
+        if (!(error instanceof Fault) || error.kind !== "cross-graph") throw error;
+        return own;
+      }
+    });
+    const unhandled = computed(() => {
+      localStore.value.get();
+      return foreignStore.value.get();
+    });
+    let stop: (() => void) | undefined;
+    try {
+      expect(() => unhandled.get()).toThrow(expect.objectContaining({ kind: "cross-graph" }));
+      const values: Array<number | undefined> = [];
+      stop = subscribe(view, (value) => values.push(value));
+      foreignStore.set(23);
+      expect(runs).toBe(1);
+      localStore.set(2);
+      expect(values).toEqual([1, 2]);
+      expect(runs).toBe(2);
+    } finally {
+      stop?.();
+      await Promise.all([local.retire(), foreign.retire()]);
+    }
+  });
+
+  it("publishes a changed value after equality catches a self-read", () => {
+    const source = signal(1);
+    let caught = 0;
+    const view = computed(() => source.get(), {
+      equals(previous, next) {
+        try {
+          this.get();
+        } catch (error) {
+          if (!(error instanceof Fault) || error.kind !== "cycle") throw error;
+          caught += 1;
+        }
+        return Object.is(previous, next);
+      },
+    });
+    const values: number[] = [];
+    const stop = subscribe(view, (value) => values.push(value));
+    try {
+      source.set(2);
+      expect(values).toEqual([1, 2]);
+      expect(caught).toBe(1);
+    } finally {
+      stop();
+    }
+  });
+
+  it.each(["ordinary error", "cached child cycle"] as const)(
+    "retains an observed child dependency after catching %s",
+    (failure) => {
+      const enabled = signal(false);
+      const child: Readable<number> = computed(() => {
+        if (enabled.get()) return 9;
+        if (failure === "cached child cycle") return child.get();
+        throw new Error("not ready");
+      });
+      const view = computed(() => {
+        try {
+          return child.get();
+        } catch {
+          return 7;
+        }
+      });
+      const values: number[] = [];
+      const stop = subscribe(view, (value) => values.push(value));
+      try {
+        enabled.set(true);
+        expect(values).toEqual([7, 9]);
+        expect(view.get()).toBe(9);
+      } finally {
+        stop();
+      }
+    },
+  );
 
   it("allows safe callback reads without tracking an enclosing computed", () => {
     const source = signal(1);
