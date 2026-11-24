@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import {
   adopt,
   affects,
+  computed,
+  signal,
   createGraph,
   createMutation,
   createQuery,
@@ -10,6 +12,7 @@ import {
   peekStore,
   snapshot,
   subscribe,
+  watch,
   type Store,
   type StoreCapture,
   type Unsubscribe,
@@ -158,61 +161,197 @@ for (const read of ["none", "ordinary", "capture", "available"] as const) {
   );
 }
 
-test("native reads and the settled subscriber share the borrowed prediction for one revision", async () => {
-  const work = Promise.withResolvers<void>();
-  const query = createQuery({
-    name: "query",
-    key: (_input: void) => "target",
-    fetch: async () => ({ amount: 0 }),
-  });
-  const mutation = createMutation({
-    name: "prediction",
-    run: (_input: void) => work.promise,
-    affects: [
-      affects(query, {
-        select: () => undefined,
-        on: "invalidate",
-        optimistic: (value) => ({ amount: (value?.amount ?? 0) * 10 }),
-      }),
-    ],
-  });
-  let write: (() => void) | undefined;
-  const trigger = createStore({
-    name: "trigger",
-    initial: 0,
-    equals(previous, proposed) {
-      if (previous === 0 && proposed === 1) write?.();
-      return Object.is(previous, proposed);
+test.each(["distinct", "equal"] as const)(
+  "the settled value reuses the borrowed prediction when configured equality says %s",
+  async (settled) => {
+    const work = Promise.withResolvers<void>();
+    const setting = signal(false);
+    const policy = computed(() => setting.get(), { equals: () => true });
+    const stopPolicy = subscribe(policy, () => {});
+    const query = createQuery({
+      name: "query",
+      key: (_input: void) => "target",
+      fetch: async () => ({ amount: 0 }),
+      equals(previous, proposed) {
+        return previous.amount >= 10 && proposed.amount >= 10
+          ? policy.get()
+          : Object.is(previous, proposed);
+      },
+    });
+    const mutation = createMutation({
+      name: "prediction",
+      run: (_input: void) => work.promise,
+      affects: [
+        affects(query, {
+          select: () => undefined,
+          on: "invalidate",
+          optimistic: (value) => ({ amount: (value?.amount ?? 0) * 10 }),
+        }),
+      ],
+    });
+    let write: (() => void) | undefined;
+    const trigger = createStore({
+      name: "trigger",
+      initial: 0,
+      equals(previous, proposed) {
+        if (previous === 0 && proposed === 1) write?.();
+        return Object.is(previous, proposed);
+      },
+    });
+    const graph = createGraph({
+      contract: { namespace: "batch-prediction", operations: { query, mutation, trigger } },
+    });
+    const store = graph.api.query(undefined, { initial: { amount: 1 } });
+    const pending = graph.api.mutation();
+    const values: Array<{ amount: number } | undefined> = [];
+    const stop = subscribe(store.value, (value) => values.push(value));
+    let first: StoreCapture<{ amount: number }> | undefined;
+    let second: StoreCapture<{ amount: number }> | undefined;
+    write = () => {
+      write = undefined;
+      store.set({ amount: 2 });
+      first = peekStore(store);
+      second = peekStore(store);
+      if (settled === "equal") setting.set(true);
+    };
+    try {
+      graph.api.trigger().set(1);
+      if (
+        first?.kind !== "stable" ||
+        !first.present ||
+        second?.kind !== "stable" ||
+        !second.present
+      )
+        throw new Error("Expected both in-batch captures to be present");
+      expect(first.value).toEqual({ amount: 20 });
+      expect(second.valueRevision).toBe(first.valueRevision);
+      expect(second.value).toBe(first.value);
+      expect(store.value.peek()).toBe(first.value);
+      expect(values.map((value) => value?.amount)).toEqual(settled === "equal" ? [10] : [10, 20]);
+      if (settled === "distinct") expect(values[1]).toBe(first.value);
+    } finally {
+      stop();
+      stopPolicy();
+      work.resolve();
+      await pending;
+      await graph.retire();
+    }
+  },
+);
+
+for (const suppressPolicyNotification of [false, true]) {
+  test.each(["without capture", "with capture"] as const)(
+    `settled equality follows the current policy %s when the policy suppresses notifications: ${suppressPolicyNotification}`,
+    async (mode) => {
+      const setting = signal(false);
+      const policy = computed(
+        () => setting.get(),
+        suppressPolicyNotification ? { equals: () => true } : undefined,
+      );
+      const stopPolicy = subscribe(policy, () => {});
+      const entry = createStore({
+        name: "entry",
+        initial: 1,
+        equals(previous, proposed) {
+          return previous === 1 && proposed === 2 ? policy.get() : Object.is(previous, proposed);
+        },
+      });
+      let inside: StoreCapture<number> | undefined;
+      const trigger = createStore({
+        name: "trigger",
+        initial: 0,
+        equals(previous, proposed) {
+          if (previous === 0 && proposed === 1) {
+            target.set(2);
+            setting.set(true);
+            if (mode === "with capture") inside = peekStore(target);
+          }
+          return Object.is(previous, proposed);
+        },
+      });
+      const graph = createGraph({
+        contract: { namespace: "settled-equality-policy", operations: { entry, trigger } },
+      });
+      const target = graph.api.entry();
+      const delivered: Array<number | undefined> = [];
+      const stop = subscribe(target.value, (value) => delivered.push(value));
+      try {
+        graph.api.trigger().set(1);
+        if (mode === "with capture") {
+          expect(inside).toMatchObject({
+            kind: "stable",
+            present: true,
+            value: 2,
+            valueRevision: 2,
+          });
+        }
+        expect(target.value.peek()).toBe(2);
+        expect(delivered).toEqual([1]);
+      } finally {
+        stop();
+        stopPolicy();
+        await graph.retire();
+      }
     },
-  });
-  const graph = createGraph({
-    contract: { namespace: "batch-prediction", operations: { query, mutation, trigger } },
-  });
-  const store = graph.api.query(undefined, { initial: { amount: 1 } });
-  const pending = graph.api.mutation();
-  const values: Array<{ amount: number } | undefined> = [];
-  const stop = subscribe(store.value, (value) => values.push(value));
-  let first: StoreCapture<{ amount: number }> | undefined;
-  let second: StoreCapture<{ amount: number }> | undefined;
-  write = () => {
-    write = undefined;
-    store.set({ amount: 2 });
-    first = peekStore(store);
-    second = peekStore(store);
-  };
-  try {
-    graph.api.trigger().set(1);
-    if (first?.kind !== "stable" || !first.present || second?.kind !== "stable" || !second.present)
-      throw new Error("Expected both in-batch captures to be present");
-    expect(first.value).toEqual({ amount: 20 });
-    expect(second.valueRevision).toBe(first.valueRevision);
-    expect(second.value).toBe(first.value);
-    expect(values.map((value) => value?.amount)).toEqual([10, 20]);
-    expect(values[1]).toBe(first.value);
-  } finally {
-    stop();
-    work.resolve();
-    await pending;
-    await graph.retire();
-  }
-});
+  );
+}
+
+test.each(["without capture", "with capture"] as const)(
+  "a later equality dependency can replace an earlier Store input %s",
+  async (mode) => {
+    let target: Store<number>;
+    let inside: StoreCapture<number> | undefined;
+    const side = signal(false);
+    const controller = computed(() => {
+      if (side.get()) target.set(3);
+      return 0;
+    });
+    const entry = createStore({
+      name: "target",
+      initial: 1,
+      snapshot: true,
+      equals(previous, proposed) {
+        if (previous === 1 && proposed === 2) controller.get();
+        return Object.is(previous, proposed);
+      },
+    });
+    const trigger = createStore({
+      name: "trigger",
+      initial: 0,
+      equals(previous, proposed) {
+        if (previous === 0 && proposed === 1) {
+          target.set(2);
+          if (mode === "with capture") inside = peekStore(target);
+          side.set(true);
+        }
+        return Object.is(previous, proposed);
+      },
+    });
+    const graph = createGraph({
+      contract: { namespace: "subscription-validation", operations: { entry, trigger } },
+    });
+    target = graph.api.entry();
+    const stopController = watch(controller, () => {});
+    const delivered: Array<number | undefined> = [];
+    const stop = subscribe(target.value, (value) => delivered.push(value));
+    try {
+      graph.api.trigger().set(1);
+      if (mode === "with capture") {
+        expect(inside).toMatchObject({ kind: "stable", present: true, value: 2, valueRevision: 2 });
+      }
+      expect(snapshot(graph).entries.target?.value).toBe(3);
+      expect(target.value.peek()).toBe(3);
+      expect(peekStore(target)).toMatchObject({
+        kind: "stable",
+        present: true,
+        value: 3,
+        valueRevision: 3,
+      });
+      expect(delivered.at(-1)).toBe(3);
+    } finally {
+      stop();
+      stopController();
+      await graph.retire();
+    }
+  },
+);
