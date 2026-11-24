@@ -83,8 +83,18 @@ interface ComputedNode<T> extends NodeBase<T> {
   error?: unknown;
   computing: boolean;
   marked: boolean;
+  nativeBatchRead?: { readonly epoch: number; readonly evaluation: ComputedEvaluation<T> };
   adoptedBaseline?: AdoptedBaseline;
   linkedBaseline?: AdoptedBaseline;
+}
+
+interface ComputedEvaluation<T> {
+  readonly frame: ComputationFrame;
+  readonly hadValue: boolean;
+  readonly result: T | undefined;
+  readonly thrown: unknown;
+  readonly succeeded: boolean;
+  readonly changed: boolean;
 }
 
 type Node<T> = SignalNode<T> | ComputedNode<T>;
@@ -353,6 +363,7 @@ function deactivate(node: Node<unknown>): void {
       if (dependency !== node) removeLiveEdge(dependency, node);
     }
     node.marked = false;
+    node.nativeBatchRead = undefined;
   }
   invokeLifecycle(node, node.unwatchedCallback);
   notifyLiveness(node, false);
@@ -465,11 +476,7 @@ function ensureFreshComputed<T>(node: ComputedNode<T>): void {
       return;
     }
     if (node.live) {
-      if (
-        !node.marked &&
-        propagation.pendingSeeds.size === 0 &&
-        (nativeReadDepth === 0 || propagation.batchSeeds.size === 0)
-      ) {
+      if (!node.marked && propagation.pendingSeeds.size === 0) {
         if (node.hasError) throw node.error;
         return;
       }
@@ -508,9 +515,7 @@ function flushLinkedEvaluationSeeds(): void {
   beginPropagation([]);
 }
 
-function recompute<T>(node: ComputedNode<T>): void {
-  const linkedFirstRun = !node.hasRun && node.linkedBaseline !== undefined && node.live;
-  const previousToken = node.token;
+function evaluateComputed<T>(node: ComputedNode<T>): ComputedEvaluation<T> {
   const frame: ComputationFrame = {
     owner: node as ComputedNode<unknown>,
     dependencies: [],
@@ -551,6 +556,48 @@ function recompute<T>(node: ComputedNode<T>): void {
     node.computing = false;
   }
 
+  return { frame, hadValue, result, thrown, succeeded, changed };
+}
+
+function currentNativeBatchRead<T>(node: ComputedNode<T>): ComputedEvaluation<T> | undefined {
+  const read = node.nativeBatchRead;
+  if (read === undefined || read.epoch !== node.semanticEpoch) return undefined;
+  const { dependencies, dependencyTokens } = read.evaluation.frame;
+  if (dependenciesChanged(dependencies, dependencyTokens) || read.epoch !== node.semanticEpoch)
+    return undefined;
+  return read.evaluation;
+}
+
+function evaluateNativeBatchRead<T>(
+  node: ComputedNode<T>,
+  current: () => boolean,
+): ComputedEvaluation<T> | undefined {
+  if (!node.live || !node.hasRun || propagation.batchSeeds.size === 0) return undefined;
+  const nativeRead = currentNativeBatchRead(node);
+  if (nativeRead !== undefined) return nativeRead;
+  if (
+    node.adoptedBaseline === undefined
+      ? !dependencyChanged(node as ComputedNode<unknown>)
+      : adoptedBaselineCurrent(node.adoptedBaseline)
+  )
+    return undefined;
+
+  // Compare against the last published evaluation until propagation owns the commit.
+  const epoch = node.semanticEpoch;
+  const evaluation = evaluateComputed(node);
+  if (!evaluation.succeeded || evaluation.thrown != null) throw evaluation.thrown;
+  if (node.live && current() && epoch === node.semanticEpoch)
+    node.nativeBatchRead = { epoch, evaluation };
+  return evaluation;
+}
+
+function recompute<T>(node: ComputedNode<T>): void {
+  const linkedFirstRun = !node.hasRun && node.linkedBaseline !== undefined && node.live;
+  const previousToken = node.token;
+  const nativeRead = currentNativeBatchRead(node);
+  node.nativeBatchRead = undefined;
+  const { frame, hadValue, result, thrown, succeeded, changed } =
+    nativeRead ?? evaluateComputed(node);
   replaceDependencies(node as ComputedNode<unknown>, frame.dependencies);
   if (node.explicitGraphId === undefined) node.graphId = frame.graphId;
   node.hasRun = true;
@@ -2246,6 +2293,14 @@ export const __internal = Object.freeze({
     const node = nodeFor(readable);
     nativeReadDepth += 1;
     try {
+      if (node.kind === "computed" && !node.computing) {
+        ensureReadableOperationAllowed(node as Node<unknown>);
+        const evaluation = evaluateNativeBatchRead(node, current);
+        if (evaluation !== undefined) {
+          checkGraph(node as Node<unknown>, trackingStack[trackingStack.length - 1]);
+          return evaluation.result as T;
+        }
+      }
       return readNode(node, false);
     } finally {
       nativeReadDepth -= 1;
@@ -2254,6 +2309,7 @@ export const __internal = Object.freeze({
       if (node.kind === "computed" && !current()) {
         node.hasRun = false;
         node.marked = true;
+        node.nativeBatchRead = undefined;
         node.adoptedBaseline = undefined;
         node.linkedBaseline = undefined;
         node.captureEpoch += 1;
