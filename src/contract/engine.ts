@@ -59,7 +59,6 @@ import {
   assertBindingContextOpen,
   beginBindingAddress,
   endBindingAddress,
-  bindingAddress,
 } from "./registry.ts";
 import type {
   BindingContextRuntime,
@@ -321,14 +320,15 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
   const retirement = previous?.boundRetirement;
   const transitioning = previous?.transitioning;
   const epoch = state.resetEpoch;
-  const address = binding === undefined ? undefined : bindingAddress(binding, key);
-  const guard = address?.guard;
+  const previousAddress = binding?.addresses.get(key);
+  const guard = previousAddress?.guard;
   const current = (): boolean =>
     !state.disposed &&
     binding?.context.disposed !== true &&
     state.resetEpoch === epoch &&
     lookup() === previous &&
-    (address === undefined || address.guard === guard) &&
+    binding?.addresses.get(key) === previousAddress &&
+    previousAddress?.guard === guard &&
     (previous === undefined ||
       (!previous.disposed &&
         previous.transitioning === transitioning &&
@@ -364,6 +364,7 @@ function prepareRealmAdoption(graph: Graph, key: string, binding?: StoreBindingR
       }
       if (binding?.kind === "stream" && boundAddressOccupied(binding, key)) return undefined;
       const operation = beginBindingAddress(binding, key);
+      const address = binding?.addresses.get(key);
       let notifyProgress: (() => void) | undefined;
       try {
         const definition = binding === undefined ? state.declaredStores.get(key) : undefined;
@@ -1656,7 +1657,7 @@ interface PassiveQueryClaimRecord {
   readonly callerRowsBefore: StoreRuntime<unknown>["callers"];
   readonly graphEntryBefore: StoreRuntime<unknown> | undefined;
   readonly bindingEntryBefore: StoreRuntime<unknown> | undefined;
-  readonly addressRecord?: ReturnType<typeof bindingAddress>;
+  readonly addressRecord?: BindingAddressRuntime;
   readonly addressGuard?: object;
   readonly resetEpoch: number;
   readonly graphCurrent: () => boolean;
@@ -2476,7 +2477,7 @@ function createPassiveQueryRecord(args: {
   readonly callerRowsBefore: StoreRuntime<unknown>["callers"];
   readonly graphEntryBefore: StoreRuntime<unknown> | undefined;
   readonly bindingEntryBefore: StoreRuntime<unknown> | undefined;
-  readonly addressRecord?: ReturnType<typeof bindingAddress>;
+  readonly addressRecord?: BindingAddressRuntime;
   readonly addressGuard?: object;
   readonly resetEpoch: number;
   readonly graphCurrent: () => boolean;
