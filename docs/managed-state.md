@@ -1,12 +1,5 @@
 # Managed state
 
-After a query failure, Aeolia allows one automatic recovery attempt. If that
-recovery also fails, automatic recovery is disarmed. A successful recovery or
-explicit `revalidate()` re-arms it.
-
-Query member calls share that automatic recovery allowance. After it is exhausted,
-opening another view of the same failed query does not dispatch another request.
-
 Aeolia maps operation definitions to managed reactive state:
 
 - keyed writable stores with stable identity;
@@ -80,48 +73,32 @@ const item = graph.api.items("one");
 
 ### Query acquisition
 
-The optional `acquisition` field controls whether a fresh landing can satisfy a
-query member call. It accepts `"cache"` or `"fetch"`. Omission and `undefined`
-mean `"cache"`. When present, `acquisition` must be an own data property.
-Accessors, inherited properties, and other values cause a synchronous
-`TypeError`.
+The `acquisition` option controls whether a fresh landing can satisfy a query
+call. Its default is `"cache"`. With `"fetch"`, the call enters the normal
+request path even when data is fresh. Same-key raw calls join the current
+request, whose initiating callback owns the result. That callback may serve
+a native cache. Supply `acquisition` as an own data property. Omission and
+`undefined` use the default. Accessors, inherited properties, and invalid
+values throw `TypeError` synchronously.
 
-With `"cache"`, a member call reuses a fresh landing. With `"fetch"`, Aeolia
-enters the ordinary request path even when a landing is fresh. The
-call joins an existing current request and remains subject to cancellation,
-reset checks, and the shared automatic-recovery allowance. An exhausted
-recovery allowance still blocks another automatic request; call `revalidate()`
-to retry explicitly. The callback may satisfy a request from a native cache,
-so `"fetch"` does not guarantee network traffic. While the request runs, the
-prior committed value remains available through `value`. Status is
-`"revalidating"` and `pending` is `true`. `ready` waits for the request to
-settle. Raw calls with the same key share one request. Later callers join a
-current request, and the initiating call's callback remains responsible for
-its result.
+After failure, same-key calls share one automatic recovery attempt. If it
+fails, further member calls do not dispatch another attempt. A successful
+recovery or explicit `revalidate()` re-arms it. Cancellation and reset still
+apply to requests.
 
 `createQuery` captures and normalizes the policy on its frozen result. A graph
 captures a structural query definition's policy when it registers that
 definition. Later changes to the source object do not change the graph's policy.
 
-A query member call starts a fetch when needed. To wait for committed data
-without starting another request, read the query's `ready` getter:
+Read `await item.ready` to wait for a committed value without starting work.
+Each caller's promise resolves when `pending` is false and `status` is
+`"ready"`. It rejects with the query's `error` on `"failed"`, even when an
+older value remains visible. Start work through a member call or
+`revalidate()`.
 
-```ts
-const value = await item.ready;
-```
-
-`ready` returns a promise for a committed value snapshot, not a reactive
-accessor. It follows this caller's `pending` and `status`: it resolves when
-the caller is no longer pending and its status is `"ready"`, and rejects
-with the query's error when status becomes `"failed"`. A refresh failure
-rejects the wait even when an older value remains available in `value`;
-the same failure remains readable through `error`.
-
-An active request sets `pending` to `true`. With no committed value its
-status is `"fetching"`; with a committed value it is `"revalidating"`, even
-if that older value has not exceeded its freshness window. A stale value
-alone does not satisfy readiness. Reading `ready` does not start a request;
-use a query member call or explicit `revalidate()` to initiate one.
+During a request, `pending` is true. Status is `"fetching"` without a
+committed value and `"revalidating"` with one, even if it is still fresh.
+A stale value alone cannot satisfy `ready`.
 
 With `revalidateAfterMs: 0`, a successful fetch still publishes `"ready"`
 and resolves existing readiness waits. The freshness timer then marks the
@@ -132,27 +109,15 @@ A committed `undefined` is a valid result when it belongs to the query's
 value type. Optimistic predictions do not satisfy readiness. Cancellation
 or graph disposal also ends a pending wait.
 
-Use `subscribe(item.value, observer)` for ongoing value delivery. Readiness
-and subscription are independent: one waits for the ready state, while the
-other observes the store's visible value, including optimistic predictions.
+Use `subscribe(store, observer)` from `aeolia` to receive visible Store values,
+including predictions and present `undefined`. Subscription immediately
+delivers an initial or retained value and applies the Store's equality rule
+to later values. An empty Store stays silent, even if a stream closes or
+fails before its first value. Observe `status` and `error` for those cases.
 
-To receive values only once a query or stream store has data, pass the store itself:
-
-```ts
-const stop = subscribe(stream, (value) => console.log(value));
-```
-
-This skips an empty store's placeholder. An explicit initial value or a
-retained value is delivered immediately, and a real `undefined` value is
-delivered when the store's value type allows it. Later equal values are
-suppressed by the store's equality rule. Closing or failing a stream before
-its first value does not fabricate a value callback; observe `status` and
-`error` for those transitions.
-
-`subscribe(stream.value, callback)` still observes the raw readable and
-immediately delivers its current value, including the empty placeholder.
-Store-aware subscription is available from `aeolia`; `aeolia/reactive`
-continues to provide the readable-only subscription API.
+`subscribe(store.value, observer)` subscribes to the raw readable and delivers
+its initial value even if it is an empty placeholder. `aeolia/reactive`
+supports readable subscriptions.
 
 Projections keep their initial state: accumulation starts at `[]`, and
 reduction starts at the supplied `initial`. Their input consumes every source
@@ -286,31 +251,21 @@ remains pending.
 
 ## Retiring a binding context
 
-Use `await context.retire()` to close one binding context and join only its
-bound queries, mutations, streams and cleanup. Graph retirement also joins raw
-operations, every binding context and independent projection generation.
-Context retirement leaves raw operations and other contexts running.
+`await context.retire()` uses the same completion rules as
+[graph retirement](#retiring-a-graph) for this context's bound operations and
+cleanup. Raw operations and other contexts keep running. Graph retirement
+also joins them and independent projection generations.
 
-Retirement follows the owner's disposal path. After admission, repeated and
-reentrant calls return the same `Promise<void>`. A binding-context retirement
-precondition failure is retained in that context's shared promise. A graph
-retirement that requires reactive writes first checks whether those writes are
-allowed; a refusal throws synchronously without admitting retirement. A later
-legal call can start it. You can call `retire()` after synchronous `dispose()`.
-`dispose()`, `cancelPending()` and stream-session `detached` keep their existing
-completion contracts; none acknowledges that provider work or physical stream
-cleanup has ended.
+You can start retirement after synchronous `dispose()`. After admission,
+repeated and reentrant calls share one `Promise<void>`. A context precondition failure is
+retained in that shared promise. Graph retirement's first write check can
+throw before admission. The synchronous disposal, cancellation, and stream
+`detached` APIs each report a logical transition.
 
-The retirement promise fulfills after logical disposal and all original work,
-native continuations and acknowledged asynchronous cleanup that Aeolia can track
-through its existing call semantics finish. If any such operation never
-acknowledges completion, the promise remains pending. Query, mutation,
-preparation and stream failures keep their existing caller or diagnostic
-behavior and do not fail retirement by themselves. Cleanup failures do reject
-it: one failure preserves its exact cause, including `undefined`, and several
-failures are reported in an `AggregateError` with the original causes in
-deterministic owner and cleanup-attempt order. An original `AggregateError`
-remains one cause.
+Context retirement also joins native continuations and acknowledged
+asynchronous cleanup. A single cleanup failure preserves its exact cause,
+including `undefined`. Multiple failures are reported in deterministic owner
+and attempt order. A cleanup attempt's own `AggregateError` remains one cause.
 
 A preparation resolver can reenter `retire()` before returning an already-running
 promise. Aeolia cannot join that promise after revocation without inspecting or
@@ -406,12 +361,6 @@ usable. Disposal is idempotent. `context.active` is nonretaining lifecycle
 metadata; observing it does not keep query values alive or activate requests.
 Graph disposal also retires its contexts.
 
-Version 1 `snapshot(graph)` rejects a selected committed bound entry with an
-encoding fault because its raw-key format cannot represent the address.
-Profiles configured with `snapshot: false` are excluded normally; they do not
-prevent eligible raw entries from being exported. Version 1 adoption continues to
-address only raw entries.
-
 ## Presence, coherent capture and observed values
 
 Every store exposes `available` as a read-only native readable. It distinguishes
@@ -498,9 +447,10 @@ below; neither version restores remote operations.
 
 ## Version 2 bound snapshots
 
-Version 1 keeps the existing calls and return shapes: `snapshot(graph)` returns
-`Snapshot`, and `adopt(graph, snapshot)` returns `AdoptionReport`. Select version
-2 explicitly and pass a mapping for every selected bound query or stream:
+Version 1 keeps its existing overloads and raw address format. With version
+2, supply a mapping for each selected bound query or stream. Raw-only export
+can omit `bindings` and use `{}` for adoption options. Narrow a version union
+before calling `adopt`; both overloads are exported from `aeolia`.
 
 ```ts
 const state = snapshot(source, {
@@ -518,12 +468,6 @@ const report = adopt(target, state, {
   ],
 });
 ```
-
-Version 2 keeps `snapshot` and `adopt` in the root `aeolia` entry point. The
-existing version 1 overloads stay unchanged. Callers that hold a union of
-versions must narrow `version` before choosing an adoption overload.
-For raw-only version 2, omit `bindings` when taking the snapshot and pass `{}`
-as the adoption options.
 
 Each version 2 entry carries its full address. Raw entries use `{ kind: "raw",
 key }`. Query-bound entries use `{ kind: "binding", reference, key }`. Stream
@@ -698,35 +642,27 @@ const prepared = claim.prepareObservation(existingLease);
 const lease = prepared.lease;
 ```
 
-The method returns a genuine native `ObservationLease`. Call `prepared.discard()`
-to discard the owning claim. It preserves an exact existing publisher that the
-participant reused. A new lease remains inactive until the required adoption
-publishes. Before that cut, `active` is false. The `publish`, `reject`, and
-`report` methods return false. Calling `dispose()` before
-publication discards the pending lease so it cannot activate later.
-
-To share pending observation metadata across caller claims for one physical
-query, prepare the first claim without an argument. Pass its exact pending lease
-to each additional claim before adoption:
+The first claim's `prepareObservation()` returns a native
+`ObservationLease`. Pass that same pending lease to the other caller
+claims for one query to join a single publisher. Separate no-argument
+calls create independent candidates and cannot satisfy a shared
+observation closure. Discarding one candidate leaves the others intact.
 
 ```ts
 const firstObservation = firstClaim.prepareObservation();
 const nextObservation = nextClaim.prepareObservation(firstObservation.lease);
 ```
 
-The claims then join one publisher cohort. Their prepared observations expose the
-same lease, which remains inactive until adoption publishes. Separate no-argument
-calls create independent candidates. They cannot satisfy one shared observation
-closure in a single adoption. Discarding one independent candidate leaves the
-other candidate intact.
+A new lease stays inactive until adoption publishes. While pending,
+`publish`, `reject`, and `report` return false, and `dispose()` prevents
+activation. Pass an existing lease only if it is the exact current publisher
+for that query incarnation. Preparation reuses it, rejects a different
+active publisher, and preserves the reused publisher if the claim is
+discarded with `prepared.discard()`.
 
-Pass a previously published `existingLease` only when you hold that exact current
-lease for the same native query incarnation. Aeolia reuses that publisher
-without replacing or disposing it. A different active publisher on the receiver
-causes preparation to fail. The prepared participant's `retired` is the same
-Promise as the claim's `retired`. It reports claim-registration cleanup, not
-provider stop or graph retirement. Keep the consumer Resource's existing close
-promise for provider cleanup.
+The prepared participant's `retired` is the claim's own promise for
+registration cleanup. Keep the consumer Resource's original close promise
+for provider cleanup.
 
 The required image does not encode private observation issue values. Keep an
 existing receiver issue intact. If a required closure depends on a non-undefined
@@ -1086,8 +1022,7 @@ key callback, acquisition, read subscription, transport or idle renewal. Inspect
 a missing key creates no store or store identity. The returned stamp and condition
 hold the inspection facts for as long as the caller keeps either. The binding does
 not retain a history of keys that were only inspected. A stable result reports
-separate visible `present` and committed
-`basePresent` facts. An address is occupied while it has visible/base data, a
+separate visible `present` and committed `basePresent` facts. An address is occupied while it has visible/base data, a
 native active or draining operation, a finite query attempt, or a retiring stream.
 An opening session can be occupied with both presence flags false.
 
@@ -1103,13 +1038,13 @@ clear, create, join or open. A condition does not reserve the address, force
 replacement or join an existing session. An ordinary call without a condition can
 open B after A retires, clearing the previous session state first.
 
-Every inspection includes an opaque address-local stamp. Passing a stale genuine
-stamp returns `{ kind: "changed" }`; a fabricated or crossed stamp throws
-`TypeError`. Acquisition, native state changes, collection and reset permanently
-invalidate old facts even when the address later appears empty again. Disposed
-contexts throw `Fault`. Raw stream and query option types do not expose
-`expectEmpty`; their existing runtime treatment of unknown extra fields remains
-unchanged. They provide no conditional acquisition guarantee.
+Each stable inspection includes an opaque address-local stamp. A stale
+genuine stamp returns `{ kind: "changed" }`; a fabricated or crossed stamp
+throws `TypeError`. Acquisition, native changes, collection, and reset make
+old facts permanently stale, even if the address becomes empty again.
+Disposed contexts throw `Fault`. Raw stream and query options keep their
+existing extra-field behavior and provide no conditional admission through
+`expectEmpty`.
 
 ## Positioned stream projections
 
@@ -1246,44 +1181,22 @@ making `present` true or adding a `latest` event. `continuation.after` and
 `checkpoint.position` have type `unknown`; the provider codec must validate
 and narrow these positions.
 
+For a positioned member `graph.api.events` that emits `number | undefined`,
+attach the required reducers and capture their shared session:
+
 ```ts
-import {
-  capturePositionedStore,
-  createGraph,
-  createPositionedStream,
-  defineContract,
-  project,
-} from "aeolia";
-import type { PositionedStreamSource } from "aeolia";
+import { capturePositionedStore, project } from "aeolia";
 
-type Input = { readonly id: string };
-declare const sourceCallbacks: PositionedStreamSource<Input, number | undefined, number, object>;
-
-const events = createPositionedStream({
-  name: "orders.events",
-  key: (input: Input) => input.id,
-  source: sourceCallbacks,
-});
-const graph = createGraph({
-  contract: defineContract({
-    namespace: "positioned-store-example",
-    operations: { events },
-  }),
-});
 const source = graph.api.events({ id: "one" });
 const total = project(source, {
   kind: "reduce",
   initial: 0,
   step: (sum, event) => sum + (event ?? 0),
 });
-const count = project(source, {
-  kind: "reduce",
-  initial: 0,
-  step: (value) => value + 1,
-});
+const count = project(source, { kind: "reduce", initial: 0, step: (value) => value + 1 });
 const checkpoint = capturePositionedStore(source, [total, count] as const);
 if (!checkpoint.present || !checkpoint.hasPosition || !checkpoint.resumable)
-  throw new TypeError("No resumable Store cut is available");
+  throw new TypeError("No resumable event cut is available");
 
 const latestEvent: number | undefined = checkpoint.latest;
 const [totalValue, countValue] = checkpoint.values;
@@ -1367,56 +1280,18 @@ lands. While the restoration is dormant, its source status is `"empty"` and
 returned projections attach to that same source and begin with their decoded
 fold values. An initial boundary creates no source event, fold, or acknowledgment.
 
-After the target accepts the transfer at its publication boundary, activate the
-restoration:
+After the target accepts the transfer at its publication boundary, activate
+the restoration. In this fragment, `targetMember` is the destination graph's
+positioned member, `input` is the retained stream input, `policies` is the
+target reducer tuple, and `handleEvent` handles each delivered Store value.
+Pass the decoded `seed` and the `reader` admitted by the target provider.
 
 ```ts
 import { preparePositionedStoreRestore, subscribe } from "aeolia";
-import type {
-  MemberOf,
-  PositionedStreamDefinition,
-  PositionedStoreRestoreSeed,
-  ReducePolicy,
-  ValueOptions,
-} from "aeolia";
 
-type Input = { readonly id: string };
-declare const targetDefinition: PositionedStreamDefinition<
-  Input,
-  number | undefined,
-  string,
-  number,
-  object
->;
-declare const targetMember: MemberOf<typeof targetDefinition>;
-declare const input: Input;
-declare const policies: readonly [
-  ReducePolicy<number | undefined, number>,
-  ReducePolicy<number | undefined, number>,
-];
-declare const seed: PositionedStoreRestoreSeed<
-  number | undefined,
-  number,
-  readonly [number, number]
->;
-declare const reader: object;
-const options: ValueOptions<number | undefined> = {
+const restoration = preparePositionedStoreRestore(targetMember, input, policies, seed, reader, {
   initial: 100,
-  equals: (left, right) =>
-    left === undefined || right === undefined
-      ? left === right
-      : Math.floor(left) === Math.floor(right),
-};
-declare const handleEvent: (event: number | undefined) => void;
-
-const restoration = preparePositionedStoreRestore(
-  targetMember,
-  input,
-  policies,
-  seed,
-  reader,
-  options,
-);
+});
 const stop = subscribe(restoration.source, handleEvent);
 restoration.activate();
 stop();
@@ -1447,39 +1322,26 @@ relation. A later genuine source event can establish a new completed cut.
 Equal-valued source events still advance the native event and fold facts even
 when Store signal equality suppresses a value notification.
 
-Use the positioned checkpoint and your application codec for reader-scoped
-transfer. A reader-scoped Store triggers the existing encoding `Fault` only when
-it would otherwise be included by ordinary snapshot rules: it is not disposed, its
-`snapshot` option is enabled, it has a committed base value, and native transfer
-eligibility allows it. The key-only snapshot format cannot represent its reader
-authority, so an eligible entry fails encoding instead of being flattened into
-a different identity.
+Use the positioned checkpoint and application codec for reader-scoped
+transfer. Ordinary key-only snapshots throw an encoding `Fault` if a
+reader-scoped Store would otherwise be included. Disposed, base-absent,
+snapshot-disabled, and otherwise ineligible entries are omitted. Required
+transfer may carry an eligible continuation with `base.present: false`
+without importing a source value or bypassing operation coverage.
 
-A disposed, `snapshot: false`, base-absent, or otherwise ineligible reader Store
-stays excluded under ordinary key-only snapshot rules. It does not block
-unrelated snapshot entries. Required positioned transfer may still carry an
-otherwise eligible continuation with `base.present: false`; it does not import
-a source value or bypass external-operation and source eligibility guards.
-The `snapshot` option does not add reader authority to the wire format. The
-existing `positionedFoldReceipt` and `acknowledgePositionedFold` functions
-continue to report native successful folds. A capture
-or fold acknowledgement does not report an operation result, complete
-affected-operation coverage, an external commit, or physical retirement. The
-host or provider owns those gates.
+`positionedFoldReceipt` and `acknowledgePositionedFold` report native folds.
+The host or provider still owns external operation results, coverage,
+commit, and retirement.
 
-`discard()` revokes the group synchronously and releases its reader once.
-`restoration.retired` is the original completion for that session's physical
-cleanup. It is separate from a passive claim's registration-only `retired`
-promise and from graph or context retirement. Normal preparation does not wait
-for this long-lived resource completion. If an active iterator has asynchronous
-cleanup, the original `graph.retire()` or `context.retire()` promise also joins
-that work and rejects on cleanup faults. The `void` return from `discard()` is
-not cleanup completion. Cleanup faults remain separate from source and
-projection outcomes. Reset, cancellation, or disposal invalidates the one-shot
-reader. A later continuation requires a fresh provider admission.
+`discard()` revokes the group synchronously and releases the reader once.
+`restoration.retired` joins original session cleanup. A passive claim's
+`retired` covers registration. Graph and context retirement also join
+the session cleanup and report its faults under the
+[reader release contract](#acquire-and-release-a-reader). Reset,
+cancellation, and disposal invalidate the one-shot reader. Reserve a new
+reader to continue.
 
-These APIs support in-memory transfer when the provider admits a target reader.
-They do not enable durable restart or failover recovery. Durable persistence
-remains off unless the application explicitly enables a provider feature for it.
-Reader validation, currentness, acknowledgement, and release callbacks remain
-synchronous local operations. They do not run SQL or publish external state.
+A provider-admitted reader enables in-memory transfer. Durable restart
+and failover require a provider feature. Reader validation, currentness,
+acknowledgment, and release remain synchronous local operations without
+SQL or external publication.
