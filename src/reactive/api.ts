@@ -260,6 +260,7 @@ export namespace Signal {
 export function createObserver(options: ObserverOptions): Observer {
   if (options === null || typeof options !== "object")
     throw new TypeError("Observer options must be an object");
+
   return new ObserverClass(options.notify);
 }
 

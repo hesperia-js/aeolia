@@ -31,6 +31,7 @@ test("waits for initial query data and observes mutation-driven refresh without 
 
   try {
     const initial = store.ready;
+
     expect(backend.calls).toHaveLength(1);
     expect(values).toEqual([undefined]);
     backend.resolve(backend.calls[0]!, "0");
@@ -38,6 +39,7 @@ test("waits for initial query data and observes mutation-driven refresh without 
     expect(values).toEqual([undefined, "0"]);
 
     const changed = graph.api.mutation({ index: 0, value: 42 });
+
     backend.resolve(backend.calls[1]!, undefined);
     await changed;
     expect(backend.calls).toHaveLength(3);
@@ -49,6 +51,7 @@ test("waits for initial query data and observes mutation-driven refresh without 
       refreshSettled = true;
       return value;
     });
+
     await Promise.resolve();
     expect(refreshSettled).toBe(false);
     expect(store.value.peek()).toBe("0");
@@ -64,6 +67,7 @@ test("waits for initial query data and observes mutation-driven refresh without 
     const retry = store.revalidate();
     const failure = new Error("refresh failed");
     const waitingForRetry = store.ready;
+
     backend.reject(backend.calls[3]!, failure);
     await expect(waitingForRetry).rejects.toBe(failure);
     await retry;

@@ -71,10 +71,12 @@ export function createPhysicalPromise<T>(
 /** Observe a private promise that could not be returned to its caller. */
 export function observeUnreturnedPromise(promise: Promise<unknown>): void {
   const previous = ownDescriptor(promise, "constructor");
+
   defineOwnProperty(promise, "constructor", {
     configurable: true,
     value: completionConstructor,
   });
+
   try {
     void nativeApply(nativeThen, promise, [undefined, () => undefined]);
   } finally {
@@ -95,18 +97,21 @@ export function createPhysicalCompletion<T>(settled?: () => void): {
     resolve = resolvePromise;
     reject = rejectPromise;
   });
+
   if (settled !== undefined) {
     // This promise is still private; restore its public shape before returning it.
     defineOwnProperty(promise, "constructor", {
       configurable: true,
       value: completionConstructor,
     });
+
     try {
       void nativeApply(nativeThen, promise, [settled, settled]);
     } finally {
       deleteOwnProperty(promise, "constructor");
     }
   }
+
   return { promise, resolve, reject };
 }
 
@@ -121,9 +126,12 @@ export function canReplacePhysicalCarrier(promise: Promise<unknown>, observer: u
     prototypeOf(promise) !== nativePromisePrototype
   )
     return false;
+
   const constructor = ownDescriptor(promise, "constructor");
+
   if (constructor !== undefined && descriptorField(constructor, "value") !== NativePromise)
     return false;
+
   return (
     nativeConstructorDescriptor !== undefined &&
     descriptorField(nativeConstructorDescriptor, "value") === NativePromise &&
@@ -155,6 +163,7 @@ export function continuePhysicalPromise<T, R = unknown>(
         ? [fulfilled.value]
         : [];
   const carrier = nativeApply(observer, promise, observerArguments) as Promise<R>;
+
   if (certified) retainGenuinePromise(carrier);
   return { promise: carrier, certified };
 }
@@ -183,6 +192,7 @@ export function retainResetCleanup(
     scope.pending.delete(cleanup);
     action();
   };
+
   scope.pending.add(cleanup);
   return cleanup;
 }
@@ -230,12 +240,15 @@ function rootOwner(owner: RetirementOwner): RetirementOwner {
 function completeRetirement(owner: RetirementOwner): void {
   if (!owner.closed || owner.closing || owner.work.size !== 0 || owner.resolve === undefined)
     return;
+
   const resolve = owner.resolve;
   const reject = owner.reject!;
   let failures: CleanupFailure[];
   let rejection: unknown;
+
   try {
     failures = [...owner.failures].sort((left, right) => left.order - right.order);
+
     if (failures.length === 1) rejection = failures[0]!.cause;
     else if (failures.length > 1)
       rejection = new AggregateError(
@@ -248,15 +261,18 @@ function completeRetirement(owner: RetirementOwner): void {
     reject(cause);
     return;
   }
+
   noteTransferChange(owner);
   owner.resolve = undefined;
   owner.reject = undefined;
+
   if (failures.length === 0) resolve();
   else reject(rejection);
 }
 
 export function beginPhysicalWork(owner: RetirementOwner, kind: PhysicalWorkKind): PhysicalWork {
   const root = rootOwner(owner);
+
   noteTransferChange(root);
   const order = root.nextOrder++;
   const work: PhysicalWork = {
@@ -266,6 +282,7 @@ export function beginPhysicalWork(owner: RetirementOwner, kind: PhysicalWorkKind
     active: true,
     cleanupFailed: false,
   };
+
   for (
     let current: RetirementOwner | undefined = owner;
     current !== undefined;
@@ -274,6 +291,7 @@ export function beginPhysicalWork(owner: RetirementOwner, kind: PhysicalWorkKind
     noteTransferChange(current);
     current.work.add(work);
   }
+
   noteTransferChange(work);
   return work;
 }
@@ -282,10 +300,12 @@ export function finishPhysicalWork(work: PhysicalWork): void {
   if (!work.active) return;
   noteTransferChange(work);
   work.active = false;
+
   if (!work.cleanupFailed) {
     work.original = undefined;
     work.continuation = undefined;
   }
+
   for (
     let current: RetirementOwner | undefined = work.owner;
     current !== undefined;
@@ -295,6 +315,7 @@ export function finishPhysicalWork(work: PhysicalWork): void {
     current.work.delete(work);
     completeRetirement(current);
   }
+
   releaseTransferWork(work);
 }
 
@@ -303,6 +324,7 @@ export function recordCleanupFailure(work: PhysicalWork, cause: unknown): void {
   noteTransferChange(work);
   work.cleanupFailed = true;
   const failure = { order: work.order, cause, work };
+
   for (
     let current: RetirementOwner | undefined = work.owner;
     current !== undefined;
@@ -333,7 +355,9 @@ export function observePhysicalWork(
 
 export function physicalCleanup(owner: RetirementOwner, action: () => void): void {
   const work = beginPhysicalWork(owner, "cleanup");
+
   registerTransferWork(owner, work);
+
   try {
     action();
   } catch (cause) {
@@ -347,8 +371,10 @@ export function physicalCleanup(owner: RetirementOwner, action: () => void): voi
 /** @internal Track one positioned reader release without thenable assimilation. */
 export function physicalReaderRelease(owner: RetirementOwner, release: () => unknown): void {
   const work = beginPhysicalWork(owner, "cleanup");
+
   registerTransferWork(owner, work);
   let original: unknown;
+
   try {
     original = release();
   } catch (cause) {
@@ -356,12 +382,15 @@ export function physicalReaderRelease(owner: RetirementOwner, release: () => unk
     finishPhysicalWork(work);
     throw cause;
   }
+
   noteTransferChange(work);
   work.original = original;
+
   if ((typeof original !== "object" || original === null) && typeof original !== "function") {
     finishPhysicalWork(work);
     return;
   }
+
   try {
     work.continuation = nativeApply(nativeThen, original, [
       () => finishPhysicalWork(work),
@@ -391,6 +420,7 @@ export function retireOwner(
   noteTransferChange(owner);
   owner.closing = true;
   const work = beginPhysicalWork(owner, "cleanup");
+
   try {
     dispose(work);
   } catch (cause) {
@@ -402,6 +432,7 @@ export function retireOwner(
     owner.closing = false;
     completeRetirement(owner);
   }
+
   return owner.promise;
 }
 
@@ -414,24 +445,30 @@ export function returnPhysicalIterator<T>(
 ): void {
   const work = beginPhysicalWork(owner, kind);
   let hasOriginal = false;
+
   try {
     let close: AsyncIterator<T>["return"];
+
     try {
       close = suppliedClose ?? iterator.return;
     } catch (cause) {
       recordCleanupFailure(work, cause);
       throw cause;
     }
+
     if (typeof close !== "function") return;
     let original: unknown;
+
     try {
       original = close.call(iterator);
     } catch (cause) {
       recordCleanupFailure(work, cause);
       return;
     }
+
     hasOriginal = true;
     work.original = original;
+
     try {
       observePhysicalWork(work, normalizePhysicalPromise(original), true, original);
     } catch {
@@ -448,6 +485,7 @@ export function prepareReaderRetirement(
 ): RetirementOwner & { readonly promise: Promise<void> } {
   const owner = createRetirementOwner(parent);
   const completion = createPhysicalCompletion<void>();
+
   owner.promise = completion.promise;
   owner.resolve = completion.resolve;
   owner.reject = completion.reject;
@@ -494,26 +532,34 @@ export function prepareReaderLifetime(
     readerRemoveListener === undefined
   )
     throw new TypeError("Required positioned transfer needs a native reservation lifetime");
+
   const fields = Reflect.ownKeys(value);
+
   if (fields.some((key) => key !== "signal" && key !== "expiresAt"))
     throw new TypeError("Unknown reader lifetime field");
+
   const signalField = Object.getOwnPropertyDescriptor(value, "signal");
   const deadlineField = Object.getOwnPropertyDescriptor(value, "expiresAt");
+
   if (
     signalField === undefined ||
     !("value" in signalField) ||
     (deadlineField !== undefined && !("value" in deadlineField))
   )
     throw new TypeError("Reader lifetime requires own data fields");
+
   const signal = signalField.value as AbortSignal;
   const expiresAt = deadlineField?.value as number | undefined;
+
   if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)))
     throw new TypeError("Reader deadline must be its existing finite epoch deadline");
+
   if (
     nativeApply(readerAborted, signal, []) !== false ||
     (expiresAt !== undefined && readerLifetimeNow() >= expiresAt)
   )
     throw new TypeError("Reader reservation is already invalid");
+
   let disposed = false;
   const listener = (): void => {
     if (!disposed)
@@ -521,16 +567,19 @@ export function prepareReaderLifetime(
         readerAbortReason === undefined ? undefined : nativeApply(readerAbortReason, signal, []),
       );
   };
+
   nativeApply(readerAddListener, signal, ["abort", listener, { once: true }]);
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
     nativeApply(readerRemoveListener, signal, ["abort", listener]);
   };
+
   if (nativeApply(readerAborted, signal, []) !== false) {
     dispose();
     throw new TypeError("Reader lifetime changed during preparation");
   }
+
   return Object.freeze({
     signal,
     ...(expiresAt === undefined ? {} : { expiresAt }),

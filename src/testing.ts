@@ -84,6 +84,7 @@ function createCallRegistration<I>(
   const onAbort = (): void => {
     record.aborted = true;
   };
+
   options.abortSignal.addEventListener("abort", onAbort, { once: true });
   return {
     record,
@@ -255,6 +256,7 @@ export function testBackend(): TestBackend {
     key?: StoreKey,
   ): Promise<T> => {
     const { record, removeAbortListener } = createCallRegistration(name, input, options, key);
+
     records.push(record);
 
     const promise = new Promise<T>((resolve, reject) => {
@@ -266,6 +268,7 @@ export function testBackend(): TestBackend {
         forgotten: false,
       });
     });
+
     return promise;
   };
 
@@ -281,14 +284,17 @@ export function testBackend(): TestBackend {
 
   const settle = (call: CallRecord, outcome: "resolve" | "reject", value: unknown): void => {
     const entry = pending.get(call);
+
     if (entry === undefined || entry.forgotten) {
       throw new TypeError("CallRecord does not belong to this TestBackend");
     }
+
     if (entry.record.settled) return;
 
     entry.record.settled = true;
     entry.removeAbortListener();
     pending.delete(call);
+
     if (outcome === "resolve") entry.resolve(value);
     else entry.reject(value);
   };
@@ -301,11 +307,13 @@ export function testBackend(): TestBackend {
     stream.removeAbortListener();
 
     const byName = streams.get(stream.record.name);
+
     byName?.delete(stream as OpenStream<unknown>);
     if (byName?.size === 0) streams.delete(stream.record.name);
 
     if (stream.waiters.length === 0) return;
     const waiters = stream.waiters.splice(0);
+
     if (error != null) {
       stream.errorDelivered = true;
       for (const waiter of waiters) waiter.reject(error);
@@ -325,6 +333,7 @@ export function testBackend(): TestBackend {
         options,
         options.key,
       );
+
       records.push(record);
 
       const stream: OpenStream<T> = {
@@ -337,6 +346,7 @@ export function testBackend(): TestBackend {
         errorDelivered: false,
       };
       const byName = streams.get(name) ?? new Set<OpenStream<unknown>>();
+
       byName.add(stream as OpenStream<unknown>);
       streams.set(name, byName);
 
@@ -348,13 +358,16 @@ export function testBackend(): TestBackend {
           if (stream.queue.length > 0) {
             return Promise.resolve({ done: false, value: stream.queue.shift() as T });
           }
+
           if (stream.ended) {
             if (stream.error != null && !stream.errorDelivered) {
               stream.errorDelivered = true;
               return Promise.reject(stream.error);
             }
+
             return Promise.resolve({ done: true, value: undefined as never });
           }
+
           return new Promise<IteratorResult<T>>((resolve, reject) => {
             stream.waiters.push({ resolve, reject });
           });
@@ -364,6 +377,7 @@ export function testBackend(): TestBackend {
           return Promise.resolve({ done: true, value: undefined as never });
         },
       };
+
       return iterator;
     };
 
@@ -387,6 +401,7 @@ export function testBackend(): TestBackend {
       for (const stream of Array.from(streams.get(name) ?? [])) {
         if (stream.ended) continue;
         const waiter = stream.waiters.shift();
+
         if (waiter != null) waiter.resolve({ done: false, value });
         else stream.queue.push(value);
       }
@@ -406,6 +421,7 @@ export function testBackend(): TestBackend {
         entry.removeAbortListener();
         entry.forgotten = true;
       }
+
       pending.clear();
 
       // `clear` forgets calls; it does not settle promises or end streams.
@@ -414,9 +430,11 @@ export function testBackend(): TestBackend {
       for (const byName of streams.values()) {
         for (const stream of byName) stream.removeAbortListener();
       }
+
       streams.clear();
       records.length = 0;
     },
   };
+
   return result;
 }

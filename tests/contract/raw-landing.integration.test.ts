@@ -20,6 +20,7 @@ test("raw first landing exposes value, presence and revision together during not
       if (value === 1) store.set(2);
     }
   });
+
   store.set(1);
   expect(seen).toHaveLength(2);
   expect(seen[0]).toMatchObject([
@@ -33,6 +34,7 @@ test("raw first landing exposes value, presence and revision together during not
     { kind: "stable", present: true, value: 2, valueRevision: 2 },
   ]);
   const empty = graph.at("undefined");
+
   empty.set(undefined);
   expect(peekStore(empty)).toMatchObject({
     kind: "stable",
@@ -66,6 +68,7 @@ for (const member of ["query", "stream"] as const) {
     const graph = createGraph({
       contract: { namespace: "raw-seeding", operations: { query, stream } },
     });
+
     try {
       for (const [key, initial] of [
         ["number", 7],
@@ -78,11 +81,13 @@ for (const member of ["query", "stream"] as const) {
           seen.push({ value, available: store.available.get(), capture: peekStore(store) });
         const stop =
           initial === undefined ? subscribe(store, observe) : subscribe(store.value, observe);
+
         try {
           expect(peekStore(store)).toMatchObject({ kind: "stable", present: false });
           if (initial !== undefined) seen.length = 0;
           graph.api[member](key, { initial });
           const after = peekStore(store);
+
           expect(after).toMatchObject({
             kind: "stable",
             identity: store.identity,
@@ -114,6 +119,7 @@ test.each(["cold", "subscribed"] as const)(
           store.set(2);
           during = peekStore(store);
         }
+
         return Object.is(previous, proposed);
       },
     });
@@ -123,11 +129,14 @@ test.each(["cold", "subscribed"] as const)(
     const store = graph.api.definition();
     let during: StoreCapture<number> | undefined;
     const deliveries: Array<number | undefined> = [];
+
     store.value.get();
     const stop = live ? subscribe(store.value, (value) => deliveries.push(value)) : () => {};
+
     try {
       store.set(1);
       const after = peekStore(store);
+
       expect(after).toMatchObject({ kind: "stable", present: true, value: 2, valueRevision: 2 });
       expect(during).toStrictEqual(after);
       if (live) expect(deliveries).toEqual([0, 2]);
@@ -151,19 +160,23 @@ test("a revoked raw stream getter cannot advance its successor and the successor
     key: () => "k",
     open: () => {
       const next = ++opens === 1 ? first : second;
+
       if (opens === 2) secondOpened.resolve();
       return {
         [Symbol.asyncIterator]() {
           const tail = Promise.withResolvers<IteratorResult<number>>();
           let nextRead = next.promise;
+
           return {
             next() {
               const read = nextRead;
+
               nextRead = tail.promise;
               return read;
             },
             async return() {
               const done = { done: true as const, value: undefined };
+
               next.resolve(done);
               tail.resolve(done);
               return done;
@@ -181,6 +194,7 @@ test("a revoked raw stream getter cannot advance its successor and the successor
   const stopValue = subscribe(store.value, (value) => {
     if (value === 7) landed.resolve();
   });
+
   try {
     first.resolve({
       done: false,
@@ -196,8 +210,10 @@ test("a revoked raw stream getter cannot advance its successor and the successor
     await reset;
     expect(reads).toBe(1);
     expect(opens).toBe(2);
+
     if (during?.kind !== "stable")
       throw new Error("The predecessor getter did not capture a stable replacement");
+
     expect(peekStore(store)).toStrictEqual(during);
     second.resolve({ done: false, value: 7 });
     await landed.promise;

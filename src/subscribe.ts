@@ -13,6 +13,7 @@ function storeSubscribeOf(
 ): ((observer: (value: unknown) => void) => Unsubscribe) | undefined {
   if (!isObject(source)) return undefined;
   const candidate = (source as Record<typeof storeSubscribe, unknown>)[storeSubscribe];
+
   return typeof candidate === "function"
     ? (candidate as (observer: (value: unknown) => void) => Unsubscribe)
     : undefined;
@@ -60,12 +61,16 @@ export function subscribe<T>(
 ): Unsubscribe {
   if (typeof observer !== "function")
     throw new TypeError("Subscription observer must be a function");
+
   const storeSubscription = storeSubscribeOf(source);
+
   if (storeSubscription !== undefined) {
     return storeSubscription(observer as (value: unknown) => void);
   }
+
   if (source !== null && typeof source === "object" && "value" in source) {
     return subscribeReadable((source as Projection<T>).value, observer);
   }
+
   return subscribeReadable(source as Readable<T>, observer);
 }

@@ -13,6 +13,7 @@ interface PublisherActivityEntry {
   readable: Readable<boolean> | undefined;
 }
 const publisherActivityReadableByState = new WeakMap<ObservationState, PublisherActivityEntry>();
+
 export interface PublisherActivity {
   readonly cell: WritableSignal<boolean>;
   readonly readable: Readable<boolean>;
@@ -34,8 +35,10 @@ export function createObservationState<T>(
     retired: false,
     liveReadables: 0,
   };
+
   for (const cell of [state.issue, state.live])
     reactiveInternal.bindReadable(cell, { graphId: runtime.graph.id });
+
   return state;
 }
 
@@ -51,6 +54,7 @@ export function installObservationState<T>(
       runtime.observation.incarnation === runtime.incarnation)
   )
     throw new TypeError("Observation state no longer matches its Store incarnation");
+
   registerTransferReadable(state.issue, runtime, "observation-issue-cell");
   registerTransferReadable(state.live, runtime, "observation-live");
   noteTransferChange(runtime);
@@ -73,6 +77,7 @@ export function preparePublisherActivity(
 ): PublisherActivity {
   const cell = signal(initiallyActive);
   const readable = computed(() => state.live.get() && cell.get());
+
   return { cell, readable };
 }
 
@@ -83,6 +88,7 @@ export function installPublisherActivity(
 ): void {
   state.publisherActivity = activity.cell;
   let entry = publisherActivityReadableByState.get(state);
+
   if (entry === undefined) {
     entry = { readable: activity.readable };
     publisherActivityReadableByState.set(state, entry);
@@ -98,12 +104,15 @@ export function reservePublisherActivityReadable(
 ): { publish(): void; discard(): void } {
   let entry = publisherActivityReadableByState.get(state);
   const reserveEmpty = entry === undefined;
+
   if (entry === undefined) {
     entry = { readable: undefined };
     publisherActivityReadableByState.set(state, entry);
   }
+
   let published = false;
   let discarded = false;
+
   return {
     publish: () => {
       if (published || discarded) return;
@@ -113,6 +122,7 @@ export function reservePublisherActivityReadable(
     discard: () => {
       if (published || discarded) return;
       discarded = true;
+
       if (
         reserveEmpty &&
         entry!.readable === undefined &&
@@ -129,6 +139,7 @@ export function getObservationTransferFacet<T>(
   role: string,
 ): Readable<unknown> | undefined {
   const state = runtime.observation;
+
   if (
     state === undefined ||
     state.retired ||
@@ -136,6 +147,7 @@ export function getObservationTransferFacet<T>(
     runtime.incarnation !== state.incarnation
   )
     return undefined;
+
   switch (role) {
     case "observation-issue":
       return state.issueReadable;
@@ -157,10 +169,13 @@ export function getObservationTransferFacet<T>(
 /** Acquire metadata only after the native query incarnation was validated. */
 export function observationState<T>(runtime: StoreRuntime<T>): ObservationState {
   const existing = runtime.observation;
+
   if (existing !== undefined && !existing.retired && existing.incarnation === runtime.incarnation)
     return existing;
+
   if (runtime.incarnation === undefined) throw new TypeError("The query incarnation is inactive");
   const state = createObservationState(runtime, runtime.incarnation, true);
+
   installObservationState(runtime, state);
   return state;
 }
@@ -168,6 +183,7 @@ export function observationState<T>(runtime: StoreRuntime<T>): ObservationState 
 /** Revoke old metadata before any issue/activity subscriber can reenter. */
 export function retireObservation<T>(runtime: StoreRuntime<T>): void {
   const state = runtime.observation;
+
   if (state === undefined || state.retired) return;
   noteTransferChange(runtime);
   if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
@@ -175,6 +191,7 @@ export function retireObservation<T>(runtime: StoreRuntime<T>): void {
   state.retired = true;
   state.publisher = undefined;
   const activity = state.publisherActivity;
+
   state.publisherActivity = undefined;
   runtime.observation = undefined;
   runtime.liveReadableCount = Math.max(0, runtime.liveReadableCount - state.liveReadables);
@@ -189,6 +206,7 @@ export function retireObservation<T>(runtime: StoreRuntime<T>): void {
       reportContinuationError(runtime.graph.__runtime, error);
     }
   };
+
   for (const stop of state.stops.splice(0)) attempt(stop);
   attempt(() =>
     reactiveInternal.batch(() => {
@@ -202,6 +220,7 @@ export function retireObservation<T>(runtime: StoreRuntime<T>): void {
 /** Nonretaining lifecycle metadata never follows a successor incarnation. */
 export function publisherActive(state: ObservationState): PublisherActivity {
   const activity = preparePublisherActivity(state, true);
+
   noteTransferChange(state);
   installPublisherActivity(state, activity);
   return activity;

@@ -26,6 +26,7 @@ test.each([
 
 test("a publication retry requires the same package, version, and archive bytes", () => {
   const metadata = { name: "aeolia", version: "1.0.0", dist: { integrity: "sha512-same" } };
+
   expect(() => verifyPublishedPackage(metadata, "1.0.0", "sha512-same")).not.toThrow();
   expect(() => verifyPublishedPackage(metadata, "1.0.0", "sha512-other")).toThrow(
     "archive differs",

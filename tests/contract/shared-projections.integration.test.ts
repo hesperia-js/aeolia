@@ -50,6 +50,7 @@ function until<T>(readable: Readable<T>, matches: (value: T) => boolean): Promis
   const stop = subscribe(readable, (value) => {
     if (matches(value)) ready.resolve();
   });
+
   return ready.promise.finally(stop);
 }
 
@@ -63,6 +64,7 @@ function waitForCaptureNotice(
       if (matches(notice)) resolve(notice);
     });
   });
+
   return pending.finally(() => stop?.());
 }
 
@@ -90,6 +92,7 @@ function setup() {
     contract: defineContract({ namespace: "shared-projections", operations: { stream } }),
     idleMs: 10,
   });
+
   return { backend, graph, source: graph.api.stream() };
 }
 
@@ -104,9 +107,11 @@ it("delivers shared close before nested cancellation without replacing the outer
     open: (input: void, options): AsyncIterable<number> => {
       sourceSignal = options.abortSignal;
       const iterable = open(input, options);
+
       return {
         [Symbol.asyncIterator]() {
           const iterator = iterable[Symbol.asyncIterator]();
+
           return {
             next: () => iterator.next(),
             return: () => {
@@ -131,8 +136,10 @@ it("delivers shared close before nested cancellation without replacing the outer
     nestedCalls += 1;
     graph.cancelPending(innerReason);
   });
+
   try {
     const received = until(history.value, (items) => items.length === 1);
+
     backend.emit("nested-cancel", 5);
     await received;
     graph.cancelPending(outerReason);
@@ -155,16 +162,21 @@ it("delivers shared close before nested cancellation without replacing the outer
 
 it("projects every shared emission without reopening, replaying, or observing direct writes", async () => {
   const { backend, graph, source } = setup();
+
   try {
     const history = project(source, { kind: "accumulate", max: 10 });
     const count = project(source, { kind: "reduce", initial: 0, step: (n) => n + 1 });
+
     expect(backend.calls).toHaveLength(1);
     const first = until(history.value, (items) => items.length === 1);
+
     backend.emit("shared-events", 4);
     await first;
     const joined = project(source, { kind: "accumulate", max: 10 });
+
     expect(joined.value.get()).toStrictEqual([]);
     const second = until(history.value, (items) => items.length === 2);
+
     backend.emit("shared-events", 4);
     await second;
     expect(history.value.get()).toStrictEqual([4, 4]);
@@ -175,6 +187,7 @@ it("projects every shared emission without reopening, replaying, or observing di
     history.close();
     expect(backend.calls[0]!.aborted).toBe(false);
     const third = until(joined.value, (items) => items.length === 2);
+
     backend.emit("shared-events", 5);
     await third;
     expect(history.value.get()).toStrictEqual([4, 4]);
@@ -216,8 +229,10 @@ it("starts a positioned shared projection at the next event when it joins during
     late = project(source, policy);
     lateAtJoin = capturePositionedProjection<number, number>(late);
   });
+
   try {
     const firstDelivered = until(first.value, (value) => value === 1);
+
     backend.emit("positioned-shared-join", { position: 5, value: 1 });
     await firstDelivered;
     expect(lateAtJoin).toMatchObject({
@@ -226,8 +241,10 @@ it("starts a positioned shared projection at the next event when it joins during
       position: undefined,
       revision: 0,
     });
+
     if (late === undefined || lateAtJoin === undefined)
       throw new Error("The projection did not join during delivery");
+
     expect(isPositionedCheckpointCurrent(lateAtJoin)).toBe(true);
     expect(capturePositionedProjection<number, number>(first)).toMatchObject({
       value: 1,
@@ -236,6 +253,7 @@ it("starts a positioned shared projection at the next event when it joins during
       revision: 1,
     });
     const secondDelivered = until(late.value, (value) => value === 2);
+
     backend.emit("positioned-shared-join", { position: 6, value: 2 });
     await secondDelivered;
     expect(first.value.get()).toBe(3);
@@ -276,6 +294,7 @@ it("restores shared folds over one dormant source Store without replaying the la
     const emit = (event: Event): void => {
       if (ended) return;
       const waiter = waiters.shift();
+
       if (waiter !== undefined) waiter({ done: false, value: event });
       else queued.push(event);
     };
@@ -284,6 +303,7 @@ it("restores shared folds over one dormant source Store without replaying the la
         return {
           next: () => {
             const event = queued.shift();
+
             if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
             if (ended) return Promise.resolve({ done: true as const, value: undefined });
             return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
@@ -296,11 +316,13 @@ it("restores shared folds over one dormant source Store without replaying the la
         };
       },
     };
+
     return { iterable, emit };
   };
 
   const reserve = (after: number, seed: unknown): object => {
     const reader = Object.freeze({});
+
     reservations.set(reader, { after, seed });
     return reader;
   };
@@ -314,6 +336,7 @@ it("restores shared folds over one dormant source Store without replaying the la
     source: {
       open: (_input, options) => {
         const channel = makeChannel();
+
         openings.push({
           hasAfter: Object.hasOwn(options, "after"),
           after: options.after,
@@ -321,12 +344,15 @@ it("restores shared folds over one dormant source Store without replaying the la
           reader: options.reader,
           reportGap: options.reportGap,
         });
+
         if (options.reader === undefined) emitLive = channel.emit;
         else readerEmitters.set(options.reader, channel.emit);
+
         return channel.iterable;
       },
       validateReader: (_input, reader, after, checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           checkpoint === undefined &&
           reservation !== undefined &&
@@ -336,6 +362,7 @@ it("restores shared folds over one dormant source Store without replaying the la
       },
       isReaderCurrent: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined && reservation.after === after && reservation.seed === seed
         );
@@ -382,14 +409,18 @@ it("restores shared folds over one dormant source Store without replaying the la
 
   try {
     const folded = until(total.value, (value) => value === 14);
+
     if (emitLive === undefined) throw new Error("The actual source Store did not open");
     emitLive({ position: 5, value: 4 });
     await folded;
 
     const checkpoint = capturePositionedStore(source, [history, total, unchanged] as const);
+
     if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
       throw new Error("The actual source Store did not capture a positioned event");
+
     const after: number = checkpoint.position;
+
     expect(checkpoint.sourceIdentity).toBe(source.identity);
     expect(checkpoint.latest).toBe(4);
     expect(checkpoint.values).toStrictEqual([[4], 14, 7]);
@@ -398,6 +429,7 @@ it("restores shared folds over one dormant source Store without replaying the la
 
     const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
     const readerForRestore = reserve(after, seed);
+
     reader = readerForRestore;
     const prepared = preparePositionedStoreRestore(
       targetGraph.api.events,
@@ -406,11 +438,13 @@ it("restores shared folds over one dormant source Store without replaying the la
       seed,
       readerForRestore,
     );
+
     restoration = prepared;
     readerTransferred = true;
     const restoredHistoryProjection = prepared.projections[0];
     const restoredTotalProjection = prepared.projections[1];
     const restoredEqualProjection = prepared.projections[2];
+
     restoredHistory = restoredHistoryProjection;
     restoredTotal = restoredTotalProjection;
     restoredEqual = restoredEqualProjection;
@@ -423,12 +457,14 @@ it("restores shared folds over one dormant source Store without replaying the la
     expect(restoredTotalProjection.value.get()).toBe(14);
     expect(restoredEqualProjection.value.get()).toBe(7);
     const sourceValues: number[] = [];
+
     stopRestoredSource = subscribe(prepared.source, (value) => sourceValues.push(value));
     const laterProjection = project(prepared.source, {
       kind: "reduce",
       initial: 0,
       step: (sum: number, event: number) => sum + event,
     });
+
     later = laterProjection;
     expect(laterProjection.value.get()).toBe(0);
     expect(sourceValues).toEqual([4]);
@@ -438,21 +474,26 @@ it("restores shared folds over one dormant source Store without replaying the la
     let earlyAcknowledgeCount: number | undefined;
     let earlyReceiptAvailable = false;
     let earlyAcknowledgeError: unknown;
+
     stopEarlyAcknowledge = subscribe(restoredHistoryProjection.value, (items) => {
       if (items.length !== 2 || earlyAcknowledgeAttempted) return;
       earlyAcknowledgeAttempted = true;
       const receipt = positionedFoldReceipt(restoredHistoryProjection);
+
       if (receipt === undefined) return;
       earlyReceiptAvailable = true;
+
       try {
         acknowledgePositionedFold(restoredHistoryProjection, receipt);
       } catch (error) {
         earlyAcknowledgeError = error;
       }
+
       earlyAcknowledgeCount = acknowledgements.length;
     });
 
     const activated = prepared.activate();
+
     expect(activated).toBe(prepared.source);
     expect(openings).toHaveLength(2);
     expect(openings[1]).toMatchObject({
@@ -467,6 +508,7 @@ it("restores shared folds over one dormant source Store without replaying the la
     const totalSuffix = until(restoredTotalProjection.value, (value) => value === 17);
     const laterSuffix = until(laterProjection.value, (value) => value === 3);
     const emitReader = readerEmitters.get(readerForRestore);
+
     if (emitReader === undefined) throw new Error("The actual reader opening is missing");
     emitReader({ position: 6, value: 3 });
     await Promise.all([sourceSuffix, historySuffix, totalSuffix, laterSuffix]);
@@ -481,6 +523,7 @@ it("restores shared folds over one dormant source Store without replaying the la
     expect(earlyReceiptAvailable).toBe(true);
     expect(earlyAcknowledgeCount).toBe(0);
     expect(acknowledgements).toHaveLength(0);
+
     if (earlyAcknowledgeError !== undefined && !(earlyAcknowledgeError instanceof TypeError))
       throw earlyAcknowledgeError;
 
@@ -493,6 +536,7 @@ it("restores shared folds over one dormant source Store without replaying the la
     const secondSourceSuffix = until(prepared.source.value, (value) => value === 6);
     const secondTotalSuffix = until(restoredTotalProjection.value, (value) => value === 23);
     const secondLaterSuffix = until(laterProjection.value, (value) => value === 9);
+
     emitReader({ position: 7, value: 6 });
     await Promise.all([secondSourceSuffix, secondTotalSuffix, secondLaterSuffix]);
 
@@ -505,13 +549,16 @@ it("restores shared folds over one dormant source Store without replaying the la
     expect(releaseCount(reader)).toBe(0);
 
     const finalReceipt = positionedFoldReceipt(restoredEqualProjection);
+
     if (finalReceipt === undefined) throw new Error("The completed equal fold has no receipt");
     expect(finalReceipt.position).toBe(7);
     acknowledgePositionedFold(restoredEqualProjection, finalReceipt);
     expect(acknowledgements).toHaveLength(1);
     const finalAcknowledgement = acknowledgements[0];
+
     if (finalAcknowledgement === undefined)
       throw new Error("The completed equal fold was not acknowledged");
+
     expect(finalAcknowledgement.reader).toBe(reader);
     expect(finalReceipt).toBe(finalAcknowledgement.receipt);
 
@@ -520,6 +567,7 @@ it("restores shared folds over one dormant source Store without replaying the la
     expect(releaseCount(readerForRestore)).toBe(1);
 
     const gapReaderForRestore = reserve(after, seed);
+
     gapReader = gapReaderForRestore;
     const gapRestoration = preparePositionedStoreRestore(
       targetGraph.api.events,
@@ -528,23 +576,28 @@ it("restores shared folds over one dormant source Store without replaying the la
       seed,
       gapReaderForRestore,
     );
+
     gapReaderTransferred = true;
     discardGapRestoration = () => gapRestoration.discard();
     expect(openings).toHaveLength(2);
     const gapProjection = gapRestoration.projections[0];
+
     expect(gapProjection.value.get()).toStrictEqual([4]);
     expect(gapRestoration.activate()).toBe(gapRestoration.source);
     expect(openings).toHaveLength(3);
     const gapOpening = openings[2];
+
     if (gapOpening === undefined) throw new Error("The restored reader did not open");
     const gapReported = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
+
       stop = subscribe(gapProjection.status, (status) => {
         if (status !== "failed") return;
         stop();
         resolve();
       });
     });
+
     gapOpening.reportGap();
     await gapReported;
     expect(gapRestoration.source.status.get()).toBe("failed");
@@ -568,10 +621,13 @@ it("restores shared folds over one dormant source Store without replaying the la
     later?.close();
     restoration?.discard();
     discardGapRestoration?.();
+
     if (gapReader !== undefined && !gapReaderTransferred && releaseCount(gapReader) === 0)
       releaseReader(gapReader);
+
     if (reader !== undefined && !readerTransferred && releaseCount(reader) === 0)
       releaseReader(reader);
+
     sourceGraph.dispose();
     targetGraph.dispose();
   }
@@ -633,6 +689,7 @@ it("captures a nonresumable empty cut while the actual first next is pending", a
     expect(nextCalls).toBe(1);
     expect(finishNext).toBeDefined();
     const checkpoint = capturePositionedStore(source, [projection] as const);
+
     expect(checkpoint.present).toBe(false);
     expect(checkpoint.hasPosition).toBe(false);
     expect(Object.hasOwn(checkpoint, "latest")).toBe(false);
@@ -642,6 +699,7 @@ it("captures a nonresumable empty cut while the actual first next is pending", a
     const captureState = observePositionedStoreCaptureState(checkpoint);
     const notices: PositionedStoreCaptureNotice[] = [];
     const stop = subscribe(captureState, (notice) => notices.push(notice));
+
     expect(notices[0]?.kind).toBe("changed");
     expect(nextCalls).toBe(1);
     stop();
@@ -692,12 +750,15 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
           };
         },
       };
+
       return {
         iterable,
         emit(event: Event) {
           const waiter = waiters.shift();
+
           if (waiter === undefined)
             throw new Error("The positioned reader has no pending next call");
+
           waiter({ done: false, value: event });
         },
       };
@@ -706,6 +767,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       open: (_input, options) => {
         trace.push("open");
         const channel = makeChannel();
+
         openings.push({ options, reader: options.reader });
         if (options.reader !== undefined) readerEmitters.set(options.reader, channel.emit);
         return channel.iterable;
@@ -713,13 +775,16 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       initialBoundary: (_input, options) => {
         trace.push("boundary");
         const after = Object.hasOwn(options, "after") ? options.after : 5;
+
         if (typeof after !== "number")
           throw new Error("The genuine initial boundary was not numeric");
+
         boundaries.push({ options, after });
         return { available: true, after };
       },
       readerLifetime: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         if (
           reservation === undefined ||
           reservation.input !== _input ||
@@ -727,16 +792,19 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
           reservation.seed !== seed
         )
           throw new TypeError("The provider lifetime does not match its exact reservation");
+
         return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
       },
       validateReader: (_input, reader, after, _checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined && reservation.after === after && reservation.seed === seed
         );
       },
       isReaderCurrent: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined && reservation.after === after && reservation.seed === seed
         );
@@ -746,6 +814,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
         releases.set(reader, (releases.get(reader) ?? 0) + 1);
       },
     };
+
     return {
       source,
       openings,
@@ -754,6 +823,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       acknowledgements,
       reserve(after: number, seed: unknown) {
         const reader = Object.freeze({});
+
         reservations.set(reader, {
           input: undefined,
           after,
@@ -765,6 +835,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       },
       emit(reader: object, event: Event) {
         const emit = readerEmitters.get(reader);
+
         if (emit === undefined) throw new Error("The admitted positioned reader did not open");
         emit(event);
       },
@@ -829,6 +900,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
 
   try {
     const source = sourceGraph.api.events(undefined);
+
     sourceProjection = project(source, sourcePolicy);
     expect(providerA.openings).toHaveLength(1);
     expect(providerA.boundaries).toHaveLength(1);
@@ -841,6 +913,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     expect(providerA.acknowledgements).toHaveLength(0);
 
     const checkpoint = capturePositionedStore(source, [sourceProjection] as const);
+
     expect(checkpoint.present).toBe(false);
     expect(checkpoint.hasPosition).toBe(false);
     expect(Object.hasOwn(checkpoint, "latest")).toBe(false);
@@ -857,8 +930,10 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     const stopSecondCapture = subscribe(initialCaptureState, (notice) =>
       secondCaptureNotices.push(notice),
     );
+
     expect(firstCaptureNotices).toHaveLength(1);
     const firstCaptureNotice = firstCaptureNotices[0];
+
     if (firstCaptureNotice === undefined) throw new Error("The first capture notice is missing");
     expect(firstCaptureNotice.kind).toBe("changed");
     expect(secondCaptureNotices).toStrictEqual([firstCaptureNotice]);
@@ -891,14 +966,17 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
           (value as { readonly $ref?: unknown }).$ref === seedId
         ) {
           const decoded = decodedSeeds.get(seedId);
+
           if (decoded === undefined) throw new Error("The positioned seed reference is missing");
           return decoded;
         }
+
         return value;
       },
       decodeFailure: (failure) => new Error(String(failure)),
     };
     const sourceRoot = computed(() => sourceProjection!.value.get());
+
     expect(sourceRoot.get()).toBe(10);
     capture = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
@@ -908,8 +986,10 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     });
     expect(capture.image.version).toBe(2);
     const positionedRows = capture.image.positioned;
+
     if (positionedRows === undefined)
       throw new Error("The initial positioned group row was omitted");
+
     expect(positionedRows).toMatchObject([
       {
         slot: "p0",
@@ -936,6 +1016,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       ]),
     );
     const captureCommit = capture.seal();
+
     if (captureCommit === undefined) throw new Error("The genuine initial capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -943,6 +1024,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     await capture.retired;
 
     const targetReader = providerB.reserve(5, seed);
+
     reader = targetReader;
     const receiverClaim = preparePassiveTransferClaim(
       targetGraph,
@@ -951,6 +1033,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       undefined,
       { policies: [policy] as const, seed, reader: targetReader },
     );
+
     claim = receiverClaim;
     expect(receiverClaim.restoration.source).toBe(receiverClaim.store);
     expect(receiverClaim.retired).not.toBe(receiverClaim.restoration.retired);
@@ -962,6 +1045,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       targetRuns += 1;
       return receiverClaim.restoration.projections[0]!.value.get();
     });
+
     adoption = prepareRequiredTransferAdoption(capture.image, {
       graphs: [targetGraph],
       sources: [{ slot: "s0", claim: receiverClaim }],
@@ -977,6 +1061,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       mappedStateWrites: [],
     });
     const commit = adoption.seal();
+
     if (commit === undefined) throw new Error("The initial boundary adoption did not seal");
     commit.publish();
     adoptionPublished = true;
@@ -1004,6 +1089,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     const cancelledDeadline = observePositionedStoreCaptureState(deadlineCheckpoint);
     const timersBefore = jest.getTimerCount();
     const stopDeadline = subscribe(cancelledDeadline, () => undefined);
+
     expect(jest.getTimerCount()).toBe(timersBefore + 1);
     stopDeadline();
     expect(jest.getTimerCount()).toBe(timersBefore);
@@ -1012,12 +1098,14 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       receiverClaim.restoration.projections[0]!.value,
       (value) => value === 12,
     );
+
     providerB.emit(targetReader, { position: 6, value: 2 });
     await suffixFold;
     expect(targetSteps).toBe(1);
     expect(receiverClaim.store.available.get()).toBe(true);
     expect(receiverClaim.store.value.get()).toBe(2);
     const receipt = positionedFoldReceipt(receiverClaim.restoration.projections[0]!);
+
     if (receipt === undefined) throw new Error("The real suffix did not produce a fold receipt");
     acknowledgePositionedFold(receiverClaim.restoration.projections[0]!, receipt);
     expect(providerB.acknowledgements).toHaveLength(1);
@@ -1034,6 +1122,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     let targetSeedRevision: object | undefined;
     const stopFirstTarget = subscribe(targetCaptureState, (notice) => {
       firstTargetNotices.push(notice);
+
       if (firstTargetNotices.length === 1 && notice.kind === "changed") {
         targetSeedRevision = notice.revision;
         insideSeedWrite = true;
@@ -1041,13 +1130,16 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
         insideSeedWrite = false;
       } else if (insideSeedWrite) reenteredDuringWrite = true;
     });
+
     if (targetSeedRevision === undefined)
       throw new Error("The target capture did not synchronously seed its observer");
+
     const secondTargetNotices: PositionedStoreCaptureNotice[] = [];
     const stopSecondTarget = subscribe(targetCaptureState, (notice) =>
       secondTargetNotices.push(notice),
     );
     const targetChange = await waitForCaptureChange(targetCaptureState, targetSeedRevision);
+
     expect(targetChange.kind).toBe("changed");
     expect(reenteredDuringWrite).toBe(false);
     expect(firstTargetNotices).toHaveLength(2);
@@ -1055,6 +1147,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
 
     stopFirstTarget();
     const secondTargetChange = waitForCaptureChange(targetCaptureState, targetChange.revision);
+
     receiverClaim.store.set(100);
     await secondTargetChange;
     expect(firstTargetNotices).toHaveLength(2);
@@ -1091,6 +1184,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
     let expiringAdoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
     let expiringAdoptionPublished = false;
     let stopExpiration: (() => void) | undefined;
+
     try {
       const expiringTransferClaim = preparePassiveTransferClaim(
         expiringGraph,
@@ -1099,10 +1193,12 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
         undefined,
         { policies: [policy] as const, seed, reader: expiringReader },
       );
+
       expiringClaim = expiringTransferClaim;
       const expiringTargetValue = computed(() =>
         expiringTransferClaim.restoration.projections[0]!.value.get(),
       );
+
       expiringAdoption = prepareRequiredTransferAdoption(capture!.image, {
         graphs: [expiringGraph],
         sources: [{ slot: "s0", claim: expiringTransferClaim }],
@@ -1118,8 +1214,10 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
         mappedStateWrites: [],
       });
       const expiringCommit = expiringAdoption.seal();
+
       if (expiringCommit === undefined)
         throw new Error("The expiring reader adoption did not seal");
+
       expiringCommit.publish();
       expiringAdoptionPublished = true;
       expiringCommit.notifications.deliver();
@@ -1129,6 +1227,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       const expiringCheckpoint = capturePositionedStore(expiringTransferClaim.store, [
         expiringTransferClaim.restoration.projections[0]!,
       ] as const);
+
       expect(expiringCheckpoint.present).toBe(false);
       expect(expiringCheckpoint.resumable).toBe(true);
       const expiringState = observePositionedStoreCaptureState(expiringCheckpoint);
@@ -1137,6 +1236,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
         expiringState,
         (notice) => notice.kind === "invalidated",
       );
+
       stopExpiration = subscribe(expiringState, (notice) => expirationNotices.push(notice));
       expect(expirationNotices[0]?.kind).toBe("changed");
       expect(await expired).toStrictEqual({ kind: "invalidated" });
@@ -1145,15 +1245,18 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       expect(expiringProvider.trace).not.toContain("return");
     } finally {
       stopExpiration?.();
+
       if (!expiringAdoptionPublished) {
         expiringAdoption?.discard();
         expiringClaim?.discard();
       } else expiringClaim?.restoration.discard();
+
       if (expiringAdoption !== undefined)
         await expiringAdoption.retired.then(
           () => undefined,
           () => undefined,
         );
+
       if (expiringClaim !== undefined) {
         await expiringClaim.retired.then(
           () => undefined,
@@ -1166,6 +1269,7 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
       } else if (expiringProvider.releaseCount(expiringReader) === 0) {
         expiringProvider.source.releaseReader(undefined, expiringReader);
       }
+
       expiringGraph.dispose();
     }
 
@@ -1175,25 +1279,31 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
   } finally {
     try {
       if (!capturePublished) capture?.discard();
+
       if (!adoptionPublished) {
         adoption?.discard();
         claim?.discard();
       } else claim?.restoration.discard();
+
       sourceProjection?.close();
       sourceGraph.dispose();
       targetGraph.dispose();
+
       if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
         providerB.source.releaseReader(undefined, reader);
+
       if (capture !== undefined)
         await capture.retired.then(
           () => undefined,
           () => undefined,
         );
+
       if (adoption !== undefined)
         await adoption.retired.then(
           () => undefined,
           () => undefined,
         );
+
       if (claim !== undefined) {
         await claim.retired.then(
           () => undefined,
@@ -1212,12 +1322,15 @@ it("resumes a genuine initial boundary without inventing an Event or fold receip
 
 it("retains a stream for a projection then collects after its final listener closes", async () => {
   const { backend, graph, source } = setup();
+
   try {
     const history = project(source, { kind: "accumulate", max: 2, onOverflow: "drop-oldest" });
+
     await Promise.resolve();
     jest.advanceTimersByTime(50);
     expect(backend.calls[0]!.aborted).toBe(false);
     const stopValue = subscribe(source.value, () => undefined);
+
     history.close();
     jest.advanceTimersByTime(50);
     expect(backend.calls[0]!.aborted).toBe(false);
@@ -1262,8 +1375,10 @@ it("preserves an undefined failure from a required positioned projection", async
   try {
     expect(checkpoint.present).toBe(false);
     const failed = waitForCaptureNotice(captureState, (notice) => notice.kind === "failed");
+
     backend.emit(name, { position: 1, value: 2 });
     const notice = await failed;
+
     expect(notice).toStrictEqual({ kind: "failed", cause: undefined });
     expect(projection.status.get()).toBe("failed");
     expect(projection.error.get()).toBeUndefined();
@@ -1277,13 +1392,16 @@ it("preserves an undefined failure from a required positioned projection", async
 
 it("fails independent projection state on overflow or gaps without aborting the shared source", async () => {
   const { backend, graph, source } = setup();
+
   try {
     const bounded = project(source, { kind: "accumulate", max: 1 });
     const sum = project(source, { kind: "reduce", initial: 0, step: (total, n) => total + n });
     const first = until(sum.value, (value) => value === 2);
+
     backend.emit("shared-events", 2);
     await first;
     const second = until(sum.value, (value) => value === 5);
+
     backend.emit("shared-events", 3);
     await second;
     expect(bounded.status.get()).toBe("failed");
@@ -1302,24 +1420,30 @@ it("fails independent projection state on overflow or gaps without aborting the 
 
 it("ends projections with their source session and does not reconnect them on reopen", async () => {
   const { backend, graph, source } = setup();
+
   try {
     const history = project(source, { kind: "accumulate", max: 10 });
     const closed = until(history.status, (status) => status === "closed");
+
     backend.end("shared-events");
     await closed;
     const reopened = graph.api.stream();
+
     expect(backend.calls).toHaveLength(2);
     const sum = project(reopened, { kind: "reduce", initial: 0, step: (total, n) => total + n });
     const first = until(sum.value, (value) => value === 1);
+
     backend.emit("shared-events", 1);
     await first;
     expect(history.value.get()).toStrictEqual([]);
     const reason = new Error("source failed");
     const failed = until(sum.status, (status) => status === "failed");
+
     backend.end("shared-events", reason);
     await failed;
     expect(sum.error.get()).toBe(reason);
     const late = project(reopened, { kind: "accumulate", max: 2 });
+
     expect(late.status.get()).toBe("failed");
     expect(late.error.get()).toBe(reason);
   } finally {
@@ -1339,6 +1463,7 @@ it.each(["end", "reset"] as const)(
     const graph = createGraph({
       contract: defineContract({ namespace: "fixed-projection", operations: { stream } }),
     });
+
     try {
       const binding = bindStream(graph, stream, graph.api.stream, {
         context: createBindingContext(graph),
@@ -1346,20 +1471,25 @@ it.each(["end", "reset"] as const)(
       const a = binding.member();
       const history = project(a, { kind: "accumulate", max: 3 });
       const receivedA = until(history.value, (items) => items.length === 1);
+
       backend.emit("fixed-projection", 5);
       await receivedA;
       let resetting: Promise<void> | undefined;
+
       if (mode === "reset") resetting = graph.reset();
       else backend.end("fixed-projection");
+
       await binding.session(a).detached;
       await resetting;
       expect(history.status.get()).toBe("closed");
       expect(backend.calls).toHaveLength(1);
       const prior = mode === "reset" ? [] : [5];
+
       expect(history.value.get()).toEqual(prior);
       const b = binding.member();
       const next = project(b, { kind: "accumulate", max: 3 });
       const receivedB = until(next.value, (items) => items.length === 1);
+
       backend.emit("fixed-projection", 9);
       await receivedB;
       expect(next.value.get()).toEqual([9]);

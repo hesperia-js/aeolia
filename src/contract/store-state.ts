@@ -31,6 +31,7 @@ export function nextGeneration(current: number, minimum = current): Generation {
     Math.max(current, minimum) >= Number.MAX_SAFE_INTEGER
   )
     throw new RangeError("Store generation exhausted");
+
   return (Math.max(current, minimum) + 1) as Generation;
 }
 
@@ -40,8 +41,10 @@ export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation)
   const activeProgressRequest = owner?.current.status === "active" ? owner.request : undefined;
   const request = activeProgressRequest ?? runtime.activeRequest;
   const generation = nextGeneration(runtime.generation, minimum);
+
   noteTransferChange(runtime);
   runtime.generation = generation;
+
   if (
     request !== undefined &&
     !request.superseded &&
@@ -50,6 +53,7 @@ export function issue<T>(runtime: StoreRuntime<T>, minimum = runtime.generation)
     owner.current.status === "active"
   )
     runtime.queryProgressAuthorityChange?.(request);
+
   return generation;
 }
 
@@ -74,6 +78,7 @@ export function prepareAdoptionIssue<T>(
     owner.current.status === "active"
       ? request
       : undefined;
+
   return {
     generation,
     publish: () => {
@@ -95,7 +100,9 @@ export function recordLanding<T>(
 ): void {
   assertStoreOpen(runtime);
   const revision = nextValueRevision(runtime.valueRevision);
+
   noteTransferChange(runtime);
+
   if (runtime.binding === undefined && runtime.stream?.positioned === undefined) {
     const state = runtime.graph.__runtime;
     const epoch = state.resetEpoch;
@@ -114,6 +121,7 @@ export function recordLanding<T>(
           runtime.streamToken === expectedPositionedSession.token &&
           expectedPositionedSession.resetEpoch === epoch));
     const previousRevision = runtime.valueRevision;
+
     reactiveInternal.batch(() => {
       const landed = reactiveInternal.guardedWrite(
         runtime.committed,
@@ -133,19 +141,23 @@ export function recordLanding<T>(
           runtime.presence.set(true);
         },
       );
+
       if (!landed || !current(revision)) return;
       touch(runtime);
       writeAllStatuses(runtime, Date.now(), landingGeneration);
     });
     return;
   }
+
   const addressWrite = beginStoreAddress(runtime);
+
   try {
     if (runtime.incarnation === undefined) runtime.incarnation = {};
     const incarnation = runtime.incarnation;
     const generation = runtime.generation;
     const epoch = runtime.graph.__runtime.resetEpoch;
     const previousRevision = runtime.valueRevision;
+
     reactiveInternal.batch(() => {
       const landed = reactiveInternal.guardedWrite(
         runtime.committed,
@@ -182,8 +194,10 @@ export function recordLanding<T>(
           runtime.refreshOnActivation = false;
           runtime.dropped = false;
           const positioned = runtime.stream?.positioned;
+
           if (positioned !== undefined) {
             positioned.baseRevision = revision;
+
             if (
               expectedPositionedSession !== undefined &&
               expectedPositionedSession === runtime.stream &&
@@ -199,17 +213,21 @@ export function recordLanding<T>(
               positioned.diverged = false;
             else positioned.diverged = true;
           }
+
           runtime.errorCell.set(undefined);
           runtime.presence.set(true);
         },
       );
+
       if (!landed) return;
+
       if (
         expectedSession?.phase === "active" &&
         !expectedSession.session.ended &&
         runtime.stream?.token === expectedSession.session.token
       )
         expectedSession.lifecycle.update((version) => version + 1);
+
       touch(runtime);
       writeAllStatuses(runtime, Date.now(), landingGeneration);
     });
@@ -226,10 +244,13 @@ export function publishObservation<T>(
 ): boolean {
   const before = runtime.valueRevision;
   const next = nextValueRevision(before);
+
   noteTransferChange(runtime);
   const addressWrite = beginStoreAddress(runtime);
+
   try {
     let committed = false;
+
     reactiveInternal.batch(() => {
       reactiveInternal.guardedWrite(
         runtime.committed,
@@ -290,12 +311,14 @@ function seedInitialValue<T>(
     recordLanding(runtime, initial, undefined, expectedSession);
     return;
   }
+
   const state = runtime.graph.__runtime;
   const epoch = state.resetEpoch;
   const generation = runtime.generation;
   const incarnation = runtime.incarnation;
   const before = runtime.valueRevision;
   const revision = nextValueRevision(before);
+
   reactiveInternal.batch(() => {
     reactiveInternal.guardedWrite(
       runtime.committed,
@@ -332,42 +355,58 @@ export function configureKeyedValue<T>(
   touchCollection = true,
 ): void {
   const initialStated = options != null && Object.prototype.hasOwnProperty.call(options, "initial");
+
   afterRead?.();
   const callerEqualsStated = options?.equals != null;
+
   afterRead?.();
   const definitionEqualsStated = definition.equals != null;
+
   afterRead?.();
   const callerSnapshotStated = options?.snapshot != null;
+
   afterRead?.();
   const definitionSnapshotStated = definition.snapshot != null;
+
   afterRead?.();
   const equalsStated = callerEqualsStated || definitionEqualsStated;
   const snapshotStated = callerSnapshotStated || definitionSnapshotStated;
   const initial = initialStated ? options?.initial : undefined;
+
   afterRead?.();
   const callerEquals = options?.equals;
+
   afterRead?.();
   const defaultEquals = callerEquals == null ? definition.equals : undefined;
+
   afterRead?.();
   const equals = callerEquals ?? defaultEquals;
   const callerSnapshot = options?.snapshot;
+
   afterRead?.();
   const defaultSnapshot = callerSnapshot == null ? definition.snapshot : undefined;
+
   afterRead?.();
   const snapshot = callerSnapshot ?? defaultSnapshot ?? true;
 
   if (callerEqualsStated && definitionEqualsStated) {
     const caller = options?.equals;
+
     afterRead?.();
     const declared = definition.equals;
+
     afterRead?.();
     if (caller !== declared) throw optionConflict(runtime as StoreRuntime<unknown>, "equals");
   }
+
   if (callerSnapshotStated && definitionSnapshotStated) {
     const caller = options?.snapshot;
+
     afterRead?.();
     const declared = definition.snapshot;
+
     afterRead?.();
+
     if (!Object.is(caller, declared))
       throw optionConflict(runtime as StoreRuntime<unknown>, "snapshot");
   }
@@ -384,20 +423,25 @@ export function configureKeyedValue<T>(
     runtime.equalsSpecified = equalsStated;
     runtime.snapshot = snapshot;
     runtime.snapshotSpecified = snapshotStated;
+
     if (seed && initialStated && !runtime.baseAvailable) {
       seedInitialValue(runtime, initial as T, expectedSession);
     }
+
     if (touchCollection) touch(runtime);
     return;
   }
+
   if (initialStated && runtime.initialSpecified && !Object.is(runtime.initial, initial))
     throw optionConflict(runtime as StoreRuntime<unknown>, "initial");
+
   const configureInitial = initialStated && !runtime.initialSpecified;
   const seedInitial =
     seed &&
     configureInitial &&
     !runtime.baseAvailable &&
     (runtime.generation === 0 || runtime.graph.__runtime.resetEpoch > 0);
+
   if (configureInitial) {
     const state = runtime.graph.__runtime;
     const resetRequest = runtime.activeRequest;
@@ -407,36 +451,46 @@ export function configureKeyedValue<T>(
         (resetRequest !== undefined &&
           !resetRequest.settled &&
           resetRequest.resetEpoch === state.resetEpoch));
+
     if (reseedAfterReset) throw optionConflict(runtime as StoreRuntime<unknown>, "initial");
   }
+
   if (equalsStated && runtime.equalsSpecified && runtime.equals !== (equals ?? Object.is))
     throw optionConflict(runtime as StoreRuntime<unknown>, "equals");
+
   if (snapshotStated && runtime.snapshotSpecified && runtime.snapshot !== snapshot)
     throw optionConflict(runtime as StoreRuntime<unknown>, "snapshot");
+
   if (seedInitial) nextValueRevision(runtime.valueRevision);
   if (validateOnly) return;
+
   if (
     (equalsStated && !runtime.equalsSpecified) ||
     (snapshotStated && !runtime.snapshotSpecified) ||
     configureInitial
   )
     noteTransferChange(runtime);
+
   if (equalsStated && !runtime.equalsSpecified) {
     runtime.equals = equals ?? Object.is;
     runtime.equalsSpecified = true;
   }
+
   if (snapshotStated && !runtime.snapshotSpecified) {
     runtime.snapshot = snapshot;
     runtime.snapshotSpecified = true;
   }
+
   if (configureInitial) {
     runtime.initial = initial;
     runtime.initialSpecified = true;
+
     if (seedInitial) {
       seedInitialValue(runtime, initial as T, expectedSession);
       runtime.refreshOnActivation = false;
     }
   }
+
   if (touchCollection) touch(runtime);
 }
 
@@ -452,6 +506,7 @@ export function preparePrediction<T>(
 ): Prediction<T> | undefined {
   try {
     const current = runtime.value.peek();
+
     if (!isCurrent()) return undefined;
     reactiveInternal.withPredictionReadRefusal(() => predictor(current, input));
   } catch (error) {
@@ -462,6 +517,7 @@ export function preparePrediction<T>(
     );
     return undefined;
   }
+
   if (!isCurrent()) return undefined;
   const prediction: Prediction<T> = {
     id: runtime.graph.__runtime.nextPredictionId++,
@@ -471,15 +527,18 @@ export function preparePrediction<T>(
     apply(value: T | undefined): T | undefined {
       if (prediction.dead || !isCurrent()) return value;
       let next: T;
+
       try {
         next = reactiveInternal.withPredictionReadRefusal(() => predictor(value, input));
       } catch (error) {
         if (!isCurrent() || prediction.dead) return value;
         const revision = nextValueRevision(runtime.valueRevision);
+
         noteTransferChange(runtime);
         changeBoundAddress(runtime);
         prediction.dead = true;
         runtime.valueRevision = revision;
+
         if (!prediction.reported) {
           prediction.reported = true;
           graphFault(
@@ -489,16 +548,20 @@ export function preparePrediction<T>(
               : predictionFault(runtime),
           );
         }
+
         return value;
       }
+
       return isCurrent() && !prediction.dead ? next : value;
     },
   };
+
   return prediction;
 }
 
 export function markPredictionSucceeded<T>(runtime: StoreRuntime<T>, id: number): void {
   const prediction = runtime.predictionStack.peek().find((entry) => entry.id === id);
+
   if (prediction !== undefined && !prediction.dead && !prediction.succeeded) {
     noteTransferChange(runtime);
     prediction.succeeded = true;
@@ -512,8 +575,10 @@ export function retirePredictions<T>(runtime: StoreRuntime<T>, ids: readonly num
   const next = current.filter(
     (prediction) => !(prediction.succeeded && covered.has(prediction.id)),
   );
+
   if (next.length === current.length) return;
   const revision = nextValueRevision(runtime.valueRevision);
+
   noteTransferChange(runtime);
   changeBoundAddress(runtime);
   runtime.valueRevision = revision;
@@ -524,11 +589,14 @@ export function retirePredictions<T>(runtime: StoreRuntime<T>, ids: readonly num
 
 export function pushPrediction<T>(runtime: StoreRuntime<T>, prediction: Prediction<T>): boolean {
   const live = runtime.predictionStack.peek().filter((entry) => !entry.dead);
+
   if (live.length >= runtime.graph.__runtime.maxPredictions) {
     graphFault(runtime.graph.__runtime, predictionFault(runtime));
     return false;
   }
+
   const revision = nextValueRevision(runtime.valueRevision);
+
   noteTransferChange(runtime);
   changeBoundAddress(runtime);
   reactiveInternal.batch(() => {
@@ -543,8 +611,10 @@ export function pushPrediction<T>(runtime: StoreRuntime<T>, prediction: Predicti
 export function removePrediction<T>(runtime: StoreRuntime<T>, id: number): void {
   const current = runtime.predictionStack.peek();
   const next = current.filter((entry) => entry.id !== id && !entry.dead);
+
   if (next.length !== current.length) {
     const revision = nextValueRevision(runtime.valueRevision);
+
     noteTransferChange(runtime);
     reactiveInternal.batch(() => {
       runtime.valueRevision = revision;

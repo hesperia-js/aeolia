@@ -40,6 +40,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
 
   const packageName = manifest.name;
   const publicApi = await import(packageName);
+
   expect(Object.keys(publicApi).sort()).toEqual([
     "AEOLIA_TAGGED_ENCODING",
     "Fault",
@@ -99,6 +100,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
 
   const state = new publicApi.Signal.State(2);
   const doubled = new publicApi.Signal.Computed(() => state.get() * 2);
+
   expect(doubled.get()).toBe(4);
 
   for (const [subpath, names] of [
@@ -145,6 +147,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     ],
   ] as const) {
     const subsystem = await import(`${packageName}/${subpath}`);
+
     expect(Object.keys(subsystem).sort()).toEqual([...names].sort());
     for (const name of names) expect(subsystem[name]).toBe(publicApi[name]);
     const response = Promise.withResolvers<number>();
@@ -156,6 +159,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
     const graph = publicApi.createGraph({
       contract: { namespace: "built-observation", operations: { query } },
     });
+
     try {
       const binding = publicApi.bindOperation(graph, query, {
         context: publicApi.createBindingContext(graph),
@@ -164,6 +168,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
       });
       const store = binding.member(undefined);
       const lease = subsystem.observeStore(graph, store);
+
       lease.publish(3);
       expect(publicApi.peekStore(store)).toMatchObject({
         kind: "stable",
@@ -184,6 +189,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
 
   const reactivePackageName = `${packageName}/reactive`;
   const reactivePackage = await import(reactivePackageName);
+
   expect(Object.keys(reactivePackage).sort()).toEqual([
     "Signal",
     "afterPropagation",
@@ -200,12 +206,14 @@ test("the published entry point resolves to the built ESM artifact", async () =>
   expect(reactivePackage.subscribe).not.toBe(publicApi.subscribe);
   expect(reactivePackage.readableBrand).toBe(publicApi.readableBrand);
   const factoryState = reactivePackage.signal(3);
+
   expect(publicApi.Signal.isState(factoryState)).toBe(true);
   const mixed = new publicApi.Signal.Computed(() => factoryState.get() + state.get());
   let notifications = 0;
   const stop = reactivePackage.watch(mixed, () => {
     notifications += 1;
   });
+
   factoryState.set(4);
   expect(notifications).toBe(1);
   expect(mixed.get()).toBe(6);
@@ -214,6 +222,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
 
   const values: number[] = [];
   const stopValues = reactivePackage.subscribe(mixed, (value: number) => values.push(value));
+
   state.set(3);
   expect(values).toEqual([6, 7]);
   stopValues();
@@ -222,6 +231,7 @@ test("the published entry point resolves to the built ESM artifact", async () =>
 test("bundled public functions and classes retain their runtime names", async () => {
   const packageName = "aeolia";
   const publicApi = await import(packageName);
+
   for (const name of ["signal", "computed", "Fault", "createGraph", "createQuery"]) {
     expect(publicApi[name].name).toBe(name);
   }

@@ -59,12 +59,16 @@ declare const targetBrand: unique symbol;
 function copyOptions<T extends object>(source: T, assertCurrent: () => void): T {
   const copy: Record<PropertyKey, unknown> = {};
   const keys = Reflect.ownKeys(source);
+
   assertCurrent();
+
   for (const key of keys) {
     const descriptor = Reflect.getOwnPropertyDescriptor(source, key);
+
     assertCurrent();
     if (!descriptor?.enumerable) continue;
     const value: unknown = Reflect.get(source, key);
+
     assertCurrent();
     Object.defineProperty(copy, key, {
       value,
@@ -73,6 +77,7 @@ function copyOptions<T extends object>(source: T, assertCurrent: () => void): T 
       configurable: true,
     });
   }
+
   return copy as T;
 }
 
@@ -184,6 +189,7 @@ export interface QueryBindingConfiguration<Q extends AnyQuery, V> {
  */
 export function createBindingContext(graph: Graph): BindingContext {
   const state = graphRuntimeByGraph.get(graph);
+
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
   const activeCell = signal(true);
@@ -195,6 +201,7 @@ export function createBindingContext(graph: Graph): BindingContext {
     dispose: () => disposeBindingContextRuntime(context),
     retire: () => retireBindingContextRuntime(context),
   });
+
   context = {
     retirement: createRetirementOwner(state.retirement),
     state,
@@ -224,8 +231,10 @@ function captureTarget<Q extends AnyQuery, V>(
   assertContextOpen(binding.context);
   assertStoreHandlePublished(store);
   const runtime = queryRuntimeByStore.get(store);
+
   if (runtime === undefined || runtime.binding !== binding)
     throw new TypeError("Query handle does not belong to this binding");
+
   if (runtime.disposed) throw new Fault("disposed", [String(runtime.key)]);
   return captureQueryTarget<Q, V>(binding, runtime);
 }
@@ -262,18 +271,23 @@ export function bindOperation(
   configuration: QueryBindingConfiguration<any, any> | MutationBindingConfiguration<any, any>,
 ): QueryBinding<any, any> | MutationBinding<any, any> {
   const state = graphRuntimeByGraph.get(graph);
+
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
   const physical = beginPhysicalWork(state.retirement, "acquisition");
+
   try {
     const kind = definition?.kind;
+
     assertGraphOpen(state);
+
     if (kind === "mutation")
       return bindMutationOperation(
         graph,
         definition as MutationDefinition<any, any>,
         configuration as MutationBindingConfiguration<any, any>,
       );
+
     return bindQueryOperation(
       graph,
       definition as AnyQuery,
@@ -290,34 +304,47 @@ function bindQueryOperation<Q extends AnyQuery, V>(
   configuration: QueryBindingConfiguration<NoInfer<Q>, V>,
 ): QueryBinding<Q, V> {
   const state = graphRuntimeByGraph.get(graph);
+
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
+
   if (configuration === null || typeof configuration !== "object" || Array.isArray(configuration))
     throw new TypeError("Invalid query binding configuration");
+
   const contextHandle = configuration.context;
+
   assertGraphOpen(state);
   const context = contexts.get(contextHandle);
   const acquisition = state.queryDefinitions.get(definition);
+
   if (context === undefined || context.state !== state || acquisition === undefined)
     throw new TypeError("Query binding requires its exact graph, context and declaration");
+
   assertContextOpen(context);
   const physical = beginPhysicalWork(context.retirement, "acquisition");
+
   try {
     const profile = configuration.profile;
+
     assertContextOpen(context);
     const fetch = configuration.fetch;
+
     assertContextOpen(context);
     const suppliedValue = configuration.value;
+
     assertContextOpen(context);
+
     if (
       suppliedValue !== undefined &&
       (suppliedValue === null || typeof suppliedValue !== "object" || Array.isArray(suppliedValue))
     )
       throw new TypeError("Invalid query binding value configuration");
+
     const value =
       suppliedValue === undefined
         ? undefined
         : Object.freeze(copyOptions(suppliedValue, () => assertContextOpen(context)));
+
     if (
       profile === null ||
       (typeof profile !== "object" && typeof profile !== "function") ||
@@ -325,13 +352,18 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       (value !== undefined && !isValueOptions(value, () => assertContextOpen(context)))
     )
       throw new TypeError("Invalid query binding configuration");
+
     const name = definition.name;
+
     assertContextOpen(context);
     const key = definition.key;
+
     assertContextOpen(context);
     const revalidateAfterMs = definition.revalidateAfterMs;
+
     assertContextOpen(context);
     const snapshot = value?.snapshot ?? definition.snapshot;
+
     assertContextOpen(context);
     const execution: QueryDefinition<
       QueryInput<Q>,
@@ -351,8 +383,10 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       snapshot,
       equals: value?.equals,
     });
+
     assertContextOpen(context);
     let profiles = context.bindings.get(definition);
+
     if (profiles?.has(profile)) throw new TypeError("Query binding is already registered");
     const binding: QueryBindingRuntime = {
       kind: "query",
@@ -373,6 +407,7 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       const epoch = state.resetEpoch;
       const assertNative = (): void => {
         assertContextOpen(context);
+
         if (cohortInput !== undefined && state.resetEpoch !== epoch)
           throw new AbortError("Query acquisition crossed a graph reset.");
       };
@@ -383,27 +418,37 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       };
       const physical = beginPhysicalWork(context.retirement, "acquisition");
       let admission: TransferAdmission | undefined;
+
       try {
         if (cohortInput !== undefined && !Array.isArray(args))
           throw new TypeError("Query arguments must be an array.");
+
         const input = args[0];
+
         assertCall();
         const callOptions = args[1];
+
         assertCall();
         const argumentCount = args.length;
+
         assertCall();
+
         if (
           cohortInput !== undefined &&
           (!Number.isSafeInteger(argumentCount) || argumentCount < 0)
         )
           throw new TypeError("Query arguments must be an array.");
+
         admission = beginTransferAdmission(state, definition, binding, input);
         const call = normalizeQueryCall(input, callOptions, argumentCount > 1, assertCall);
         const selectedOptions =
           call.options === undefined ? undefined : copyOptions(call.options, assertCall);
+
         assertCall();
+
         if (selectedOptions !== undefined && !isStoreOptions(selectedOptions, assertCall))
           throw new TypeError("Invalid query options.");
+
         if (cohortInput?.assertCurrent === undefined) {
           if (
             value !== undefined &&
@@ -415,26 +460,37 @@ function bindQueryOperation<Q extends AnyQuery, V>(
             throw new TypeError("Initial value conflicts with query binding configuration");
         } else if (value !== undefined) {
           const hasBindingInitial = Object.hasOwn(value, "initial");
+
           assertCall();
+
           if (hasBindingInitial && selectedOptions !== undefined) {
             const hasCallerInitial = Object.hasOwn(selectedOptions, "initial");
+
             assertCall();
+
             if (hasCallerInitial) {
               const bindingInitial = value.initial;
+
               assertCall();
               const callerInitial = selectedOptions.initial;
+
               assertCall();
+
               if (!Object.is(bindingInitial, callerInitial))
                 throw new TypeError("Initial value conflicts with query binding configuration");
             }
           }
         }
+
         const options = selectedOptions as StoreOptions<V> | undefined;
+
         assertCall();
+
         if (admission !== undefined) {
           finishTransferAdmission(admission);
           admission = undefined;
         }
+
         return makeQueryStore(
           state,
           execution,
@@ -462,6 +518,7 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       member,
       target: (store: QueryStore<V, QueryProgress<Q>>) => captureTarget<Q, V>(binding, store),
     }) as QueryBinding<Q, V>;
+
     binding.handle = handle;
     const transferSource = {
       graph: state.graph,
@@ -471,13 +528,16 @@ function bindQueryOperation<Q extends AnyQuery, V>(
       invokeQuery: (args: readonly unknown[], entries: unknown, assertCurrent?: () => void) =>
         invoke(args, { entries, assertCurrent }),
     };
+
     registerTransferSource(member, transferSource);
     registerTransferSource(handle, transferSource);
     bindings.set(handle, binding);
+
     if (profiles === undefined) {
       profiles = new Map();
       context.bindings.set(definition, profiles);
     }
+
     profiles.set(profile, binding);
     return handle;
   } finally {

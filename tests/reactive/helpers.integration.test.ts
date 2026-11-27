@@ -7,13 +7,16 @@ function thrownBy(run: () => unknown): unknown {
   } catch (error) {
     return error;
   }
+
   return undefined;
 }
 
 function faultFrom(run: () => unknown, kind: Fault["kind"]): Fault {
   const error = thrownBy(run);
+
   expect(error).toBeInstanceOf(Fault);
   const fault = error as Fault;
+
   expect(fault.kind).toBe(kind);
   return fault;
 }
@@ -74,6 +77,7 @@ describe("Aeolia reactive public API", () => {
       peekRuns += 1;
       return peeked.peek() + 1;
     });
+
     expect(peekOnly.get()).toBe(5);
     peeked.set(8);
     expect(peekOnly.get()).toBe(5);
@@ -164,10 +168,12 @@ describe("Aeolia reactive public API", () => {
   it("reports every readable in a cycle", () => {
     let first!: { get(): number };
     let second!: { get(): number };
+
     first = computed(() => second.get(), { label: "first" });
     second = computed(() => first.get(), { label: "second" });
 
     const error = faultFrom(() => first.get(), "cycle");
+
     expect(error.involved).toEqual(["first", "second"]);
     expect(error.message).toContain("first");
     expect(error.message).toContain("second");
@@ -185,6 +191,7 @@ describe("Aeolia reactive public API", () => {
     const unsubscribe = watch(value, () => {
       notifications += 1;
     });
+
     expect(runs).toBe(1);
 
     input.set(2);
@@ -205,10 +212,12 @@ describe("Aeolia reactive public API", () => {
     let stopInner = () => {};
     const outer = computed(() => {
       outerRuns += 1;
+
       if (!registered) {
         registered = true;
         stopInner = watch(watched, () => undefined);
       }
+
       return stable.get();
     });
     const unsubscribe = watch(outer, () => {
@@ -238,6 +247,7 @@ describe("Aeolia reactive public API", () => {
     const notifications = new Uint8Array(width);
     const unsubscribes = Array.from({ length: width }, (_, index) => {
       const branch = computed(() => source.get() + index);
+
       return watch(branch, () => {
         notifications[index] = notifications[index]! + 1;
       });
@@ -300,6 +310,7 @@ describe("Aeolia reactive public API", () => {
     });
 
     const error = faultFrom(() => source.set(1), "watcher-read");
+
     expect(error.involved).toEqual(["source"]);
     unsubscribe();
   });
@@ -330,6 +341,7 @@ describe("Aeolia reactive public API", () => {
     const order: number[] = [];
     const firstFailure = new Error("first watcher");
     const secondFailure = new Error("second watcher");
+
     watch(source, () => {
       order.push(1);
       throw firstFailure;
@@ -340,6 +352,7 @@ describe("Aeolia reactive public API", () => {
     });
 
     const error = thrownBy(() => source.set(1));
+
     expect(order).toHaveLength(2);
     expect(new Set(order)).toEqual(new Set([1, 2]));
     expect(error).toBeInstanceOf(AggregateError);
@@ -366,6 +379,7 @@ describe("Aeolia reactive public API", () => {
     const source = signal(0);
     let addedNotifications = 0;
     let added = false;
+
     watch(source, () => {
       if (added) return;
       added = true;
@@ -388,6 +402,7 @@ describe("Aeolia reactive public API", () => {
     });
 
     const error = faultFrom(() => source.set(1), "propagation");
+
     expect(error.involved).toEqual(["loop-source"]);
     expect(source.peek()).toBe(9);
     expect(next).toBe(10);
@@ -397,6 +412,7 @@ describe("Aeolia reactive public API", () => {
     const unsubscribe = watch(source, () => {
       recoveredNotifications += 1;
     });
+
     source.set(10);
     expect(source.get()).toBe(10);
     expect(recoveredNotifications).toBe(1);

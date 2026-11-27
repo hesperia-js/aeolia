@@ -149,6 +149,7 @@ const query = createQuery({
   key: (input: { readonly id: string }) => `items/${input.id}`,
   fetch: backend.respond<{ readonly id: string }, { readonly id: string }>("items.get"),
 });
+
 type Progress = { readonly received: number };
 const progressQuery = createQuery<string, number, string, Progress>({
   name: "items.progress",
@@ -184,6 +185,7 @@ const stream = createStream({
   key: (input: { readonly id: string }) => `events/${input.id}`,
   open: backend.stream<{ readonly id: string }, { readonly id: string }>("items.events"),
 });
+
 type PositionedInput = { readonly id: string };
 type PositionedReader = { readonly token: string };
 const positionedSource: PositionedStreamSource<PositionedInput, number, number, PositionedReader> =
@@ -217,6 +219,7 @@ const acquirePositioned: PositionedAcquisition = ({ input, checkpoint, signal })
   const retainedCheckpoint: PositionedStoreRestoreSeed<number, number, readonly unknown[]> =
     checkpoint;
   const retainedSignal: AbortSignal = signal;
+
   void retainedInput;
   void retainedCheckpoint;
   void retainedSignal;
@@ -229,6 +232,7 @@ const synchronousPositionedAcquisition: PositionedAcquisition = () => ({
 const barePositionedAcquisition: PositionedAcquisition = () =>
   // @ts-expect-error a bare Reader Promise would permit Reader assimilation
   Promise.resolve({ token: "reserved" });
+
 type OpaquePositionedAcquisition = NonNullable<
   PositionedStreamSource<PositionedInput, number, number, unknown>["acquireReader"]
 >;
@@ -255,6 +259,7 @@ const compatibleVoidRelease: PositionedStreamSource<
   number,
   PositionedReader
 >["releaseReader"] = existingVoidRelease;
+
 void acquirePositioned;
 void synchronousPositionedAcquisition;
 void barePositionedAcquisition;
@@ -317,6 +322,7 @@ const neverPositionedRestore = preparePositionedSeedRestore(
 );
 const neverPositionedRestoredValues: readonly never[] =
   neverPositionedRestore.projection.value.get();
+
 // @ts-expect-error The never-valued member retains its declared input.
 neverPositionedMember({ id: 1 });
 // @ts-expect-error The never-valued member cannot accept a stored event.
@@ -339,10 +345,12 @@ preparePositionedSeedRestore(
 );
 const neverPositionedAddressed = neverPositionedGraph.at("never-positioned/one");
 const neverPositionedKeyedValue: undefined = neverPositionedAddressed.value.get();
+
 // @ts-expect-error A matching positioned key cannot accept an event of any value.
 neverPositionedAddressed.set(1);
 neverPositionedGraph.at("outside-positioned-pattern").set(1);
 const neverPositionedCollision = createStore({ name: "never-positioned/taken", initial: 0 });
+
 // @ts-expect-error The never-valued positioned stream still reserves its key pattern.
 defineContract({
   namespace: "never-positioned-collision",
@@ -364,6 +372,7 @@ const positionedCapture: PositionedProjectionCheckpoint<{ total: number }, numbe
   capturePositionedProjection<{ total: number }, number>(positionedReduce);
 const positionedReceipt: PositionedFoldReceipt<unknown> | undefined =
   positionedFoldReceipt(positionedReduce);
+
 if (positionedReceipt !== undefined) acknowledgePositionedFold(positionedReduce, positionedReceipt);
 const positionedArray = projectPositioned(
   positionedMember,
@@ -387,6 +396,7 @@ const positionedRestore = preparePositionedSeedRestore(
   { token: "reader" },
 );
 const restoredPositionedValue: { total: number } = positionedRestore.projection.value.get();
+
 preparePositionedSeedRestore(
   positionedGraph.api.positioned,
   { id: "wrong-position" },
@@ -419,6 +429,7 @@ const accumulatedRestore = preparePositionedSeedRestore(
   { token: "reader" },
 );
 const restoredPositionedArray: readonly number[] = accumulatedRestore.projection.value.get();
+
 preparePositionedSeedRestore(
   positionedMember,
   { id: "invalid-array" },
@@ -435,6 +446,7 @@ const positionedSameRuntimeRestore = preparePositionedRestore(
   { value: { total: 3 } },
 );
 const sameRuntimeValue: { total: number } = positionedSameRuntimeRestore.projection.value.get();
+
 void [
   positionedObjectValue,
   positionedArrayValue,
@@ -517,6 +529,7 @@ function typecheckOnly(): void {
   const contractQueryAcquisition: ContractQueryAcquisition = queryAcquisition;
   // @ts-expect-error QueryAcquisition accepts only its published cache/fetch policies.
   const unsupportedAcquisition: QueryAcquisition = "network";
+
   // @ts-expect-error The returned query declaration keeps its acquisition policy readonly.
   query.acquisition = "fetch";
   void unsupportedAcquisition;
@@ -530,9 +543,11 @@ function typecheckOnly(): void {
   const derived: Signal.Computed<number> = new Signal.Computed(() => state.get());
   const readable: Signal<number> = derived;
   const watcher: Signal.subtle.Watcher = new Signal.subtle.Watcher(() => {});
+
   watcher.watch(readable);
   watcher.unwatch(readable);
   let controlled!: Observer;
+
   controlled = createObserver({
     notify() {
       afterPropagation(() => {
@@ -556,26 +571,32 @@ function typecheckOnly(): void {
     mutation.affects[0]!;
   const graph = createGraph({ contract });
   const graphActive: boolean = graph.active;
+
   // @ts-expect-error The graph's logical state cannot be assigned by a caller.
   graph.active = false;
   void graphActive;
   const retirement: Promise<void> = graph.retire();
+
   void retirement;
   const declared = graph.api.store();
   const queried = graph.api.query({ id: "1" });
+
   graph.api.query({ id: "2" }, undefined);
   const changed = graph.api.mutation({ id: "1" });
   const streamed = graph.api.stream({ id: "1" });
   const inferredQuery = graph.api.inferredInputlessQuery();
+
   graph.api.inferredInputlessQuery(queryOptions({}));
   graph.api.inferredInputlessQuery(queryOptions({ initial: 2 }));
   graph.api.inferredInputlessQuery(queryOptions({ initial: 2 }), { revalidateAfterMs: 20 });
   const readonlyQueryOptions = queryOptions({ initial: 2 });
+
   // @ts-expect-error Branded options are a readonly shallow copy.
   readonlyQueryOptions.initial = 3;
   // @ts-expect-error The branded option retains the query's number value type.
   graph.api.inferredInputlessQuery(queryOptions({ initial: "wrong" }));
   const inferredMutation = graph.api.inferredInputlessMutation();
+
   graph.api.inferredInputlessMutation(queryOptions({}));
   graph.api.inferredInputlessMutation(queryOptions({}), {
     abortSignal: new AbortController().signal,
@@ -617,6 +638,7 @@ function typecheckOnly(): void {
       void (value satisfies Progress);
     },
   };
+
   progressFetchOptions.reportProgress({ received: 2 });
   // @ts-expect-error Progress reporters retain their declared value type.
   progressFetchOptions.reportProgress({ received: "two" });
@@ -635,11 +657,13 @@ function typecheckOnly(): void {
         const typedStore: QueryStore<number, Progress> = context.store;
         const typedCapture: QueryProgressSnapshot<Progress> = context.observation.capture();
         const stop: Unsubscribe = context.stop;
+
         void [typedEvent, typedStore, typedCapture, stop];
       },
     },
   ];
   const assertQueryAuthority = (): void => {};
+
   callQueryWithProgress(
     progressGraph.api.progressQuery,
     ["one"],
@@ -651,6 +675,7 @@ function typecheckOnly(): void {
     profile: {},
     fetch: progressQuery.fetch,
   });
+
   callQueryWithProgress(progressBinding.member, ["one"], cohortEntries, assertQueryAuthority);
   // @ts-expect-error A stream member is not a query progress source.
   callQueryWithProgress(graph.api.stream, [{ id: "1" }], cohortEntries);
@@ -662,6 +687,7 @@ function typecheckOnly(): void {
       void (value satisfies Progress);
     },
   };
+
   progressOptions.reportProgress({ received: 2 });
   // @ts-expect-error Progress reporters retain their declared value type.
   progressOptions.reportProgress({ received: "two" });
@@ -674,8 +700,10 @@ function typecheckOnly(): void {
   const progressCapture: QueryProgressSnapshot<Progress> = progressObservation.capture();
   const stopProgress = progressObservation.subscribe((event: QueryProgressEvent<Progress>) => {
     const snapshot: QueryProgressSnapshot<Progress> = event.snapshot;
+
     void snapshot;
   });
+
   // @ts-expect-error Native progress snapshots do not expose Hesperia projection policy.
   void progressStore.progress.get().project;
 
@@ -684,18 +712,22 @@ function typecheckOnly(): void {
   void inferredQuery.value.get();
   void inferredMutation;
   const ready: Promise<{ readonly id: string }> = queried.ready;
+
   void ready;
   const stopValues = subscribe(queried.value, (value) => {
     void (value satisfies { readonly id: string } | undefined);
   });
+
   stopValues();
   const stopStoreValues = subscribe(queried, (value) => {
     void (value satisfies { readonly id: string });
   });
+
   stopStoreValues();
   const stopStreamValues = subscribe(streamed, (value) => {
     void (value satisfies { readonly id: string });
   });
+
   stopStreamValues();
   void queried.revalidate(fetchOptions);
   void [progressStatus, progressSnapshot, progressCapture, stopProgress];
@@ -771,14 +803,17 @@ function typecheckOnly(): void {
       const revision: object = notice.revision;
       // @ts-expect-error A native revision token is opaque and cannot be used as an event position.
       const eventPosition: number = notice.revision;
+
       void [revision, eventPosition];
     } else if (notice.kind === "failed") {
       const cause: unknown = notice.cause;
       // @ts-expect-error An unknown failure cause must be narrowed before its fields are read.
       const failureMessage: string = notice.cause.message;
+
       void [cause, failureMessage];
     } else {
       const terminalKind: "closed" | "invalidated" = notice.kind;
+
       void terminalKind;
     }
   };
@@ -790,6 +825,7 @@ function typecheckOnly(): void {
     contractPositionedStoreCaptureNotices,
     positionedStoreCaptureNoticeObserver,
   );
+
   // @ts-expect-error An ordinary Store does not carry a native positioned capture checkpoint.
   observePositionedStoreCaptureState(declared);
   void [
@@ -812,13 +848,16 @@ function typecheckOnly(): void {
   const capturedPositionedStoreValues: PositionedStoreValues = positionedStoreCheckpoint.values;
   const positionedStoreCurrent: boolean =
     isPositionedStoreCheckpointCurrent(positionedStoreCheckpoint);
+
   if (positionedStoreCheckpoint.present) {
     const positionedLatestEvent: number = positionedStoreCheckpoint.latest;
     const positionedUnknownBoundary: unknown = positionedStoreCheckpoint.position;
     // @ts-expect-error The provider codec must narrow the opaque capture position.
     const uncheckedPosition: number = positionedStoreCheckpoint.position;
+
     void [positionedLatestEvent, positionedUnknownBoundary, uncheckedPosition];
   }
+
   const positionedStoreSeed: PositionedStoreRestoreSeed<number, number, PositionedStoreValues> = {
     after: 4,
     latest: 5,
@@ -833,6 +872,7 @@ function typecheckOnly(): void {
     latest: undefined,
     values: [{ total: 3 }, 2],
   };
+
   function positionedStoreUndefinedEventType(
     checkpoint: PositionedStoreCheckpoint<number | undefined, PositionedStoreValues>,
   ): void {
@@ -840,6 +880,7 @@ function typecheckOnly(): void {
     const latestEvent: number | undefined = checkpoint.latest;
     // @ts-expect-error Presence does not narrow an event value away from undefined.
     const numericEvent: number = checkpoint.latest;
+
     void [latestEvent, numericEvent];
   }
   const contractCheckpointType: ContractPositionedStoreCheckpoint<number, PositionedStoreValues> =
@@ -856,6 +897,7 @@ function typecheckOnly(): void {
     positionedStoreSeed,
     { token: "reader" },
   );
+
   type InferredPositionedStoreValues =
     typeof inferredPositionedStoreRestoration extends PositionedStoreRestoration<
       number,
@@ -880,12 +922,14 @@ function typecheckOnly(): void {
       equals: (left, right) => {
         const leftEvent: number = left;
         const rightEvent: number = right;
+
         return Math.floor(leftEvent) === Math.floor(rightEvent);
       },
     },
   );
   const positionedStoreWithOptionsType: PositionedStoreRestoration<number, PositionedStoreValues> =
     positionedStoreWithOptions;
+
   preparePositionedStoreRestore(
     positionedMember,
     { id: "wrong-store-initial-option" },
@@ -929,6 +973,7 @@ function typecheckOnly(): void {
     positionedStoreSource,
     positionedStoreMixedViews,
   );
+
   type MixedPositionedStoreValues = readonly [{ total: number }, readonly number[]];
   type CapturedMixedPositionedStoreValues =
     typeof positionedStoreMixedCheckpoint extends PositionedStoreCheckpoint<number, infer Values>
@@ -947,6 +992,7 @@ function typecheckOnly(): void {
     { after: 4, latest: 5, values: [{ total: 3 }, [1, 2]] },
     { token: "reader" },
   );
+
   type InferredMixedPositionedStoreValues =
     typeof inferredMixedPositionedStoreRestoration extends PositionedStoreRestoration<
       number,
@@ -960,6 +1006,7 @@ function typecheckOnly(): void {
   > = true;
   const restoredAccumulatedEvents: readonly number[] =
     inferredMixedPositionedStoreRestoration.projections[1].value.get();
+
   preparePositionedStoreRestore(
     positionedMember,
     { id: "wrong-accumulated-event" },
@@ -1081,6 +1128,7 @@ function typecheckOnly(): void {
   // @ts-expect-error Stream member options do not accept a freshness window.
   void graph.api.stream({ id: "1" }, { revalidateAfterMs: 1000 });
   const foreign = createStore({ name: "foreign", initial: 1 });
+
   // @ts-expect-error A graph accepts only store definitions declared by its contract.
   void graph.store(foreign);
 }
@@ -1145,6 +1193,7 @@ function neverStreamContractTypesOnly(): void {
   member({ id: 1 });
 
   const collision = createStore({ name: "silent/taken", initial: 0 });
+
   // @ts-expect-error A never-valued stream still reserves its narrow key pattern.
   defineContract({ namespace: "silent-collision", operations: { silent, collision } });
 
@@ -1218,6 +1267,7 @@ function bindingTypesOnly(): void {
   });
   const handle: QueryStore<{ label: string }> = binding.member({ id: "one" });
   const lease: ObservationLease<{ label: string }> = observeStore(graph, handle);
+
   lease.publish({ label: "observed" }, { transfer: "eligible" });
   // @ts-expect-error Observation values retain the completed profile's type.
   lease.publish({ id: "raw" });
@@ -1230,22 +1280,29 @@ function bindingTypesOnly(): void {
   // @ts-expect-error Activity metadata is read-only.
   lease.active.set(false);
   const capture = peekStore(handle);
+
   // @ts-expect-error Changed and absent captures do not expose a value.
   void capture.value;
+
   if (capture.kind === "stable") {
     const revision: ValueRevision = capture.valueRevision;
     // @ts-expect-error Numeric values cannot fabricate native revision provenance.
     const fabricated: ValueRevision = 1;
+
     if (capture.present) {
       const label: string = capture.value.label;
+
       void label;
     }
+
     void [revision, fabricated];
   }
+
   const identity: StoreIdentity = handle.identity;
   const completed: Promise<{ label: string }> = handle.ready;
   const ticket = binding.target(handle)!;
   const same: TypedTarget<typeof query, { label: string }> | undefined = ticket.forBinding(binding);
+
   // @ts-expect-error The native definition still requires its object input.
   binding.member("one");
   // @ts-expect-error Initial values describe the completed profile value.
@@ -1259,6 +1316,7 @@ function bindingTypesOnly(): void {
     profile: {},
     fetch: async () => "pong",
   });
+
   ping.member();
   ping.member(queryOptions({ initial: "waiting" }), { revalidateAfterMs: 1 });
   const unknown = bindOperation(graph, unknownInputQuery, {
@@ -1266,6 +1324,7 @@ function bindingTypesOnly(): void {
     profile: {},
     fetch: async () => 1,
   });
+
   unknown.member(undefined, {});
   // @ts-expect-error Unknown remains input-bearing after binding.
   unknown.member();
@@ -1321,6 +1380,7 @@ function mutationBindingTypesOnly(): void {
     numbers.target(numeric)!,
     (current, input) => (current ?? 0) + input.id.length,
   );
+
   // @ts-expect-error The ticket fixes the output; a producer cannot widen it to string.
   predictionFor(save, numbers.target(numeric)!, () => "wrong");
   // @ts-expect-error The producer receives the original mutation's native input.
@@ -1331,8 +1391,10 @@ function mutationBindingTypesOnly(): void {
     prepare: (phase) =>
       phase.existing(phase.selectedInput).map((target) => {
         const nativeValue = target.forBinding(native);
+
         if (nativeValue !== undefined) return phase.original(nativeValue);
         const text = target.forBinding(labels);
+
         if (text !== undefined) {
           // @ts-expect-error An attached string completion is not the original native object value.
           phase.original(text);
@@ -1340,6 +1402,7 @@ function mutationBindingTypesOnly(): void {
           phase.predict(text, () => 1);
           return phase.predict(text, (_current, input) => input.id);
         }
+
         return phase.prepare(target);
       }),
     settle: (phase) =>
@@ -1359,6 +1422,7 @@ function mutationBindingTypesOnly(): void {
   );
   // @ts-expect-error Completed mutation output is not the original raw string result.
   const raw: Promise<string> = binding.member({ id: "one" });
+
   // @ts-expect-error Original native input remains required.
   binding.member();
   // @ts-expect-error Logical-key optimistic maps are not identity-addressed instructions.
@@ -1370,6 +1434,7 @@ function mutationBindingTypesOnly(): void {
     run: async () => ({ pong: true }),
   });
   const options = queryOptions<BindingMutationOptions<typeof ping>>({ optimistic: [] });
+
   inputless.member();
   inputless.member(options, { optimistic: [] });
   const required = bindOperation(graph, unknown, {
@@ -1378,6 +1443,7 @@ function mutationBindingTypesOnly(): void {
     effects: [],
     run: unknown.run,
   });
+
   required.member(undefined, {});
   // @ts-expect-error Unknown input does not gain inputless forms.
   required.member();
@@ -1387,6 +1453,7 @@ function mutationBindingTypesOnly(): void {
     effects: [],
     run: union.run,
   });
+
   voidUnion.member();
   voidUnion.member("value");
   voidUnion.member(undefined, {});
@@ -1402,17 +1469,23 @@ function boundStreamConsumer(): void {
   const context = createBindingContext(graph);
   const binding = bindStream(graph, stream, graph.api.stream, { context });
   const inspected = inspectBoundAddress(binding, storeKey("events/one"));
+
   if (inspected.kind === "stable") {
     const stamp: BoundAddressStamp = inspected.stamp;
+
     inspectBoundAddress(binding, storeKey("events/one"), { expected: stamp });
+
     if (inspected.state === "empty") {
       const source = binding.member({ id: "one" }, { expectEmpty: inspected.condition });
       const session: BoundStreamSession<{ readonly id: string }> = binding.session(source);
+
       session.detached.then((receipt) => {
         if (receipt.terminalCapture.kind === "captured") {
           const capture = receipt.terminalCapture.capture;
+
           if (capture.kind === "stable" && capture.present) {
             const id: string = capture.value.id;
+
             void id;
           }
         }
@@ -1422,10 +1495,12 @@ function boundStreamConsumer(): void {
       // @ts-expect-error The query member has no empty-condition contract.
       graph.api.query({ id: "one" }, { expectEmpty: inspected.condition });
       const boundQuery = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+
       // @ts-expect-error A bound query retains its existing query options.
       boundQuery.member({ id: "one" }, { expectEmpty: inspected.condition });
     }
   }
+
   // @ts-expect-error Binding retains the original required input.
   binding.member({ id: 1 });
   // @ts-expect-error Stream binding requires the original stream member association.
@@ -1508,6 +1583,7 @@ function transferSnapshotTypesOnly(): void {
     address: queryAddress,
     landing: acceptedLanding,
   };
+
   type StreamSnapshotEntry = Extract<
     SnapshotEntryV2,
     { readonly address: StreamSnapshotAddressV2 }
@@ -1525,10 +1601,13 @@ function transferSnapshotTypesOnly(): void {
     identity,
     valueRevision: fields.valueRevision,
   };
+
   type StreamAdopted = Extract<AdoptedEntryV2, { readonly address: StreamSnapshotAddressV2 }>;
   let streamRevision: ValueRevision | undefined;
+
   for (const entry of v2Report.adopted)
     if (isStreamAdopted(entry)) streamRevision = entry.valueRevision;
+
   const constructedV2: SnapshotV2 = {
     version: 2,
     namespace: "typed-transfer",
@@ -1600,6 +1679,7 @@ function publicRetirementTypes(
   const rootContextRetirement: Promise<void> = context.retire();
   const contractGraphRetirement: Promise<void> = contractGraph.retire();
   const contractContextRetirement: Promise<void> = contractContext.retire();
+
   void [
     rootGraphRetirement,
     rootContextRetirement,
@@ -1624,6 +1704,7 @@ function publicPassiveTransferTypeSurface<Source extends NativeTransferSource>(
   );
   const store: NativeStoreFor<Source> = claim.store;
   const retirement: Promise<void> = claim.retired;
+
   claim.discard();
   void retirement;
   return store;
@@ -1675,6 +1756,7 @@ function publicRequiredTransferTypeSurface(
     mappedStateWrites: [],
   };
   const adoption = prepareRequiredTransferAdoption(capture.image, adoptionOptions);
+
   void [
     operationRetirement,
     successors,

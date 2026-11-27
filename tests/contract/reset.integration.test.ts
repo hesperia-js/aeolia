@@ -66,6 +66,7 @@ it("preflights every reset generation before changing an earlier store or the gr
       operations: { left: targetLeft, right: targetRight },
     }),
   });
+
   try {
     source.api.left();
     source.api.right();
@@ -79,18 +80,21 @@ it("preflights every reset generation before changing an earlier store or the gr
         generation: row.address.key === "right" ? Number.MAX_SAFE_INTEGER - 1 : 10,
       })),
     } as unknown as typeof encoded;
+
     adopt(target, incoming, {});
     const before = [peekStore(first), peekStore(second)];
     const epoch = target.resetVersion.get();
     let threw = false;
     let reason: unknown;
     let reset: Promise<void> | undefined;
+
     try {
       reset = target.reset();
     } catch (error) {
       threw = true;
       reason = error;
     }
+
     if (reset !== undefined) await reset;
 
     expect(threw).toBe(true);
@@ -116,9 +120,11 @@ it("preflights reset and its selected query refresh before clearing readable sta
   });
   const store = graph.api.query(undefined, { initial: 7 });
   const stop = subscribe(store.available, () => undefined);
+
   try {
     expect(backend.calls).toHaveLength(0);
     const encoded = snapshot(graph, { version: 2 });
+
     adopt(
       graph,
       {
@@ -161,6 +167,7 @@ describe("Graph.reset", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "reset-generation", operations: { value } }),
     });
+
     try {
       const report = adopt(graph, {
         version: 1,
@@ -168,11 +175,14 @@ describe("Graph.reset", () => {
         encoding: "aeolia-tagged/1",
         entries: { value: { value: 7, generation: Number.MAX_SAFE_INTEGER - 1, age: 0 } },
       } as never);
+
       expect(report.adopted.map(String)).toEqual(["value"]);
       const store = graph.at("value");
+
       expect(store.value.get()).toBe(7);
 
       const generation = Number(snapshot(graph).entries.value?.generation);
+
       expect(generation).toBe(Number.MAX_SAFE_INTEGER);
       expect(() => graph.reset()).toThrow(RangeError);
       expect(graph.resetVersion.get()).toBe(0);
@@ -188,6 +198,7 @@ describe("Graph.reset", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "v1-generation", operations: { left, right } }),
     });
+
     try {
       const first = graph.api.left();
       const second = graph.api.right();
@@ -227,11 +238,14 @@ describe("Graph.reset", () => {
       key: (input: string) => `cancel-reset/${input}`,
       fetch: (input, options) => {
         const result = Promise.withResolvers<number>();
+
         requests.push({ input, signal: options.abortSignal, result });
+
         if (input === "first") {
           options.abortSignal.addEventListener("abort", () => startSuccessor(), { once: true });
           graph.cancelPending(reason);
         }
+
         return result.promise;
       },
     });
@@ -243,11 +257,14 @@ describe("Graph.reset", () => {
     const stopFirst = subscribe(first.status, () => undefined);
     const stopSecond = subscribe(second.status, () => undefined);
     let successor: typeof first | undefined;
+
     startSuccessor = () => {
       successor = graph.api.query("successor");
     };
+
     try {
       const reset = graph.reset();
+
       await expect(reset).rejects.toBe(reason);
       expect(requests.map((request) => request.input)).toEqual(["first", "successor"]);
       expect(requests[0]!.signal.reason).toBe(reason);
@@ -259,6 +276,7 @@ describe("Graph.reset", () => {
       expect(second.status.get()).toBe("empty");
       expect(successor).toBeDefined();
       const ready = successor!.ready;
+
       requests[1]!.result.resolve(3);
       await ready;
       expect(successor!.value.get()).toBe(3);
@@ -300,6 +318,7 @@ describe("Graph.reset", () => {
 
     const stopQuery = subscribe(queryStore.value, () => undefined);
     const reset = graph.reset();
+
     expect(graph.api).toBe(api);
     expect(graph.resetVersion.get()).toBe(1);
     expect(versions).toEqual([0, 1]);
@@ -333,6 +352,7 @@ describe("Graph.reset", () => {
     const live = graph.api.query("live");
     const inactive = graph.api.query("inactive");
     const priorFailure = new Error("prior query failed");
+
     backend.reject(backend.calls[0]!, priorFailure);
     backend.resolve(backend.calls[1]!, 10);
     await flush();
@@ -341,6 +361,7 @@ describe("Graph.reset", () => {
     const stopStatus = subscribe(live.status, () => undefined);
 
     const reset = graph.reset();
+
     expect(backend.calls).toHaveLength(3);
     expect(live.value.get()).toBeUndefined();
     expect(live.error.get()).toBeUndefined();
@@ -366,11 +387,13 @@ describe("Graph.reset", () => {
       contract: defineContract({ namespace: "reset-write-restricted", operations: { query } }),
     });
     const store = graph.api.query(undefined);
+
     backend.resolve(backend.calls[0]!, 5);
     await expect(store.ready).resolves.toBe(5);
 
     const revalidation = store.revalidate();
     const activeCall = backend.calls[1]!;
+
     expect(store.status.get()).toBe("revalidating");
     expect(() => withoutWrites(() => graph.reset())).toThrow("write-forbidden");
     expect(graph.resetVersion.get()).toBe(0);
@@ -399,6 +422,7 @@ describe("Graph.reset", () => {
     const previous = backend.calls[0]!;
 
     const reset = graph.reset();
+
     expect(previous.aborted).toBe(true);
     expect(backend.calls).toHaveLength(2);
     backend.resolve(backend.calls[1]!, 8);
@@ -419,11 +443,13 @@ describe("Graph.reset", () => {
       contract: defineContract({ namespace: "reset-inactive", operations: { query } }),
     });
     const store = graph.api.query(undefined);
+
     backend.resolve(backend.calls[0]!, 7);
     await flush();
     expect(store.value.get()).toBe(7);
 
     const reset = graph.reset();
+
     expect(graph.resetVersion.get()).toBe(1);
     expect(store.value.get()).toBeUndefined();
     expect(backend.calls).toHaveLength(1);
@@ -445,6 +471,7 @@ describe("Graph.reset", () => {
       contract: defineContract({ namespace: "reset-reactivate", operations: { query } }),
     });
     const store = graph.api.query();
+
     backend.resolve(backend.calls[0]!, 4);
     await flush();
     expect(store.value.get()).toBe(4);
@@ -454,6 +481,7 @@ describe("Graph.reset", () => {
     expect(backend.calls).toHaveLength(1);
 
     const stop = subscribe(store.value, () => undefined);
+
     expect(backend.calls).toHaveLength(2);
     backend.resolve(backend.calls[1]!, 5);
     await flush();
@@ -477,6 +505,7 @@ describe("Graph.reset", () => {
       });
       const store = graph.api.query();
       const initial = store.ready;
+
       backend.resolve(backend.calls[0]!, 4);
       expect(await initial).toBe(4);
 
@@ -501,10 +530,12 @@ describe("Graph.reset", () => {
               : subscribe(observeStore(graph, store).issue, (value) => {
                   seen.push(value);
                 });
+
       if (facet === "store" || facet === "value") {
         expect(backend.calls).toHaveLength(2);
         if (facet === "store") expect(seen).toEqual([]);
         const refreshed = store.ready;
+
         backend.resolve(backend.calls[1]!, 5);
         expect(await refreshed).toBe(5);
         expect(seen.at(-1)).toBe(5);
@@ -529,9 +560,11 @@ describe("Graph.reset", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "reset-shared-store", operations: { query } }),
     });
+
     try {
       const store = graph.api.query();
       const initial = store.ready;
+
       backend.resolve(backend.calls[0]!, 4);
       await initial;
       await graph.reset();
@@ -543,8 +576,10 @@ describe("Graph.reset", () => {
       const stopSecond = subscribeStore(store, (value) => {
         second.push(value);
       });
+
       expect(backend.calls).toHaveLength(2);
       const refreshed = store.ready;
+
       backend.resolve(backend.calls[1]!, 5);
       await refreshed;
       expect(first).toEqual([5]);
@@ -553,6 +588,7 @@ describe("Graph.reset", () => {
       jest.advanceTimersByTime(10);
       expect(backend.calls).toHaveLength(3);
       const fresh = store.ready;
+
       backend.resolve(backend.calls[2]!, 6);
       await fresh;
       expect(second).toEqual([5, 6]);
@@ -562,14 +598,17 @@ describe("Graph.reset", () => {
       await graph.reset();
       expect(backend.calls).toHaveLength(3);
       const stopMetadata = subscribe(store.available, () => undefined);
+
       expect(backend.calls).toHaveLength(3);
       stopMetadata();
       const next: number[] = [];
       const stopNext = subscribeStore(store, (value) => {
         next.push(value);
       });
+
       expect(backend.calls).toHaveLength(4);
       const nextReady = store.ready;
+
       backend.resolve(backend.calls[3]!, 7);
       await nextReady;
       expect(next).toEqual([7]);
@@ -593,16 +632,19 @@ describe("Graph.reset", () => {
     });
     const store = graph.api.query("one", { initial: 3 });
     const previousFetch = store.revalidate();
+
     backend.resolve(backend.calls[0]!, 4);
     await previousFetch;
     await expect(graph.reset()).resolves.toBeUndefined();
 
     const reseeded = graph.api.query("one", { initial: 9 });
+
     expect(reseeded.value.get()).toBe(9);
     expect(backend.calls).toHaveLength(1);
 
     const liveStop = subscribe(reseeded.status, () => undefined);
     const reset = graph.reset();
+
     expect(backend.calls).toHaveLength(2);
     expect(() => graph.api.query("one", { initial: 10 })).toThrow(Fault);
     expect(backend.calls[1]!.aborted).toBe(false);
@@ -628,6 +670,7 @@ describe("Graph.reset", () => {
     });
     const required = graph.api.query("required");
     let later = graph.api.query("later");
+
     backend.resolve(backend.calls[0]!, 1);
     backend.resolve(backend.calls[1]!, 2);
     await flush();
@@ -650,6 +693,7 @@ describe("Graph.reset", () => {
         return { ok: false as const, error };
       },
     );
+
     expect(backend.calls).toHaveLength(4);
     expect(later.status.get()).toBe("fetching");
     expect(settled).toBe(false);
@@ -678,6 +722,7 @@ describe("Graph.reset", () => {
       contract: defineContract({ namespace: "reset-adopted-refresh", operations: { query } }),
     });
     const store = graph.api.query(undefined);
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
     const stop = subscribe(store.status, () => undefined);
@@ -688,6 +733,7 @@ describe("Graph.reset", () => {
     });
     const obsolete = backend.calls[1]!;
     const current = store.revalidate();
+
     expect(backend.calls).toHaveLength(3);
     expect(obsolete.aborted).toBe(true);
 
@@ -716,6 +762,7 @@ describe("Graph.reset", () => {
       contract: defineContract({ namespace: "reset-adopted-abort", operations: { query } }),
     });
     const store = graph.api.query(undefined);
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
     const stop = subscribe(store.status, () => undefined);
@@ -733,6 +780,7 @@ describe("Graph.reset", () => {
     );
     const obsolete = backend.calls[1]!;
     const replacement = store.revalidate();
+
     backend.reject(obsolete, new DOMException("obsolete fetch was aborted", "AbortError"));
     await flush();
     expect(settled).toBe(false);
@@ -756,6 +804,7 @@ describe("Graph.reset", () => {
       contract: defineContract({ namespace: "reset-obsolete-success", operations: { query } }),
     });
     const store = graph.api.query(undefined);
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
     const stop = subscribe(store.status, () => undefined);
@@ -765,8 +814,10 @@ describe("Graph.reset", () => {
       settled = true;
     });
     const obsolete = backend.calls[1]!;
+
     store.revalidate();
     const replacement = backend.calls[2]!;
+
     backend.resolve(obsolete, 99);
     await nextTurn();
     expect(settled).toBe(false);
@@ -800,6 +851,7 @@ describe("Graph.reset", () => {
       }),
     });
     const store = graph.api.query(undefined);
+
     requests[0]!.resolve(1);
     await flush();
     const stop = subscribe(store.status, () => undefined);
@@ -810,6 +862,7 @@ describe("Graph.reset", () => {
     });
     const obsolete = requests[1]!;
     let reentrant: Promise<void> | undefined;
+
     obsolete.abortSignal.addEventListener("abort", () => {
       reentrant = store.revalidate();
     });
@@ -843,6 +896,7 @@ describe("Graph.reset", () => {
     });
     const store = graph.api.query(undefined);
     const stop = subscribe(store.status, () => undefined);
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
 
@@ -850,9 +904,11 @@ describe("Graph.reset", () => {
       () => ({ ok: true as const }),
       (error: unknown) => ({ ok: false as const, error }),
     );
+
     expect(backend.calls).toHaveLength(2);
     backend.reject(backend.calls[1]!, undefined);
     const outcome = await reset;
+
     expect(outcome).toEqual({ ok: false, error: undefined });
     expect(store.status.get()).toBe("failed");
     expect(store.error.get()).toBeUndefined();
@@ -874,6 +930,7 @@ describe("Graph.reset", () => {
     const first = graph.api.query("first");
     const second = graph.api.query("second");
     const third = graph.api.query("third");
+
     backend.resolve(backend.calls[0]!, 1);
     backend.resolve(backend.calls[1]!, 2);
     backend.resolve(backend.calls[2]!, 3);
@@ -895,6 +952,7 @@ describe("Graph.reset", () => {
     );
     const firstFailure = undefined;
     const secondFailure = new Error("second refresh failed");
+
     backend.reject(backend.calls[3]!, firstFailure);
     backend.resolve(backend.calls[5]!, 4);
     await flush();
@@ -905,6 +963,7 @@ describe("Graph.reset", () => {
       () => undefined,
       (error: unknown) => error,
     );
+
     expect(resetError).toBeInstanceOf(AggregateError);
     expect((resetError as AggregateError).errors).toEqual([firstFailure, secondFailure]);
     expect(third.value.get()).toBe(4);
@@ -935,6 +994,7 @@ describe("Graph.reset", () => {
     );
     const secondReset = graph.reset();
     const firstError = await firstResult;
+
     expect(firstError).toMatchObject({ name: "AbortError" });
     expect(backend.calls[0]!.aborted).toBe(true);
     expect(backend.calls[1]!.aborted).toBe(true);
@@ -978,6 +1038,7 @@ describe("Graph.reset", () => {
     });
     const store = graph.api.query({ id: "one" });
     const stop = subscribe(store.value, () => undefined);
+
     backend.resolve(backend.calls[0]!, 10);
     await flush();
 
@@ -990,14 +1051,17 @@ describe("Graph.reset", () => {
       () => undefined,
       (error: unknown) => error,
     );
+
     expect(store.value.get()).toBe(14);
     const reset = graph.reset();
+
     expect(oldMutationCall.aborted).toBe(true);
     expect(oldFailureCall.aborted).toBe(true);
     backend.resolve(backend.calls[3]!, 20);
     await expect(reset).resolves.toBeUndefined();
 
     const newMutation = graph.api.mutation({ id: "one", amount: 2 });
+
     expect(store.value.get()).toBe(22);
     backend.resolve(oldMutationCall, undefined);
     await oldMutation;
@@ -1037,9 +1101,11 @@ describe("Graph.reset", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "reset-reentrant", operations: { query, mutation } }),
     });
+
     startReset = () => graph.reset();
     const store = graph.api.query(undefined);
     const stop = subscribe(store.value, () => undefined);
+
     backend.resolve(backend.calls[0]!, 10);
     await flush();
 
@@ -1047,6 +1113,7 @@ describe("Graph.reset", () => {
       () => ({ ok: true as const }),
       (error: unknown) => ({ ok: false as const, error }),
     );
+
     expect(await outcome).toMatchObject({ ok: false, error: { name: "AbortError" } });
     expect(backend.calls.filter((call) => call.name === "reset.reentrant-mutation")).toHaveLength(
       0,
@@ -1097,11 +1164,13 @@ describe("Graph.reset", () => {
           abortSignal,
           pending: [] as Array<(result: IteratorResult<number>) => void>,
         };
+
         sessions.push(session);
         const iterator: AsyncIterator<number> = {
           next: () => new Promise((resolve) => session.pending.push(resolve)),
           return: async () => ({ done: true, value: undefined }),
         };
+
         return { [Symbol.asyncIterator]: () => iterator };
       },
     });
@@ -1110,9 +1179,11 @@ describe("Graph.reset", () => {
     });
     const store = graph.api.stream(undefined);
     const stop = subscribe(store.value, () => undefined);
+
     expect(sessions).toHaveLength(1);
 
     const reset = graph.reset();
+
     expect(sessions).toHaveLength(2);
     expect(sessions[0]!.abortSignal.aborted).toBe(true);
     expect(sessions[0]!.abortSignal.reason).toMatchObject({
@@ -1151,6 +1222,7 @@ describe("Graph.reset", () => {
       const makeChannel = () => {
         const waiters: Array<(result: IteratorResult<Event>) => void> = [];
         let ended = false;
+
         return {
           iterable: {
             [Symbol.asyncIterator]() {
@@ -1169,8 +1241,10 @@ describe("Graph.reset", () => {
           } as AsyncIterable<Event>,
           emit(event: Event) {
             const waiter = waiters.shift();
+
             if (waiter === undefined)
               throw new Error("The positioned stream has no pending next call");
+
             waiter({ done: false, value: event });
           },
         };
@@ -1178,13 +1252,17 @@ describe("Graph.reset", () => {
       const source: PositionedStreamSource<Input, number, number, object> = {
         open: (_input, options) => {
           const channel = makeChannel();
+
           openings.push({ reader: options.reader });
+
           if (options.reader === undefined) emitLive = channel.emit;
           else readers.set(options.reader, channel.emit);
+
           return channel.iterable;
         },
         readerLifetime: (_input, reader, after, seed) => {
           const reservation = reservations.get(reader);
+
           if (
             reservation === undefined ||
             reservation.input !== _input ||
@@ -1192,10 +1270,12 @@ describe("Graph.reset", () => {
             reservation.seed !== seed
           )
             throw new TypeError("The reader lifetime does not match its exact reservation");
+
           return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
         },
         validateReader: (input, reader, after, _checkpoint, seed) => {
           const reservation = reservations.get(reader);
+
           return (
             reservation !== undefined &&
             reservation.input === input &&
@@ -1205,6 +1285,7 @@ describe("Graph.reset", () => {
         },
         isReaderCurrent: (input, reader, after, seed) => {
           const reservation = reservations.get(reader);
+
           return (
             reservation !== undefined &&
             reservation.input === input &&
@@ -1217,11 +1298,13 @@ describe("Graph.reset", () => {
           releases.set(reader, (releases.get(reader) ?? 0) + 1);
         },
       };
+
       return {
         source,
         openings,
         reserve(input: Input, after: number, seed: unknown) {
           const reader = Object.freeze({});
+
           reservations.set(reader, {
             input,
             after,
@@ -1287,18 +1370,22 @@ describe("Graph.reset", () => {
     let activeProvider: ReturnType<typeof makeProvider> | undefined;
     let capturePublished = false;
     let activePublished = false;
+
     try {
       const sourceLanding = new Promise<void>((resolve) => {
         let stop: () => void = () => undefined;
+
         stop = subscribe(projection.value, (value) => {
           if (value !== 3) return;
           stop();
           resolve();
         });
       });
+
       sourceProvider.emitLive({ position: 5, value: 3 });
       await sourceLanding;
       const checkpoint = capturePositionedStore(source, [projection] as const);
+
       expect(checkpoint.present).toBe(true);
       expect(checkpoint.hasPosition).toBe(true);
       expect(checkpoint.position).toBe(5);
@@ -1326,14 +1413,17 @@ describe("Graph.reset", () => {
             (value as { readonly $ref?: unknown }).$ref === seedId
           ) {
             const decoded = decodedSeeds.get(seedId);
+
             if (decoded === undefined) throw new Error("The positioned seed reference is missing");
             return decoded;
           }
+
           return value;
         },
         decodeFailure: (failure) => new Error(String(failure)),
       };
       const sourceRoot = computed(() => projection.value.get());
+
       expect(sourceRoot.get()).toBe(3);
       capture = prepareRequiredTransferCapture({
         graphs: [sourceGraph],
@@ -1343,20 +1433,25 @@ describe("Graph.reset", () => {
       });
       const image = capture.image;
       const captureCommit = capture.seal();
+
       if (captureCommit === undefined)
         throw new Error("The source positioned capture did not seal");
+
       captureCommit.publish();
       capturePublished = true;
       captureCommit.notifications.deliver();
       await capture.retired;
 
       const pendingTargetProvider = makeProvider();
+
       pendingProvider = pendingTargetProvider;
       const pendingDefinition = makeDefinition(pendingTargetProvider);
+
       pendingGraph = createGraph({
         contract: defineContract({ namespace, operations: { events: pendingDefinition } }),
       });
       const pendingReaderLocal = pendingTargetProvider.reserve(input, 5, seed);
+
       pendingReader = pendingReaderLocal;
       const pendingClaimValue = preparePassiveTransferClaim(
         pendingGraph,
@@ -1365,10 +1460,12 @@ describe("Graph.reset", () => {
         undefined,
         { policies: [policy] as const, seed, reader: pendingReaderLocal },
       );
+
       pendingClaim = pendingClaimValue;
       const pendingTarget = computed(() =>
         pendingClaimValue.restoration.projections[0]!.value.get(),
       );
+
       pendingAdoption = prepareRequiredTransferAdoption(image, {
         graphs: [pendingGraph],
         sources: [{ slot: "s0", claim: pendingClaimValue }],
@@ -1394,12 +1491,15 @@ describe("Graph.reset", () => {
       expect(() => pendingClaimValue.restoration.activate()).toThrow(TypeError);
 
       const activeProviderLocal = makeProvider();
+
       activeProvider = activeProviderLocal;
       const activeDefinition = makeDefinition(activeProviderLocal);
+
       activeGraph = createGraph({
         contract: defineContract({ namespace, operations: { events: activeDefinition } }),
       });
       const activeReaderLocal = activeProviderLocal.reserve(input, 5, seed);
+
       activeReader = activeReaderLocal;
       const activeClaimValue = preparePassiveTransferClaim(
         activeGraph,
@@ -1408,9 +1508,11 @@ describe("Graph.reset", () => {
         { initial: 3 },
         { policies: [policy] as const, seed, reader: activeReaderLocal },
       );
+
       activeClaim = activeClaimValue;
       expect(activeClaimValue.retired).not.toBe(activeClaimValue.restoration.retired);
       const activeTarget = computed(() => activeClaimValue.restoration.projections[0]!.value.get());
+
       activeAdoption = prepareRequiredTransferAdoption(image, {
         graphs: [activeGraph],
         sources: [{ slot: "s0", claim: activeClaimValue }],
@@ -1426,8 +1528,10 @@ describe("Graph.reset", () => {
         mappedStateWrites: [],
       });
       const activeCommit = activeAdoption.seal();
+
       if (activeCommit === undefined)
         throw new Error("The active positioned adoption did not seal");
+
       activeCommit.publish();
       activePublished = true;
       activeCommit.notifications.deliver();
@@ -1447,12 +1551,15 @@ describe("Graph.reset", () => {
       pendingAdoption?.discard();
       pendingClaim?.discard();
       if (!activePublished) activeAdoption?.discard();
+
       if (activePublished) activeClaim?.restoration.discard();
       else activeClaim?.discard();
+
       projection.close();
       sourceGraph.dispose();
       pendingGraph?.dispose();
       activeGraph?.dispose();
+
       if (
         pendingReader !== undefined &&
         pendingClaim === undefined &&
@@ -1460,6 +1567,7 @@ describe("Graph.reset", () => {
         pendingProvider.releaseCount(pendingReader) === 0
       )
         pendingProvider.source.releaseReader(input, pendingReader);
+
       if (
         activeReader !== undefined &&
         activeClaim === undefined &&
@@ -1467,21 +1575,25 @@ describe("Graph.reset", () => {
         activeProvider.releaseCount(activeReader) === 0
       )
         activeProvider.source.releaseReader(input, activeReader);
+
       if (capture !== undefined)
         await capture.retired.then(
           () => undefined,
           () => undefined,
         );
+
       if (pendingAdoption !== undefined)
         await pendingAdoption.retired.then(
           () => undefined,
           () => undefined,
         );
+
       if (activeAdoption !== undefined)
         await activeAdoption.retired.then(
           () => undefined,
           () => undefined,
         );
+
       if (pendingClaim !== undefined) {
         await pendingClaim.retired.then(
           () => undefined,
@@ -1492,6 +1604,7 @@ describe("Graph.reset", () => {
           () => undefined,
         );
       }
+
       if (activeClaim !== undefined) {
         await activeClaim.retired.then(
           () => undefined,
@@ -1520,6 +1633,7 @@ describe("Graph.reset", () => {
       const emit = (event: Event): void => {
         if (ended) return;
         const waiter = waiters.shift();
+
         if (waiter !== undefined) waiter({ done: false, value: event });
         else queued.push(event);
       };
@@ -1528,8 +1642,10 @@ describe("Graph.reset", () => {
           return {
             next: () => {
               const event = queued.shift();
+
               if (event !== undefined)
                 return Promise.resolve({ done: false as const, value: event });
+
               if (ended) return Promise.resolve({ done: true as const, value: undefined });
               return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
             },
@@ -1541,11 +1657,13 @@ describe("Graph.reset", () => {
           };
         },
       };
+
       return { iterable, emit };
     };
 
     const reserve = (input: Input, after: number, seed: unknown): object => {
       const reader = Object.freeze({});
+
       reservations.set(reader, { input, after, seed });
       return reader;
     };
@@ -1559,12 +1677,14 @@ describe("Graph.reset", () => {
       source: {
         open: (input, options) => {
           const channel = makeChannel();
+
           openings.push({ reader: options.reader, after: options.after });
           if (options.reader === undefined) emitLive = channel.emit;
           return channel.iterable;
         },
         validateReader: (input, reader, after, checkpoint, seed) => {
           const reservation = reservations.get(reader);
+
           return (
             checkpoint === undefined &&
             reservation !== undefined &&
@@ -1575,6 +1695,7 @@ describe("Graph.reset", () => {
         },
         isReaderCurrent: (input, reader, after, seed) => {
           const reservation = reservations.get(reader);
+
           return (
             reservation !== undefined &&
             reservation.input === input &&
@@ -1610,21 +1731,26 @@ describe("Graph.reset", () => {
     try {
       const folded = new Promise<void>((resolve) => {
         let stop = (): void => undefined;
+
         stop = subscribe(projection.value, (value) => {
           if (value !== 12) return;
           stop();
           resolve();
         });
       });
+
       if (emitLive === undefined) throw new Error("The real source Store did not open");
       emitLive({ position: 5, value: 2 });
       await folded;
 
       const checkpoint = capturePositionedStore(source, [projection] as const);
+
       if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
         throw new Error("The source did not capture a positioned landing");
+
       const after: number = checkpoint.position;
       const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+
       reader = reserve(input, after, seed);
       rawReader = reserve(input, after, seed);
       const restoration = preparePositionedStoreRestore(
@@ -1635,6 +1761,7 @@ describe("Graph.reset", () => {
         reader,
         { initial: 99 },
       );
+
       readerTransferred = true;
       const rawRestoration = preparePositionedStoreRestore(
         rawGraph.api.stream,
@@ -1644,8 +1771,10 @@ describe("Graph.reset", () => {
         rawReader,
         { initial: 99 },
       );
+
       rawReaderTransferred = true;
       const restoredSession = binding.session(restoration.source);
+
       expect(restoration.source.available.get()).toBe(true);
       expect(restoration.source.value.get()).toBe(2);
       expect(restoration.projections[0].value.get()).toBe(12);
@@ -1682,8 +1811,10 @@ describe("Graph.reset", () => {
     } finally {
       if (reader !== undefined && !readerTransferred && releaseCount(reader) === 0)
         releaseReader(reader);
+
       if (rawReader !== undefined && !rawReaderTransferred && releaseCount(rawReader) === 0)
         releaseReader(rawReader);
+
       projection.close();
       context.dispose();
       graph.dispose();
@@ -1720,6 +1851,7 @@ describe("Graph.reset", () => {
         operations: { completedStream, failedStream, reentrantStream },
       }),
     });
+
     requestResetDuringFinish = () => {
       resetDuringFinish = graph.reset();
     };
@@ -1728,6 +1860,7 @@ describe("Graph.reset", () => {
         kind: "accumulate",
         max: 4,
       });
+
       return { value: projection.value, status: projection.status, error: projection.error };
     })();
     const failedReadables = (() => {
@@ -1736,6 +1869,7 @@ describe("Graph.reset", () => {
         initial: 10,
         step: (total, item) => total + item,
       });
+
       return { value: projection.value, status: projection.status, error: projection.error };
     })();
     const waitForStatus = (
@@ -1744,6 +1878,7 @@ describe("Graph.reset", () => {
     ): Promise<void> =>
       new Promise<void>((resolve) => {
         let stop = (): void => undefined;
+
         stop = subscribe(status, (value) => {
           if (value !== expected) return;
           stop();
@@ -1783,11 +1918,13 @@ describe("Graph.reset", () => {
         initial: 20,
         step: (total, item) => total + item,
       });
+
       return { value: projection.value, status: projection.status, error: projection.error };
     })();
     const reentrantFailure = new Error("terminal reset should clear this failure");
     const reentrantStatus = waitForStatus(reentrantReadables.status, "failed");
     const previousResetVersion = graph.resetVersion.get();
+
     backend.emit("reset.reentrant-projection-failure", 5);
     backend.end("reset.reentrant-projection-failure", reentrantFailure);
     await reentrantStatus;
@@ -1823,18 +1960,21 @@ describe("Graph.reset", () => {
     expect(store.value.get()).toBe(1);
 
     const endedReset = graph.reset();
+
     expect(backend.calls).toHaveLength(2);
     expect(store.status.get()).toBe("opening");
     expect(store.value.get()).toBeUndefined();
     await expect(endedReset).resolves.toBeUndefined();
 
     const failure = new Error("stream failed before reset");
+
     backend.end("reset.terminal-stream", failure);
     await flush();
     expect(store.status.get()).toBe("failed");
     expect(store.error.get()).toBe(failure);
 
     const failedReset = graph.reset();
+
     expect(backend.calls).toHaveLength(3);
     expect(store.status.get()).toBe("opening");
     expect(store.error.get()).toBeUndefined();
@@ -1870,9 +2010,11 @@ describe("Graph.reset", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "reset-reentrant-open", operations: { stream } }),
     });
+
     startReset = () => graph.reset();
     const store = graph.api.stream(undefined);
     const stop = subscribe(store.status, () => undefined);
+
     expect(iteratorCalls).toBe(1);
 
     const firstReset = graph.reset();
@@ -1880,6 +2022,7 @@ describe("Graph.reset", () => {
       () => ({ ok: true as const }),
       (error: unknown) => ({ ok: false as const, error }),
     );
+
     expect(await firstResult).toMatchObject({ ok: false, error: { name: "AbortError" } });
     await expect(nestedReset).resolves.toBeUndefined();
     expect(openCalls).toBe(3);
@@ -1918,6 +2061,7 @@ describe("Graph.reset", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "reset-reentrant-iterator", operations: { stream } }),
     });
+
     startReset = () => graph.reset();
     const store = graph.api.stream(undefined);
     const stop = subscribe(store.status, () => undefined);
@@ -1927,6 +2071,7 @@ describe("Graph.reset", () => {
       () => ({ ok: true as const }),
       (error: unknown) => ({ ok: false as const, error }),
     );
+
     expect(await firstResult).toMatchObject({ ok: false, error: { name: "AbortError" } });
     await expect(nestedReset).resolves.toBeUndefined();
     expect(openCalls).toBe(3);
@@ -1949,11 +2094,13 @@ describe("Graph.reset", () => {
     });
     const source = graph.api.stream(undefined);
     const projection = project(source, { kind: "accumulate", max: 5 });
+
     backend.emit("reset.projection-stream", 1);
     await flush();
     expect(projection.value.get()).toEqual([1]);
 
     const reset = graph.reset();
+
     await expect(reset).resolves.toBeUndefined();
     expect(projection.value.get()).toEqual([]);
     expect(backend.calls).toHaveLength(2);
@@ -1978,11 +2125,13 @@ describe("Graph.reset", () => {
           abortSignal,
           pending: [] as Array<(result: IteratorResult<number>) => void>,
         };
+
         sessions.push(session);
         const iterator: AsyncIterator<number> = {
           next: () => new Promise((resolve) => session.pending.push(resolve)),
           return: async () => ({ done: true, value: undefined }),
         };
+
         return { [Symbol.asyncIterator]: () => iterator };
       },
     });
@@ -1993,12 +2142,14 @@ describe("Graph.reset", () => {
       }),
     });
     const projection = project(graph, stream, undefined, { kind: "accumulate", max: 5 });
+
     expect(sessions).toHaveLength(1);
     sessions[0]!.pending[0]!({ done: false, value: 1 });
     await flush();
     expect(projection.value.get()).toEqual([1]);
 
     const reset = graph.reset();
+
     expect(sessions).toHaveLength(2);
     expect(sessions[0]!.abortSignal.aborted).toBe(true);
     expect(projection.status.get()).toBe("open");
@@ -2030,11 +2181,13 @@ describe("Graph.reset", () => {
           abortSignal,
           pending: [] as Array<(result: IteratorResult<number>) => void>,
         };
+
         sessions.push(session);
         const iterator: AsyncIterator<number> = {
           next: () => new Promise((resolve) => session.pending.push(resolve)),
           return: async () => ({ done: true, value: undefined }),
         };
+
         return { [Symbol.asyncIterator]: () => iterator };
       },
     });
@@ -2047,6 +2200,7 @@ describe("Graph.reset", () => {
         operations: { stream },
       }),
     });
+
     startReset = () => graph.reset();
     const projection = project(graph, stream, undefined, {
       kind: "reduce",
@@ -2056,9 +2210,11 @@ describe("Graph.reset", () => {
           resetFromReducer = true;
           reset = startReset();
         }
+
         return sum + item;
       },
     });
+
     sessions[0]!.pending[0]!({ done: false, value: 5 });
     await flush();
     await expect(reset).resolves.toBeUndefined();
@@ -2093,6 +2249,7 @@ describe("Graph.reset", () => {
         initial: 10,
         step: (total, item) => total + item,
       });
+
       return { status: projection.status, error: projection.error };
     })();
     const failure = new Error("terminal projection failed");
@@ -2161,6 +2318,7 @@ describe("Graph.reset", () => {
       stderr: "pipe",
     });
     const childError = new TextDecoder().decode(child.stderr);
+
     if (child.exitCode !== 0) throw new Error(childError || `GC child exited ${child.exitCode}`);
   });
 
@@ -2219,9 +2377,11 @@ it("keeps a published transfer exclusion across reset until its original mutatio
   let mutationResult: Promise<unknown> | undefined;
   let mutationResolved = false;
   let mutationCall: (typeof backend.calls)[number] | undefined;
+
   try {
     const store = graph.api.query("one");
     const initialReady = store.ready;
+
     backend.resolve(backend.calls[0]!, 1);
     await initialReady;
 
@@ -2232,6 +2392,7 @@ it("keeps a published transfer exclusion across reset until its original mutatio
       [{ role: "raw", source: graph.api.mutate, input: carrier }],
     );
     const operationCommit = operation.seal();
+
     if (operationCommit === undefined) throw new Error("The transfer operation did not seal");
     operationCommit.publish();
     operationCommit.notifications.deliver();
@@ -2240,15 +2401,18 @@ it("keeps a published transfer exclusion across reset until its original mutatio
     mutationCall = backend.calls[1]!;
     expect(mutationCall.input).toBe(carrier);
     const reset = graph.reset();
+
     expect(mutationCall.aborted).toBe(true);
     await reset;
 
     const resetStore = graph.api.query("one");
     const refreshed = resetStore.ready;
     const refreshCall = backend.calls[2]!;
+
     backend.resolve(refreshCall, 2);
     await refreshed;
     const value = computed(() => resetStore.value.get());
+
     expect(value.get()).toBe(2);
     const construction = captureReactiveConstruction(value);
     const captureOptions = {
@@ -2264,12 +2428,14 @@ it("keeps a published transfer exclusion across reset until its original mutatio
 
     const retirement = prepareTransferOperationRetirement(operation.operation);
     const retirementCommit = retirement.seal();
+
     if (retirementCommit === undefined) throw new Error("The transfer retirement did not seal");
     retirementCommit.publish();
     retirementCommit.notifications.deliver();
     await retirement.retired;
 
     const capture = prepareRequiredTransferCapture(captureOptions);
+
     capture.discard();
     await capture.retired;
   } finally {
@@ -2281,6 +2447,7 @@ it("keeps a published transfer exclusion across reset until its original mutatio
         () => undefined,
       );
     }
+
     graph.dispose();
   }
 });

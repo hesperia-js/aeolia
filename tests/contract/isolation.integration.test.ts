@@ -42,6 +42,7 @@ type Trace = Readonly<{
 function callFor(backend: TestBackend, graph: Graph<any>, index: number): CallRecord {
   const calls = backend.calls.filter((call) => call.graph === graph.id);
   const call = calls[index];
+
   if (call === undefined) throw new Error(`missing call ${index}`);
   return call;
 }
@@ -67,35 +68,43 @@ async function runTrace(interleave: boolean): Promise<Trace> {
 
   let storeB: QueryStore<User> | undefined;
   let storeC: QueryStore<User> | undefined;
+
   if (graphB != null && graphC != null) {
     storeB = graphB.api.users.get({ id: "b" });
     storeC = graphC.api.users.get({ id: "c" });
   }
 
   backend.resolve(callFor(backend, graphA, 0), { id: "a", revision: 1 });
+
   if (graphB != null && graphC != null) {
     backend.resolve(callFor(backend, graphC, 0), { id: "c", revision: 1 });
     backend.resolve(callFor(backend, graphB, 0), { id: "b", revision: 1 });
   }
+
   await flush();
   values.push(storeA.value.get());
 
   if (graphB != null && graphC != null) {
     const revalidationC = storeC!.revalidate();
+
     backend.resolve(callFor(backend, graphC, 1), { id: "c", revision: 2 });
     await revalidationC;
   }
+
   jest.advanceTimersByTime(11);
   await flush();
   expect(callFor(backend, graphA, 1).settled).toBe(false);
   values.push(storeA.value.get());
 
   const revalidationA = storeA.revalidate();
+
   if (graphB != null && graphC != null) {
     const revalidationB = storeB!.revalidate();
+
     backend.resolve(callFor(backend, graphB, 1), { id: "b", revision: 2 });
     await revalidationB;
   }
+
   expect(callFor(backend, graphA, 1).aborted).toBe(true);
   backend.resolve(callFor(backend, graphA, 1), { id: "a", revision: -1 });
   backend.resolve(callFor(backend, graphA, 2), { id: "a", revision: 2 });
@@ -135,6 +144,7 @@ async function runTrace(interleave: boolean): Promise<Trace> {
 describe("graph differential isolation", () => {
   it("leaves graph A unchanged when B and C interleave at every settle and time advance", async () => {
     const solo = await runTrace(false);
+
     jest.clearAllTimers();
     jest.setSystemTime(0);
     const interleaved = await runTrace(true);

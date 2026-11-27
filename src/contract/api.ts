@@ -117,13 +117,16 @@ export function createQuery<I, T, K extends string, P = never>(
   input: CreateQueryInput<I, T, K, P>,
 ): QueryDefinition<I, T, K, P> {
   let acquisition: QueryAcquisition;
+
   try {
     acquisition = captureQueryAcquisition(input);
   } catch {
     throw new TypeError("Invalid query declaration.");
   }
+
   if (!isCreateQueryInputWithAcquisition(input, acquisition))
     throw new TypeError("Invalid query declaration.");
+
   return Object.freeze({ ...input, acquisition, kind: "query" as const });
 }
 
@@ -184,13 +187,16 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
 ): PositionedStreamDefinition<Input, Value, Key, Position, Reader> {
   if (input === null || typeof input !== "object" || Array.isArray(input))
     throw new TypeError("Invalid positioned stream declaration.");
+
   const name = input.name;
   const key = input.key;
   const sourceInput = input.source;
   const snapshot = input.snapshot;
   const equals = input.equals;
+
   if (sourceInput === null || typeof sourceInput !== "object" || Array.isArray(sourceInput))
     throw new TypeError("Invalid positioned stream source.");
+
   const openSource = sourceInput.open;
   const acquireSourceReader = sourceInput.acquireReader;
   const validateSourceReader = sourceInput.validateReader;
@@ -199,12 +205,16 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
   const releaseSourceReader = sourceInput.releaseReader;
   const initialBoundarySource = sourceInput.initialBoundary;
   const readerLifetimeSource = sourceInput.readerLifetime;
+
   if (initialBoundarySource !== undefined && typeof initialBoundarySource !== "function")
     throw new TypeError("Positioned stream initialBoundary must be a function.");
+
   if (readerLifetimeSource !== undefined && typeof readerLifetimeSource !== "function")
     throw new TypeError("Positioned stream readerLifetime must be a function.");
+
   if (acquireSourceReader !== undefined && typeof acquireSourceReader !== "function")
     throw new TypeError("Positioned stream acquireReader must be a function.");
+
   if (
     typeof openSource !== "function" ||
     typeof validateSourceReader !== "function" ||
@@ -213,6 +223,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
     typeof releaseSourceReader !== "function"
   )
     throw new TypeError("Positioned stream source callbacks must be functions.");
+
   const capturedSource = Object.freeze({
     open: (value: Input, options: PositionedStreamOpenOptions<Position, Reader>) =>
       Reflect.apply(openSource, sourceInput, [value, options]),
@@ -263,23 +274,28 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
     ...(snapshot === undefined ? {} : { snapshot }),
     ...(equals === undefined ? {} : { equals }),
   };
+
   if (!isCreatePositionedStreamInput(normalizedInput))
     throw new TypeError("Invalid positioned stream declaration.");
+
   const open = (value: Input, options: import("./types.ts").OpenOptions): AsyncIterable<Value> => {
     const request = positionedOpenRequestByOpenOptions.get(options);
     const positionedOptions: PositionedStreamOpenOptions<unknown, unknown> =
       request === undefined ? { ...options } : { ...options, ...request };
     const events = Reflect.apply(capturedSource.open, capturedSource, [value, positionedOptions]);
+
     if (
       events === null ||
       typeof events !== "object" ||
       typeof events[Symbol.asyncIterator] !== "function"
     )
       throw new TypeError("Positioned stream open must return an AsyncIterable.");
+
     const initialBoundary =
       capturedSource.initialBoundary === undefined
         ? undefined
         : Reflect.apply(capturedSource.initialBoundary, capturedSource, [value, positionedOptions]);
+
     positionedInitialBoundaryWriterByOpenOptions.get(options)?.(initialBoundary);
     let sourceIterator: object | undefined;
     let source:
@@ -302,44 +318,62 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
     } => {
       if (source === undefined) {
         const method = events[Symbol.asyncIterator];
+
         if (typeof method !== "function")
           throw new TypeError("Positioned stream open must return an AsyncIterable.");
+
         const iterator = Reflect.apply(method, events, []);
+
         if (iterator === null || (typeof iterator !== "object" && typeof iterator !== "function"))
           throw new TypeError("Positioned stream iterator must be an object.");
+
         sourceIterator = iterator;
         const next: unknown = (iterator as { readonly next?: unknown }).next;
+
         if (typeof next !== "function")
           throw new TypeError("Positioned stream iterator must provide next().");
+
         source = { iterator, next };
       }
+
       const current = source;
+
       if (current === undefined)
         throw new TypeError("Positioned stream iterator was not retained.");
+
       return current;
     };
 
     const next = async (): Promise<IteratorResult<Value>> => {
       if (adapterClosed || sourceDone) return { done: true, value: undefined };
+
       if (sourceFailure !== undefined) {
         if (sourceFailureDelivered) {
           sourceDone = true;
           return { done: true, value: undefined };
         }
+
         sourceFailureDelivered = true;
         throw sourceFailure.cause;
       }
+
       const current = source;
+
       if (current === undefined)
         throw new TypeError("Positioned stream iterator is not initialized.");
+
       const result: unknown = await Reflect.apply(current.next, current.iterator, []);
+
       if (result === null || (typeof result !== "object" && typeof result !== "function"))
         throw new TypeError("Positioned stream iterator result must be an object.");
+
       if ((result as { readonly done?: unknown }).done) {
         sourceDone = true;
         return { done: true, value: undefined };
       }
+
       const event: unknown = (result as { readonly value?: unknown }).value;
+
       if (
         event === null ||
         typeof event !== "object" ||
@@ -347,8 +381,10 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
         !("value" in event)
       )
         throw new TypeError("Positioned stream event requires a position and value.");
+
       positionedPositionWriterByOpenOptions.get(options)?.(event.position);
       const value = await event.value;
+
       // Keep the existing AsyncIterable<Value> shape for async-yield thenable values.
       return { done: false, value: value as Value };
     };
@@ -358,29 +394,38 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
         if (returnLookupFailure !== undefined) throw returnLookupFailure.cause;
         return returnForwarder;
       }
+
       returnRead = true;
       adapterClosed = true;
       const current = sourceIterator;
+
       if (current === undefined || sourceDone) return undefined;
       let close: unknown;
+
       try {
         close = (current as { readonly return?: unknown }).return;
       } catch (cause) {
         returnLookupFailure = { cause };
         throw cause;
       }
+
       if (close === undefined || close === null) return undefined;
+
       if (typeof close !== "function") {
         const cause = new TypeError("Positioned stream iterator return must be a function.");
+
         returnLookupFailure = { cause };
         throw cause;
       }
+
       const exactIterator = current;
+
       returnForwarder = (...args: unknown[]): unknown => Reflect.apply(close, exactIterator, args);
       return returnForwarder;
     };
 
     const iterator: AsyncIterator<Value> = { next };
+
     // Native cleanup tracks the provider carrier and ignores its private close-result payload.
     Object.defineProperty(iterator, "return", {
       configurable: false,
@@ -397,6 +442,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
             sourceFailure = { cause };
           }
         }
+
         return iterator;
       },
     };
@@ -406,6 +452,7 @@ export function createPositionedStream<Input, Value, Key extends string, Positio
     kind: "positioned-stream" as const,
     open,
   });
+
   positionedStreamSourceByDefinition.set(definition, capturedSource as any);
   return definition as PositionedStreamDefinition<Input, Value, Key, Position, Reader>;
 }
@@ -452,6 +499,7 @@ export function affects<MI, QI, T>(
       ? {}
       : { optimistic: spec.optimistic as (current: unknown, input: MI) => unknown }),
   };
+
   return Object.freeze(result);
 }
 

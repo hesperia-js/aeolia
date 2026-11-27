@@ -125,14 +125,17 @@ test("creation functions retain ownership of definition discriminants", () => {
       releaseReader: () => undefined,
     },
   });
+
   expect(positioned.kind).toBe("positioned-stream");
   expect(positioned.source.acquireReader).toBeUndefined();
   const graph = createGraph({
     contract: defineContract({ namespace: "positioned-factory", operations: { positioned } }),
   });
+
   try {
     expect(typeof graph.api.positioned).toBe("function");
     const structuralCopy = { ...positioned };
+
     expect(() =>
       createGraph({
         contract: defineContract({
@@ -155,6 +158,7 @@ test("query declarations capture and validate acquisition policy", () => {
     fetch: async () => 1,
   };
   const query = createQuery(input);
+
   input.acquisition = "cache";
   expect(query.acquisition).toBe("fetch");
   const defaultQuery = createQuery({
@@ -162,6 +166,7 @@ test("query declarations capture and validate acquisition policy", () => {
     key: () => "default",
     fetch: async () => 1,
   });
+
   expect(defaultQuery.acquisition).toBe("cache");
   expect(
     createQuery({
@@ -187,6 +192,7 @@ test("query declarations capture and validate acquisition policy", () => {
       },
     },
   );
+
   expect(() => createQuery(accessor as never)).toThrow(TypeError);
   expect(getterCalled).toBe(false);
 
@@ -195,6 +201,7 @@ test("query declarations capture and validate acquisition policy", () => {
     key: () => "inherited",
     fetch: async () => 1,
   });
+
   expect(() => createQuery(inherited as never)).toThrow(TypeError);
 
   for (const acquisition of [false, null, "network"] as const) {
@@ -230,6 +237,7 @@ test("a graph retains the acquisition captured from a structural query", async (
           value: descriptorReads === 1 ? "fetch" : "cache",
         };
       }
+
       return Reflect.getOwnPropertyDescriptor(target, property);
     },
   });
@@ -242,14 +250,17 @@ test("a graph retains the acquisition captured from a structural query", async (
   const graph = createGraph({
     contract: defineContract({ namespace: "structural-acquisition", operations }),
   });
+
   definition.acquisition = "cache";
 
   try {
     const first = graph.api.query("structural-key");
+
     backend.resolve(backend.calls[0]!, 1);
     await expect(first.ready).resolves.toBe(1);
 
     const second = graph.api.query("structural-key");
+
     expect(backend.calls).toHaveLength(2);
     backend.resolve(backend.calls[1]!, 2);
     await expect(second.ready).resolves.toBe(2);
@@ -264,6 +275,7 @@ test("contract validation rejects aliases, cycles, and orphan affected queries",
     key: () => "aliased",
     fetch: async () => 1,
   });
+
   expect(() =>
     defineContract({
       namespace: "test",
@@ -272,6 +284,7 @@ test("contract validation rejects aliases, cycles, and orphan affected queries",
   ).toThrow("contract alias: aliased.query");
 
   const store = createStore({ name: "aliased.store", initial: 1 });
+
   expect(() =>
     defineContract({
       namespace: "test",
@@ -280,6 +293,7 @@ test("contract validation rejects aliases, cycles, and orphan affected queries",
   ).toThrow("contract alias: aliased.store");
 
   const cyclic: Record<string, unknown> = {};
+
   cyclic.self = cyclic;
   expect(() =>
     defineContract({
@@ -303,6 +317,7 @@ test("contract validation rejects aliases, cycles, and orphan affected queries",
     ],
     run: async () => undefined,
   });
+
   expect(() => defineContract({ namespace: "test", operations: { mutation } })).toThrow(
     "contract: orphan.query",
   );
@@ -327,6 +342,7 @@ test("positioned declarations capture an optional acquisition without invoking i
     },
   });
   const readers: unknown[] = [undefined, Promise.resolve("opaque promise"), opaque];
+
   for (const reader of readers) {
     let captures = 0;
     let calls = 0;
@@ -350,6 +366,7 @@ test("positioned declarations capture an optional acquisition without invoking i
       expect(actual.signal).toBe(controller.signal);
       return original;
     };
+
     Object.defineProperty(source, "acquireReader", {
       configurable: true,
       get() {
@@ -368,6 +385,7 @@ test("positioned declarations capture an optional acquisition without invoking i
         operations: { events: declaration },
       }),
     });
+
     try {
       expect(captures).toBe(1);
       expect(calls).toBe(0);
@@ -377,10 +395,13 @@ test("positioned declarations capture an optional acquisition without invoking i
         },
       });
       const captured = declaration.source.acquireReader;
+
       if (captured === undefined) throw new Error("The acquisition callback was not captured");
       const returned = captured(request);
+
       expect(returned).toBe(original);
       const envelope = await returned;
+
       expect(envelope).toBe(result);
       expect(Object.getOwnPropertyDescriptor(envelope, "reader")?.value).toBe(reader);
       expect(calls).toBe(1);
@@ -403,6 +424,7 @@ test("positioned declarations reject a malformed optional acquisition callback",
     acknowledge: () => undefined,
     releaseReader: () => undefined,
   };
+
   for (const acquireReader of [null, false, 1, {}]) {
     expect(() =>
       createPositionedStream({

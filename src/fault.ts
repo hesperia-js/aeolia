@@ -55,6 +55,7 @@ export class Fault extends Error {
   constructor(kind: FaultKind, involved: readonly string[] = []) {
     const names = [...involved];
     const suffix = names.length === 0 ? "" : `: ${names.join(", ")}`;
+
     super(`${kind}${suffix}`);
     this.name = "Fault";
     this.kind = kind;
@@ -111,6 +112,7 @@ export function __unregisterFaultChannel(graph: object): void {
  */
 export function onFault(graph: object, observer: (fault: Fault) => void): Unsubscribe {
   const register = faultChannels.get(graph);
+
   if (register === undefined) throw new TypeError("The graph does not expose a fault channel");
   return register(observer);
 }

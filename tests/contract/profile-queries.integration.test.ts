@@ -43,6 +43,7 @@ function fixture(idleMs = 100) {
   const other = createQuery({ ...query, name: "other" });
   const contract = defineContract({ namespace: "profiles", operations: { query, other } });
   const graph = createGraph({ contract, idleMs });
+
   return { backend, query, other, contract, graph, keyCalls: () => keyCalls };
 }
 
@@ -67,12 +68,14 @@ function trackedCallerSignal(onLink: () => void) {
           options?: boolean | AddEventListenerOptions,
         ) => {
           target.addEventListener(type, listener, options);
+
           if (type === "abort") {
             links.add(listener);
             added += 1;
             onLink();
           }
         };
+
       if (property === "removeEventListener")
         return (
           type: string,
@@ -80,15 +83,19 @@ function trackedCallerSignal(onLink: () => void) {
           options?: boolean | EventListenerOptions,
         ) => {
           target.removeEventListener(type, listener, options);
+
           if (type === "abort") {
             links.delete(listener);
             removed += 1;
           }
         };
+
       const value: unknown = Reflect.get(target, property, target);
+
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+
   return {
     controller,
     signal,
@@ -116,6 +123,7 @@ describe("context-bound query entries", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "key-receiver", operations: { query } }),
     });
+
     try {
       const binding = bindOperation(graph, query, {
         context: createBindingContext(graph),
@@ -124,6 +132,7 @@ describe("context-bound query entries", () => {
       });
       const raw = graph.api.query({ id: "raw" });
       const bound = binding.member({ id: "bound" });
+
       expect(await raw.ready).toBe("raw");
       expect(await bound.ready).toBe("bound");
       expect(receivers.length).toBeGreaterThanOrEqual(2);
@@ -153,13 +162,16 @@ describe("context-bound query entries", () => {
         operations: { cached: cachedQuery, fetching: query },
       }),
     });
+
     query.acquisition = "cache";
 
     try {
       const cached = graph.api.cached({ id: "one" });
+
       backend.resolve(backend.calls[0]!, { count: 1 });
       await expect(cached.ready).resolves.toEqual({ count: 1 });
       const cachedAgain = graph.api.cached({ id: "one" });
+
       expect(backend.calls).toHaveLength(1);
       await expect(cachedAgain.ready).resolves.toEqual({ count: 1 });
 
@@ -169,14 +181,17 @@ describe("context-bound query entries", () => {
         fetch: async (input, options) => (await query.fetch(input, options)).count,
       });
       const first = binding.member({ id: "one" });
+
       backend.resolve(backend.calls[1]!, { count: 2 });
       await expect(first.ready).resolves.toBe(2);
 
       const second = binding.member({ id: "one" });
+
       expect(backend.calls).toHaveLength(3);
       expect(second.value.get()).toBe(2);
       expect(second.status.get()).toBe("revalidating");
       const joined = binding.member({ id: "one" });
+
       expect(backend.calls).toHaveLength(3);
       expect(joined.pending.get()).toBe(true);
       expect(joined.status.get()).toBe("revalidating");
@@ -206,6 +221,7 @@ describe("context-bound query entries", () => {
     const reference = { role: "counter" };
     const handle = targetBinding.member({ id: "one" }, { initial: { count: 0 } });
     const caller = trackedCallerSignal(() => handle.set({ count: 100 }));
+
     try {
       sourceBinding.member({ id: "one" }, { initial: { count: 4 } });
       const encoded = snapshot(source.graph, {
@@ -219,17 +235,21 @@ describe("context-bound query entries", () => {
           generation: Number.MAX_SAFE_INTEGER - 2,
         })),
       } as unknown as typeof encoded;
+
       adopt(target.graph, incoming, { bindings: [{ binding: targetBinding, reference }] });
       let refresh: Promise<void> | undefined;
       let threw = false;
       let reason: unknown;
+
       try {
         refresh = handle.revalidate({ abortSignal: caller.signal });
       } catch (error) {
         threw = true;
         reason = error;
       }
+
       const dispatched = [...target.backend.calls];
+
       for (const call of dispatched) target.backend.resolve(call, { count: 1 });
       if (refresh !== undefined) await refresh;
 
@@ -286,6 +306,7 @@ describe("context-bound query entries", () => {
     const operation = anotherOperation.member({ id: one.key });
     const environment = anotherContext.member({ id: one.key });
     const raw = graph.api.query({ id: one.key });
+
     expect(one.identity).toBe(two.identity);
     expect(
       new Set([
@@ -327,18 +348,22 @@ describe("context-bound query entries", () => {
     const profile = {};
     const configuration = { context, profile, fetch: async () => ({ count: 1 }) };
     const binding = bindOperation(graph, query, configuration);
+
     expect(backend.calls).toHaveLength(0);
     expect(keyCalls()).toBe(0);
     expect(() => bindOperation(graph, query, configuration)).toThrow(TypeError);
     expect(() => bindOperation(foreign, query, configuration)).toThrow(TypeError);
     const lookalike = createQuery({ ...query });
+
     expect(() => bindOperation(graph, lookalike, { ...configuration, profile: {} })).toThrow(
       TypeError,
     );
     expect(keyCalls()).toBe(0);
     const raw = graph.api.query({ id: "one" });
+
     expect(() => binding.target(raw)).toThrow(TypeError);
     const own = binding.member({ id: "one" });
+
     expect(() => binding.target(Object.create(own))).toThrow(TypeError);
     expect(binding.target(own)?.forBinding(binding)).toBeDefined();
     graph.dispose();
@@ -353,20 +378,24 @@ describe("context-bound query entries", () => {
       profile: {},
       fetch: async (input, options) => {
         const result = await query.fetch(input, options);
+
         if (result.count < 0) throw failure;
         return `count:${result.count}`;
       },
     });
     const handle = binding.member({ id: "one" });
+
     backend.resolve(backend.calls[0]!, { count: 2 });
     expect(await handle.ready).toBe("count:2");
     const refresh = handle.revalidate();
+
     backend.resolve(backend.calls[1]!, { count: -1 });
     await refresh;
     expect(handle.status.get()).toBe("failed");
     expect(handle.error.get()).toBe(failure);
     expect(handle.value.get()).toBe("count:2");
     const recovery = handle.revalidate();
+
     backend.resolve(backend.calls[2]!, { count: 3 });
     await recovery;
     expect(handle.value.get()).toBe("count:3");
@@ -382,9 +411,11 @@ describe("context-bound query entries", () => {
       value: { initial: 0 },
     });
     const handle = binding.member({ id: "one" });
+
     expect(handle.value.get()).toBe(0);
     expect(() => binding.member({ id: "one" }, { initial: 9 })).toThrow(TypeError);
     const initialRefresh = handle.revalidate();
+
     backend.resolve(backend.calls[0]!, { count: 1 });
     await initialRefresh;
     await handle.ready;
@@ -393,11 +424,13 @@ describe("context-bound query entries", () => {
     const old = binding.target(handle)!;
     const reset = graph.reset();
     const fresh = binding.target(handle);
+
     expect(fresh).toBeDefined();
     expect(fresh?.identity).toBe(identity);
     expect(old.forBinding(binding)).toBeUndefined();
     expect(handle.value.get()).toBeUndefined();
     const during = binding.member({ id: "one" });
+
     expect(during.identity).toBe(identity);
     expect(during.value.get()).toBeUndefined();
     expect(() => binding.member({ id: "one" }, { initial: 0 })).toThrow(Fault);
@@ -406,6 +439,7 @@ describe("context-bound query entries", () => {
     await reset;
     expect(handle.value.get()).toBe(4);
     const after = binding.member({ id: "one" });
+
     expect(after.identity).toBe(identity);
     expect(after.value.get()).toBe(4);
     expect(() => binding.member({ id: "one" }, { initial: 0 })).toThrow(Fault);
@@ -427,10 +461,12 @@ describe("context-bound query entries", () => {
         fetch: async (input, options) => (await query.fetch(input, options)).count,
       });
       const handle = binding.member({ id: "one" });
+
       backend.resolve(backend.calls[0]!, { count: 1 });
       await handle.ready;
       const old = binding.target(handle)!;
       const stop = subscribe(context.active, () => {});
+
       jest.advanceTimersByTime(6);
       expect(binding.target(handle)).toBeDefined();
       expect(old.forBinding(binding)).toBe(old);
@@ -441,6 +477,7 @@ describe("context-bound query entries", () => {
         () => undefined,
         (error: unknown) => error,
       );
+
       expect(binding.target(handle)).toBeUndefined();
       await graph.reset();
       expect(binding.target(handle)).toBeUndefined();
@@ -448,6 +485,7 @@ describe("context-bound query entries", () => {
       const next = operation === "member" ? binding.member({ id: "one" }) : handle;
       const revalidation = operation === "revalidate" ? handle.revalidate() : undefined;
       const reacquired = binding.target(next)!;
+
       expect(next.identity).toBe(handle.identity);
       expect(reacquired).toBeDefined();
       expect(binding.target(handle)?.identity).toBe(next.identity);
@@ -459,6 +497,7 @@ describe("context-bound query entries", () => {
         () => undefined,
         (error: unknown) => error,
       );
+
       backend.reject(backend.calls[1]!, failure);
       if (revalidation !== undefined) await revalidation;
       expect(await failedReady).toBe(failure);
@@ -468,6 +507,7 @@ describe("context-bound query entries", () => {
       expect(binding.target(next)).toBeDefined();
       const stopStatus = subscribe(next.status, () => {});
       const reset = graph.reset();
+
       expect(reacquired.forBinding(binding)).toBeUndefined();
       expect(old.forBinding(binding)).toBeUndefined();
       expect(binding.target(next)).toBeDefined();
@@ -498,6 +538,7 @@ describe("context-bound query entries", () => {
         return "captured";
       },
     };
+
     expect(() => binding.member({ id: "one" }, options)).toThrow(Fault);
     expect(context.active.peek()).toBe(false);
     expect(keyCalls()).toBe(0);
@@ -523,8 +564,10 @@ describe("context-bound query entries", () => {
       },
     });
     const handle = binding.member({ id: "one" });
+
     await handle.ready;
     const old = binding.target(handle)!;
+
     handle.set(2);
     await reset;
     expect(handle.value.get()).toBeUndefined();
@@ -548,6 +591,7 @@ describe("context-bound query entries", () => {
         return query.fetch(input, options);
       },
     });
+
     reenter = (input) => {
       try {
         first.member(input);
@@ -567,6 +611,7 @@ describe("context-bound query entries", () => {
     );
     const separate = second.member({ id: "one" });
     const raw = graph.api.query({ id: "one" });
+
     context.dispose();
     expect(context.active.peek()).toBe(false);
     expect(otherContext.active.peek()).toBe(true);
@@ -604,6 +649,7 @@ describe("context-bound query entries", () => {
       });
       const handle = binding.member({ id: "one" });
       let waiting: Promise<unknown> | undefined;
+
       if (phase === "predecessor")
         waiting = handle.ready.then(
           () => undefined,
@@ -613,6 +659,7 @@ describe("context-bound query entries", () => {
         backend.resolve(backend.calls[0]!, { count: 1 });
         await handle.ready;
       }
+
       const caller = trackedCallerSignal(() => {
         if (phase === "caller-link") context.dispose();
       });
@@ -628,13 +675,17 @@ describe("context-bound query entries", () => {
               }
             })
           : undefined;
+
       if (phase === "setup") await handle.revalidate({ abortSignal: caller.signal });
       else expect(() => handle.revalidate({ abortSignal: caller.signal })).toThrow(Fault);
+
       expect(context.active.peek()).toBe(false);
+
       if (phase !== "caller-link") {
         expect(waiting).toBeDefined();
         expect(await waiting).toMatchObject({ kind: "disposed" });
       }
+
       expect(backend.calls).toHaveLength(1);
       expect(caller.links.size).toBe(0);
       expect(caller.added).toBe(phase === "predecessor" ? 0 : 1);
@@ -656,6 +707,7 @@ describe("context-bound query entries", () => {
     const context = createBindingContext(graph);
     const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
     const handle = binding.member({ id: "one" });
+
     backend.resolve(backend.calls[0]!, { count: 1 });
     await handle.ready;
     const removalError = new Error("caller listener removal failed");
@@ -668,16 +720,20 @@ describe("context-bound query entries", () => {
             target.addEventListener(...args);
             context.dispose();
           };
+
         if (property === "removeEventListener")
           return (...args: Parameters<AbortSignal["removeEventListener"]>) => {
             target.removeEventListener(...args);
             removals += 1;
             throw removalError;
           };
+
         const value: unknown = Reflect.get(target, property, target);
+
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+
     expect(() => handle.revalidate({ abortSignal: signal })).toThrow(Fault);
     expect(removals).toBe(1);
     expect(backend.calls).toHaveLength(1);
@@ -693,8 +749,10 @@ describe("context-bound query entries", () => {
       fetch: async () => "excluded",
       value: { snapshot: false },
     });
+
     await excluded.member({ id: "one" }).ready;
     const raw = graph.api.query({ id: "one" });
+
     backend.resolve(backend.calls[0]!, { count: 5 });
     await raw.ready;
     expect(Object.keys(snapshot(graph).entries)).toEqual(["one"]);
@@ -703,6 +761,7 @@ describe("context-bound query entries", () => {
       profile: {},
       fetch: async () => "selected",
     });
+
     await selected.member({ id: "one" }).ready;
     expect(() => snapshot(graph)).toThrow(Fault);
     context.dispose();
@@ -726,6 +785,7 @@ describe("context-bound query entries", () => {
       },
     });
     const handle = binding.member(queryOptions({ initial: 1 }), { initial: 2 });
+
     expect(handle.value.get()).toBe(2);
     expect(inputs).toEqual([]);
     await handle.revalidate();
@@ -736,8 +796,10 @@ describe("context-bound query entries", () => {
   it("keeps distinct query callers on one physical address with independent freshness windows", async () => {
     const { backend, graph, keyCalls } = fixture();
     const input = { id: "caller-aliases" };
+
     try {
       const beforeKeys = keyCalls();
+
       for (const invalid of [Number.POSITIVE_INFINITY, Number.NaN, -1]) {
         expect(() =>
           preparePassiveTransferClaim(graph, graph.api.query, input, {
@@ -746,6 +808,7 @@ describe("context-bound query entries", () => {
         ).toThrow(Fault);
         expect(keyCalls()).toBe(beforeKeys);
       }
+
       expect(backend.calls).toHaveLength(0);
 
       const passive = [
@@ -754,20 +817,24 @@ describe("context-bound query entries", () => {
         preparePassiveTransferClaim(graph, graph.api.query, input, { revalidateAfterMs: 1000 }),
         preparePassiveTransferClaim(graph, graph.api.query, input),
       ];
+
       expect(keyCalls()).toBe(beforeKeys + 4);
       expect(new Set(passive.map((claim) => claim.store.identity)).size).toBe(1);
       expect(new Set(passive.map((claim) => claim.store.status)).size).toBe(4);
       expect(new Set(passive.map((claim) => claim.store.pending)).size).toBe(4);
+
       for (const claim of passive) {
         expect(() => claim.store.status.get()).toThrow(TypeError);
         expect(() => claim.store.progress.get()).toThrow(TypeError);
       }
+
       expect(backend.calls).toHaveLength(0);
       for (const claim of passive) claim.discard();
       await Promise.all(passive.map((claim) => claim.retired));
 
       const baseline = graph.api.query(input);
       const baselineReady = baseline.ready;
+
       expect(backend.calls).toHaveLength(1);
       backend.resolve(backend.calls[0]!, { count: 1 });
       await expect(baselineReady).resolves.toEqual({ count: 1 });
@@ -778,6 +845,7 @@ describe("context-bound query entries", () => {
       const infinite = graph.api.query(input);
       const oneSecondReady = oneSecond.ready;
       const infiniteReady = infinite.ready;
+
       expect(backend.calls).toHaveLength(2);
       expect(zeroWindow.identity).toBe(baseline.identity);
       expect(oneSecond.identity).toBe(baseline.identity);
@@ -810,9 +878,11 @@ describe("context-bound query entries", () => {
     const source = fixture();
     const target = fixture();
     const input = { id: "caller-wire" };
+
     try {
       const baseline = source.graph.api.query(input);
       const baselineReady = baseline.ready;
+
       source.backend.resolve(source.backend.calls[0]!, { count: 1 });
       await expect(baselineReady).resolves.toEqual({ count: 1 });
 
@@ -820,6 +890,7 @@ describe("context-bound query entries", () => {
       const zeroReady = zeroWindow.ready;
       const oneSecond = source.graph.api.query(input, { revalidateAfterMs: 1000 });
       const oneSecondReady = oneSecond.ready;
+
       source.backend.resolve(source.backend.calls[1]!, { count: 2 });
       await Promise.all([zeroReady, oneSecondReady]);
       jest.advanceTimersByTime(1);
@@ -831,6 +902,7 @@ describe("context-bound query entries", () => {
         zeroWindow.pending.get() ? "pending" : zeroWindow.status.get(),
       );
       const sourceOneSecond = computed(() => oneSecond.status.get());
+
       expect(sourceZero.get()).toBe("stale");
       expect(sourceZeroAlias.get()).toBe("stale");
       expect(sourceOneSecond.get()).toBe("ready");
@@ -845,6 +917,7 @@ describe("context-bound query entries", () => {
         codec: profileTransferCodec,
       });
       const captureCommit = capture.seal();
+
       if (captureCommit === undefined) throw new Error("The two-caller capture did not seal");
       captureCommit.publish();
       captureCommit.notifications.deliver();
@@ -858,8 +931,10 @@ describe("context-bound query entries", () => {
       const oneSecondCaller = capture.image.callers.find(
         (caller) => caller.window.kind === "finite" && caller.window.milliseconds === 1000,
       );
+
       if (zeroCaller === undefined || oneSecondCaller === undefined)
         throw new Error("The caller freshness descriptors were not captured");
+
       expect(zeroCaller.status).toBe("stale");
       expect(oneSecondCaller.status).toBe("ready");
       expect(
@@ -871,6 +946,7 @@ describe("context-bound query entries", () => {
       const oneSecondWitness = capture.sources.find(
         (witness) => witness.slot === oneSecondCaller.slot,
       );
+
       expect(
         [zeroWindow, oneSecond].some((caller) => Object.is(caller, physicalWitness?.store)),
       ).toBe(true);
@@ -883,16 +959,21 @@ describe("context-bound query entries", () => {
       let oneSecondClaim: typeof zeroClaim | undefined;
       let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
       let adoptionPublished = false;
+
       try {
         oneSecondClaim = preparePassiveTransferClaim(target.graph, target.graph.api.query, input, {
           revalidateAfterMs: 1000,
         });
+
         if (oneSecondClaim === undefined)
           throw new Error("The second caller claim was not prepared");
+
         const secondClaim = oneSecondClaim;
+
         expect(target.keyCalls()).toBe(2);
         expect(target.backend.calls).toHaveLength(0);
         const receiverKeys = target.keyCalls();
+
         expect(zeroClaim.store.identity).toBe(secondClaim.store.identity);
         expect(() => zeroClaim.store.status.get()).toThrow(TypeError);
 
@@ -938,6 +1019,7 @@ describe("context-bound query entries", () => {
               : caller,
           ),
         } as typeof capture.image;
+
         expect(() => prepareRequiredTransferAdoption(wrongWindowImage, adoptionOptions)).toThrow(
           TypeError,
         );
@@ -946,6 +1028,7 @@ describe("context-bound query entries", () => {
           sourceRows[1]!,
           { slot: oneSecondCaller.slot, claim: zeroClaim },
         ];
+
         expect(() =>
           prepareRequiredTransferAdoption(capture.image, {
             ...adoptionOptions,
@@ -957,6 +1040,7 @@ describe("context-bound query entries", () => {
           { slot: zeroCaller.slot, claim: secondClaim },
           { slot: oneSecondCaller.slot, claim: zeroClaim },
         ];
+
         expect(() =>
           prepareRequiredTransferAdoption(capture.image, {
             ...adoptionOptions,
@@ -968,8 +1052,10 @@ describe("context-bound query entries", () => {
         expect(() => zeroClaim.store.status.get()).toThrow(TypeError);
 
         const preparedAdoption = prepareRequiredTransferAdoption(capture.image, adoptionOptions);
+
         adoption = preparedAdoption;
         const commit = preparedAdoption.seal();
+
         if (commit === undefined) throw new Error("The caller-slot adoption did not seal");
         commit.publish();
         adoptionPublished = true;
@@ -992,6 +1078,7 @@ describe("context-bound query entries", () => {
           zeroClaim.discard();
           oneSecondClaim?.discard();
         }
+
         await Promise.all(
           oneSecondClaim === undefined
             ? [zeroClaim.retired]
@@ -1008,12 +1095,15 @@ describe("context-bound query entries", () => {
     const source = fixture();
     const target = fixture();
     const input = { id: "passive-empty" };
+
     try {
       const sourceStore = source.graph.api.query(input, { snapshot: false });
       const sourceReady = sourceStore.ready;
+
       source.backend.resolve(source.backend.calls[0]!, { count: 1 });
       await expect(sourceReady).resolves.toEqual({ count: 1 });
       const sourceRoot = computed(() => sourceStore.status.get());
+
       expect(sourceRoot.get()).toBe("ready");
 
       const capture = prepareRequiredTransferCapture({
@@ -1022,6 +1112,7 @@ describe("context-bound query entries", () => {
         codec: profileTransferCodec,
       });
       const captureCommit = capture.seal();
+
       if (captureCommit === undefined) throw new Error("The empty-base capture did not seal");
       captureCommit.publish();
       captureCommit.notifications.deliver();
@@ -1033,12 +1124,14 @@ describe("context-bound query entries", () => {
       const claim = preparePassiveTransferClaim(target.graph, target.graph.api.query, input, {
         snapshot: false,
       });
+
       expect(target.keyCalls()).toBe(1);
       expect(target.backend.calls).toHaveLength(0);
       expect(() => claim.store.ready).toThrow(TypeError);
       const targetRoot = computed(() => claim.store.status.get());
       let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
       let adoptionPublished = false;
+
       try {
         adoption = prepareRequiredTransferAdoption(capture.image, {
           graphs: [target.graph],
@@ -1057,6 +1150,7 @@ describe("context-bound query entries", () => {
           mappedStateWrites: [],
         });
         const commit = adoption.seal();
+
         if (commit === undefined) throw new Error("The empty-base adoption did not seal");
         commit.publish();
         adoptionPublished = true;
@@ -1066,6 +1160,7 @@ describe("context-bound query entries", () => {
         expect(claim.store.status.get()).toBe("empty");
 
         const ready = claim.store.ready;
+
         expect(target.backend.calls).toHaveLength(1);
         expect(target.backend.calls[0]).toMatchObject({ input });
         expect(target.keyCalls()).toBe(1);
@@ -1077,6 +1172,7 @@ describe("context-bound query entries", () => {
           adoption?.discard();
           claim.discard();
         }
+
         await claim.retired;
       }
     } finally {
@@ -1088,13 +1184,16 @@ describe("context-bound query entries", () => {
   it("keeps discarded query facades guarded without revoking an existing Store", async () => {
     const { backend, graph } = fixture();
     const input = { id: "existing-passive" };
+
     try {
       const physical = graph.api.query(input);
       const ready = physical.ready;
+
       backend.resolve(backend.calls[0]!, { count: 7 });
       await expect(ready).resolves.toEqual({ count: 7 });
 
       const claim = preparePassiveTransferClaim(graph, graph.api.query, input);
+
       expect(claim.store.identity).toBe(physical.identity);
       expect(() => claim.store.value.get()).toThrow(TypeError);
       claim.discard();
@@ -1107,6 +1206,7 @@ describe("context-bound query entries", () => {
       expect(physical.status.get()).toBe("ready");
 
       const again = graph.api.query(input);
+
       expect(again.identity).toBe(physical.identity);
       expect(again.value.get()).toEqual({ count: 7 });
       expect(backend.calls).toHaveLength(1);
@@ -1141,11 +1241,13 @@ it("keeps a passive bound query claim on its exact profile at a shared key", asy
   });
   const input = { id: "shared" };
   const controller = new AbortController();
+
   try {
     const beforeKeys = f.keyCalls();
     const claim = preparePassiveTransferClaim(f.graph, first, input, {
       abortSignal: controller.signal,
     });
+
     expect(f.keyCalls()).toBe(beforeKeys + 1);
     expect(firstFetches).toBe(0);
     expect(secondFetches).toBe(0);
@@ -1155,8 +1257,10 @@ it("keeps a passive bound query claim on its exact profile at a shared key", asy
     await claim.retired;
 
     const secondStore = second.member(input);
+
     await expect(secondStore.ready).resolves.toEqual({ count: 22 });
     const firstStore = first.member(input);
+
     await expect(firstStore.ready).resolves.toEqual({ count: 11 });
     expect(firstFetches).toBe(1);
     expect(secondFetches).toBe(1);

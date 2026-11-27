@@ -16,14 +16,18 @@ export function observePositionedTransferChanges(
   notify: () => void,
 ): () => void {
   const unique = new Set(targets);
+
   for (const target of unique) {
     let listeners = positionedCaptureListeners.get(target);
+
     if (listeners === undefined) {
       listeners = new Set();
       positionedCaptureListeners.set(target, listeners);
     }
+
     listeners.add(notify);
   }
+
   return stopPositionedCaptureChanges(
     [...unique].map((target) => new WeakRef(target)),
     notify,
@@ -37,8 +41,10 @@ function stopPositionedCaptureChanges(
   return () => {
     for (const reference of targets) {
       const target = reference.deref();
+
       if (target === undefined) continue;
       const listeners = positionedCaptureListeners.get(target);
+
       listeners?.delete(notify);
       if (listeners?.size === 0) positionedCaptureListeners.delete(target);
     }
@@ -47,7 +53,9 @@ function stopPositionedCaptureChanges(
 
 function notifyPositionedCaptureChange(target: object): void {
   const listeners = positionedCaptureListeners.get(target);
+
   if (listeners === undefined) return;
+
   for (const notify of listeners) {
     try {
       notify();
@@ -59,10 +67,12 @@ function notifyPositionedCaptureChange(target: object): void {
 
 function epoch(target: object): Epoch {
   let record = epochs.get(target);
+
   if (record === undefined) {
     record = { value: {} };
     epochs.set(target, record);
   }
+
   return record;
 }
 /** @internal Records an actual native transition, including equality-preserving transitions. */
@@ -79,6 +89,7 @@ export function prepareTransferChange(target: object): {
   const record = epoch(target);
   const before = record.value;
   const after = {};
+
   return {
     current: () => record.value === before,
     afterCurrent: () => record.value === after,
@@ -92,6 +103,7 @@ export function prepareTransferChange(target: object): {
 export function transferEpochCurrent(target: object): () => boolean {
   const record = epoch(target);
   const value = record.value;
+
   return () => record.value === value;
 }
 
@@ -115,6 +127,7 @@ const readables = new WeakMap<object, StoreRuntime<any>>();
 const readableRoles = new WeakMap<object, string>();
 const readableCallers = new WeakMap<object, QueryCaller<any>>();
 const callerRecords = new WeakMap<object, TransferCallerRecord>();
+
 /** @internal Exact native acquisition owner of per-caller facets. */
 export interface TransferCallerRecord {
   readonly caller: QueryCaller<any>;
@@ -122,16 +135,19 @@ export interface TransferCallerRecord {
   readonly store: QueryStore<any, any>;
 }
 const rawSources = new WeakMap<Graph, Map<object, TransferSourceRegistration>>();
+
 interface WorkMembership {
   readonly set: Set<object>;
   rows: object[];
 }
 const workMembership = new WeakMap<object, WorkMembership>();
 const workTargets = new WeakMap<object, Set<object>>();
+
 interface StoreRecord {
   readonly works: Set<object>;
 }
 const storeRecords = new WeakMap<object, StoreRecord>();
+
 interface AddressBook {
   current: Map<string, CoverageRecord>;
   version: object;
@@ -144,12 +160,15 @@ interface CoverageRecord {
   version: object;
 }
 const books = new WeakMap<object, AddressBook>();
+
 function book(owner: object): AddressBook {
   let record = books.get(owner);
+
   if (record === undefined) {
     record = { current: new Map(), version: {} };
     books.set(owner, record);
   }
+
   return record;
 }
 function ownerFor(runtime: StoreRuntime<any>): object {
@@ -167,10 +186,12 @@ export function captureSnapshotCoverage(runtime: StoreRuntime<any>): {
   const key = runtime.key;
   const original = books.get(owner)?.current.get(key);
   const version = original?.version;
+
   return {
     covered: original !== undefined && original.operations.size > 0,
     current: () => {
       const next = books.get(owner)?.current.get(key);
+
       if (original !== undefined) return next === original && next.version === version;
       return (
         next === undefined || (next.operations.size === 0 && next.version === next.initialVersion)
@@ -181,14 +202,17 @@ export function captureSnapshotCoverage(runtime: StoreRuntime<any>): {
 
 function newCoverage(owner: object, key: string): CoverageRecord {
   const initialVersion = {};
+
   return { owner, key, operations: new Set(), initialVersion, version: initialVersion };
 }
 function storeRecord(runtime: StoreRuntime<any>): StoreRecord {
   let record = storeRecords.get(runtime);
+
   if (record === undefined) {
     record = { works: workSet(runtime) };
     storeRecords.set(runtime, record);
   }
+
   return record;
 }
 /** @internal Registers the real graph before its native API is exposed. */
@@ -200,16 +224,20 @@ export function registerTransferGraph(graph: Graph, state: GraphRuntimeState<any
 /** @internal Registers a genuine member or binding created by a native owner. */
 export function registerTransferSource(source: object, info: TransferSourceRegistration): void {
   sources.set(source, info);
+
   if (info.binding !== undefined) {
     sources.set(info.binding, info);
     book(info.binding);
     return;
   }
+
   let graphSources = rawSources.get(info.graph);
+
   if (graphSources === undefined) {
     graphSources = new Map();
     rawSources.set(info.graph, graphSources);
   }
+
   if (!graphSources.has(info.definition)) graphSources.set(info.definition, info);
 }
 /** @internal Registers an actual native Store and its canonical reactive facets. */
@@ -218,6 +246,7 @@ export function registerTransferStore<T>(runtime: StoreRuntime<T>): void {
   storeRecord(runtime);
   epoch(runtime);
   book(ownerFor(runtime));
+
   for (const readable of [
     runtime.committed,
     runtime.predictionStack,
@@ -231,6 +260,7 @@ export function registerTransferStore<T>(runtime: StoreRuntime<T>): void {
   ]) {
     readables.set(readable, runtime);
   }
+
   const facets = [
     [runtime.committed, "committed"],
     [runtime.predictionStack, "predictions"],
@@ -242,6 +272,7 @@ export function registerTransferStore<T>(runtime: StoreRuntime<T>): void {
     [runtime.streamStatusCell, "stream-status-cell"],
     [runtime.streamStatus, "stream-status"],
   ] as const;
+
   for (const [readable, role] of facets) readableRoles.set(readable, role);
 }
 /** @internal Registers an authentic returned wrapper, without granting authority to lookalikes. */
@@ -259,6 +290,7 @@ export function registerTransferStoreHandle<T>(
         ? undefined
         : rawSources.get(runtime.graph)?.get(definition)
       : sources.get(runtime.binding));
+
   if (info !== undefined) storeSources.set(handle, info);
 }
 /** @internal Registers a real caller/progress facet against its owning physical Store. */
@@ -280,6 +312,7 @@ export function registerTransferCaller(
 ): void {
   if (caller.runtime !== runtime)
     throw new TypeError("Native caller belongs to another physical Store");
+
   callerRecords.set(caller, { caller, runtime, store: handle });
   registerTransferReadable(caller.statusCell, runtime, "query-status-cell", caller);
   registerTransferReadable(caller.status, runtime, "query-status", caller);
@@ -289,12 +322,14 @@ export function registerTransferCaller(
 export function transferReadableCaller(readable: object): TransferCallerRecord | undefined {
   const caller = readableCallers.get(readable);
   const record = caller === undefined ? undefined : callerRecords.get(caller);
+
   if (record !== undefined) assertStoreHandlePublished(record.store);
   return record;
 }
 /** @internal Actual returned acquisition wrapper for a known native caller. */
 export function transferCaller(caller: object): TransferCallerRecord | undefined {
   const record = callerRecords.get(caller);
+
   if (record !== undefined) assertStoreHandlePublished(record.store);
   return record;
 }
@@ -313,8 +348,10 @@ export function transferReadableRole(readable: object): string | undefined {
 /** @internal Looks up a native source already authenticated at its actual creation. */
 export function transferSource(source: object): TransferSourceRegistration | undefined {
   let info = sources.get(source);
+
   if (info === undefined) {
     const binding = streamBindingByHandle.get(source);
+
     if (binding !== undefined) {
       info = {
         graph: binding.context.state.graph,
@@ -325,6 +362,7 @@ export function transferSource(source: object): TransferSourceRegistration | und
       registerTransferSource(source, info);
     }
   }
+
   return info;
 }
 /** @internal Native graph lookup with no public property protocol. */
@@ -350,6 +388,7 @@ export interface TransferAdmission {
 }
 const admissions = new Set<TransferAdmission>();
 let admissionRows: TransferAdmission[] = [];
+
 /** @internal Begins before authored normalization/key callbacks, without creating a Store. */
 export function beginTransferAdmission(
   state: GraphRuntimeState<any>,
@@ -358,6 +397,7 @@ export function beginTransferAdmission(
   input?: unknown,
 ): TransferAdmission {
   const admission = { state, definition, binding, input, active: true };
+
   admissions.add(admission);
   admissionRows = [...admissions];
   return admission;
@@ -381,8 +421,10 @@ export function inheritTransferCoverage<T>(runtime: StoreRuntime<T>): void {
 export function transferHasAdmission(graph: Graph): boolean {
   for (let index = 0; index < admissionRows.length; index += 1) {
     const admission = admissionRows[index]!;
+
     if (admission.active && admission.state.graph === graph) return true;
   }
+
   return false;
 }
 /** @internal Links native original work; logical Promise settlement does not finish it. */
@@ -391,17 +433,21 @@ export function registerTransferWork(target: object, work: object): void {
     stores.get(target) ?? (storeRecords.has(target) ? (target as StoreRuntime<any>) : undefined);
   const targets = runtime !== undefined && target !== runtime ? [target, runtime] : [target];
   let reverse = workTargets.get(work);
+
   if (reverse === undefined) {
     reverse = new Set();
     workTargets.set(work, reverse);
   }
+
   for (const owner of targets) {
     const membership = workMembershipFor(owner);
+
     membership.set.add(work);
     membership.rows = [...membership.set];
     reverse.add(owner);
     noteTransferChange(owner);
   }
+
   if (runtime !== undefined) storeRecord(runtime);
 }
 /** @internal Genuine native context authority, distinct from authored State. */
@@ -411,6 +457,7 @@ export interface TransferAuthority {
   readonly kind: "context-active" | "context-active-cell";
 }
 const authorities = new WeakMap<object, TransferAuthority>();
+
 /** @internal Records the actual context's cells at native construction. */
 export function registerTransferAuthority(
   readable: Readable<unknown>,
@@ -428,6 +475,7 @@ interface ProjectionRecord {
   readonly owner: object;
 }
 const projections = new WeakMap<object, ProjectionRecord>();
+
 /** @internal Registers the actual source generation of a native projection readable. */
 export function registerTransferProjection(
   readable: Readable<unknown>,
@@ -478,6 +526,7 @@ export interface TransferOperation {
 const scopeRecords = new WeakMap<object, ScopeRecord>();
 const operationRecords = new WeakMap<object, OperationRecord>();
 const carrierOperations = new WeakMap<object, OperationRecord>();
+
 /** @internal Actual native dispatch joined before authored predictors or effects. */
 export interface TransferDispatch {
   readonly operation: OperationRecord;
@@ -494,10 +543,14 @@ export function beginTransferDispatch(
 ): TransferDispatch | undefined {
   if ((typeof input !== "object" || input === null) && typeof input !== "function")
     return undefined;
+
   const operation = carrierOperations.get(input);
+
   if (operation === undefined) return undefined;
+
   if (!operation.active || operation.retired)
     throw new TypeError("The native transfer operation is not dispatchable");
+
   const expected = operation.dispatches.find(
     (entry) =>
       entry.input === input &&
@@ -506,8 +559,10 @@ export function beginTransferDispatch(
       entry.source.binding === binding &&
       (source === undefined || entry.sourceHandle === source || entry.source.binding === source),
   );
+
   if (expected === undefined || expected.joined)
     throw new TypeError("Native transfer dispatch has a crossed or repeated role");
+
   expected.joined = true;
   operation.works.add(work);
   operation.version = {};
@@ -523,6 +578,7 @@ export function registerTransferDispatchTarget(
     (scope) =>
       scope.coverage.owner === ownerFor(runtime) && scope.coverage.key === String(runtime.key),
   );
+
   if (!covered) throw new TypeError("Native transfer dispatch reached an uncovered target");
   registerTransferWork(runtime, dispatch.work);
 }
@@ -538,18 +594,24 @@ export function transferStoreAdmissible(runtime: StoreRuntime<any>): boolean {
     coverageFor(runtime)?.operations.size
   )
     return false;
+
   const predictions = reactiveInternal.signalValue(runtime.predictionStack);
+
   for (let index = 0; index < predictions.length; index += 1)
     if (!predictions[index]!.dead) return false;
+
   if (
     runtime.observation !== undefined &&
     reactiveInternal.signalValue(runtime.observation.issue) !== undefined
   )
     return false;
+
   const linked = workMembership.get(runtime)?.rows;
+
   if (linked !== undefined)
     for (let index = 0; index < linked.length; index += 1) {
       const work = linked[index] as { active?: boolean; kind?: string; cleanupFailed?: boolean };
+
       if (
         work.cleanupFailed ||
         (work.active &&
@@ -560,6 +622,7 @@ export function transferStoreAdmissible(runtime: StoreRuntime<any>): boolean {
       )
         return false;
     }
+
   return true;
 }
 
@@ -570,10 +633,12 @@ export function transferStoreEligible(runtime: StoreRuntime<any>): boolean {
 
 function workMembershipFor(target: object): WorkMembership {
   let record = workMembership.get(target);
+
   if (record === undefined) {
     record = { set: new Set(), rows: [] };
     workMembership.set(target, record);
   }
+
   return record;
 }
 function workSet(target: object): Set<object> {
@@ -582,16 +647,21 @@ function workSet(target: object): Set<object> {
 /** @internal Removes only actually finished successful work from target membership. */
 export function releaseTransferWork(work: object): void {
   const physical = work as { active?: boolean; cleanupFailed?: boolean };
+
   if (physical.active || physical.cleanupFailed) return;
   const targets = workTargets.get(work);
+
   if (targets === undefined) return;
+
   for (const target of targets) {
     const record = workMembership.get(target);
+
     if (record === undefined) continue;
     record.set.delete(work);
     record.rows = [...record.set];
     noteTransferChange(target);
   }
+
   workTargets.delete(work);
 }
 
@@ -646,6 +716,7 @@ export function prepareTransferPublication(
     if (phase !== "published") throw new TypeError("Transfer publication has not been published");
     if (delivered) return;
     delivered = true;
+
     try {
       deliverNotifications();
       resolve();
@@ -660,6 +731,7 @@ export function prepareTransferPublication(
   const commit: TransferCommit = Object.freeze(
     Object.assign(Object.create(null), { publish, notifications }),
   );
+
   return Object.freeze({
     seal: (): TransferCommit | undefined => {
       if (phase !== "pending" || !current()) return undefined;
@@ -669,6 +741,7 @@ export function prepareTransferPublication(
     discard: (): void => {
       if (phase !== "pending") return;
       phase = "discarded";
+
       try {
         discardPending();
         resolve();
@@ -714,14 +787,17 @@ export interface TransferScopeSuccessor {
 
 function sourceCurrent(info: TransferSourceRegistration): () => boolean {
   const state = graphs.get(info.graph);
+
   if (state === undefined) throw new TypeError("Unknown native graph");
   const reset = state.resetEpoch;
   const binding = info.binding as { context?: { disposed: boolean } } | undefined;
   const guards = [transferEpochCurrent(state)];
+
   if (binding !== undefined) {
     guards.push(transferEpochCurrent(binding));
     if (binding.context !== undefined) guards.push(transferEpochCurrent(binding.context));
   }
+
   return () => {
     if (state.disposed || state.resetEpoch !== reset || binding?.context?.disposed) return false;
     for (let index = 0; index < guards.length; index += 1) if (!guards[index]!()) return false;
@@ -734,6 +810,7 @@ function authenticSource(
   kind: "query" | "mutation",
 ): TransferSourceRegistration {
   const info = sources.get(source);
+
   if (
     info === undefined ||
     info.graph !== graph ||
@@ -741,6 +818,7 @@ function authenticSource(
     graphs.get(graph) === undefined
   )
     throw new TypeError("Expected a genuine native transfer source on this graph");
+
   return info;
 }
 function scopeAt(
@@ -751,11 +829,13 @@ function scopeAt(
   const owner = info.binding ?? info.graph;
   const addressBook = book(owner);
   let coverage = addressBook.current.get(key);
+
   if (coverage === undefined) {
     coverage = newCoverage(owner, key);
     addressBook.current.set(key, coverage);
     addressBook.version = {};
   }
+
   return scopeRecord(info, coverage, runtime);
 }
 function scopeRecord(
@@ -771,6 +851,7 @@ function scopeRecord(
     incarnation: runtime?.incarnation,
     runtime,
   };
+
   scopeRecords.set(handle, record);
   return record;
 }
@@ -789,8 +870,10 @@ export function createTransferScope(
   actualTarget: QueryStore<any, any>,
 ): TransferScope {
   const info = authenticSource(graph, source, "query");
+
   assertStoreHandlePublished(actualTarget);
   const runtime = stores.get(actualTarget);
+
   if (
     runtime === undefined ||
     runtime.graph !== graph ||
@@ -802,6 +885,7 @@ export function createTransferScope(
     storeSources.get(actualTarget)?.binding !== info.binding
   )
     throw new TypeError("Transfer scope requires the actual source target");
+
   if (!sourceCurrent(info)()) throw new TypeError("Transfer source is no longer current");
   return scopeAt(info, String(runtime.key), runtime).handle;
 }
@@ -824,20 +908,27 @@ export function prepareTransferOperation(
     source: entry.source,
     input: entry.input,
   }));
+
   if (scopeHandles.length === 0 || dispatchRows.length === 0)
     throw new TypeError("An operation requires affected scopes and actual dispatch roles");
+
   const scopeSet = new Set<ScopeRecord>();
   const guards: (() => boolean)[] = [];
+
   for (const handle of scopeHandles) {
     const scope = scopeRecords.get(handle);
+
     if (scope === undefined) throw new TypeError("Fabricated transfer scope");
+
     if (books.get(scope.coverage.owner)?.current.get(scope.coverage.key) !== scope.coverage)
       throw new TypeError("Transfer scope address has not been published");
+
     if (
       scope.runtime !== undefined &&
       (scope.runtime.disposed || scope.runtime.incarnation !== scope.incarnation)
     )
       throw new TypeError("Scope issuance is stale");
+
     scopeSet.add(scope);
     guards.push(sourceCurrent(scope.source));
     guards.push(
@@ -845,11 +936,14 @@ export function prepareTransferOperation(
     );
     if (scope.runtime !== undefined) guards.push(transferEpochCurrent(scope.runtime));
   }
+
   const roles = new Set<string>();
   const carriers = new Set<object>();
   const expected: DispatchExpectation[] = [];
+
   for (const dispatch of dispatchRows) {
     const info = sources.get(dispatch.source);
+
     if (
       info === undefined ||
       info.kind !== "mutation" ||
@@ -862,6 +956,7 @@ export function prepareTransferOperation(
       carrierOperations.has(dispatch.input)
     )
       throw new TypeError("Invalid native mutation dispatch role or carrier");
+
     roles.add(dispatch.role);
     carriers.add(dispatch.input);
     guards.push(sourceCurrent(info));
@@ -873,6 +968,7 @@ export function prepareTransferOperation(
       joined: false,
     });
   }
+
   const handle = Object.freeze(Object.create(null)) as TransferOperation;
   const record: OperationRecord = {
     handle,
@@ -883,6 +979,7 @@ export function prepareTransferOperation(
     retired: false,
     version: {},
   };
+
   operationRecords.set(handle, record);
   const changes: {
     coverage: CoverageRecord;
@@ -891,9 +988,11 @@ export function prepareTransferOperation(
     version: object;
     nextVersion: object;
   }[] = [];
+
   for (const scope of scopeSet)
     if (!changes.some((change) => change.coverage === scope.coverage)) {
       const coverage = scope.coverage;
+
       changes.push({
         coverage,
         previous: coverage.operations,
@@ -902,42 +1001,51 @@ export function prepareTransferOperation(
         nextVersion: {},
       });
     }
+
   const publication = prepareTransferPublication(
     () => {
       if (record.active || record.retired) return false;
       for (let index = 0; index < guards.length; index += 1) if (!guards[index]!()) return false;
+
       for (let index = 0; index < changes.length; index += 1) {
         const change = changes[index]!;
+
         if (
           change.coverage.operations !== change.previous ||
           change.coverage.version !== change.version
         )
           return false;
       }
+
       return true;
     },
     () => {
       for (let index = 0; index < changes.length; index += 1) {
         const change = changes[index]!;
+
         change.coverage.operations = change.next;
         change.coverage.version = change.nextVersion;
       }
+
       record.active = true;
     },
     undefined,
     () => {
       for (const entry of expected)
         if (carrierOperations.get(entry.input) === record) carrierOperations.delete(entry.input);
+
       record.retired = true;
     },
   );
   const result = Object.freeze({ ...publication, operation: handle });
+
   try {
     for (const entry of expected) carrierOperations.set(entry.input, record);
   } catch (cause) {
     publication.discard();
     throw cause;
   }
+
   return result;
 }
 
@@ -969,9 +1077,11 @@ export function prepareTransferScopeSuccessors(
       nextVersion: object;
     }
   >();
+
   for (const entry of successorEntries) {
     const operation = operationRecords.get(entry.operation);
     const predecessor = scopeRecords.get(entry.predecessor);
+
     if (
       operation === undefined ||
       predecessor === undefined ||
@@ -980,17 +1090,22 @@ export function prepareTransferScopeSuccessors(
       !operation.scopes.has(predecessor)
     )
       throw new TypeError("Successor requires unresolved original operation ownership");
+
     const info = authenticSource(entry.graph, entry.source, "query");
+
     if (
       info.definition !== predecessor.source.definition ||
       (info.binding === undefined) !== (predecessor.source.binding === undefined)
     )
       throw new TypeError("Incompatible native successor source");
+
     if (info.binding !== undefined) {
       const oldBinding = predecessor.source.binding as { profile: object };
+
       if ((info.binding as { profile: object }).profile !== oldBinding.profile)
         throw new TypeError("Successor profile differs");
     }
+
     const before = sourceCurrent(info);
     const version = operationVersions.get(operation) ?? operation.version;
     const current = (): boolean =>
@@ -1000,13 +1115,18 @@ export function prepareTransferScopeSuccessors(
       !operation.retired &&
       operation.scopes.has(predecessor) &&
       operation.version === version;
+
     if (!current())
       throw new TypeError("Successor native address is incompatible or changed during preparation");
+
     const definition = info.definition as QueryDefinition<any, any, any, any>;
     const keyForInput = definition.key;
+
     if (!current())
       throw new TypeError("Successor native address is incompatible or changed during preparation");
+
     const key = Reflect.apply(keyForInput, definition, [entry.input]);
+
     if (
       typeof key !== "string" ||
       key.length === 0 ||
@@ -1014,10 +1134,12 @@ export function prepareTransferScopeSuccessors(
       !current()
     )
       throw new TypeError("Successor native address is incompatible or changed during preparation");
+
     guards.push(current);
     operationVersions.set(operation, version);
     const addressBook = book(info.binding ?? info.graph);
     let bookChange = bookChanges.get(addressBook);
+
     if (bookChange === undefined) {
       bookChange = {
         before: addressBook.current,
@@ -1027,13 +1149,17 @@ export function prepareTransferScopeSuccessors(
       };
       bookChanges.set(addressBook, bookChange);
     }
+
     let coverage = bookChange.next.get(key);
+
     if (coverage === undefined) {
       coverage = newCoverage(info.binding ?? info.graph, key);
       bookChange.next.set(key, coverage);
     }
+
     staged.push({ operation, scope: scopeRecord(info, coverage) });
   }
+
   const changes = new Map<
     CoverageRecord,
     {
@@ -1044,8 +1170,10 @@ export function prepareTransferScopeSuccessors(
     }
   >();
   const nextScopes = new Map<OperationRecord, Set<ScopeRecord>>();
+
   for (const { operation, scope } of staged) {
     let change = changes.get(scope.coverage);
+
     if (change === undefined) {
       change = {
         previous: scope.coverage.operations,
@@ -1055,14 +1183,18 @@ export function prepareTransferScopeSuccessors(
       };
       changes.set(scope.coverage, change);
     }
+
     change.next.add(operation);
     let next = nextScopes.get(operation);
+
     if (next === undefined) {
       next = new Set(operation.scopes);
       nextScopes.set(operation, next);
     }
+
     next.add(scope);
   }
+
   const addressRows = [...changes];
   const scopeRows = [...nextScopes];
   const versionRows = [...operationVersions];
@@ -1071,41 +1203,54 @@ export function prepareTransferScopeSuccessors(
   const publication = prepareTransferPublication(
     () => {
       for (let index = 0; index < guards.length; index += 1) if (!guards[index]!()) return false;
+
       for (let index = 0; index < bookRows.length; index += 1) {
         const row = bookRows[index]!;
+
         if (row[0].current !== row[1].before || row[0].version !== row[1].version) return false;
       }
+
       for (let index = 0; index < versionRows.length; index += 1) {
         const [operation, version] = versionRows[index]!;
+
         if (!operation.active || operation.retired || operation.version !== version) return false;
       }
+
       for (let index = 0; index < addressRows.length; index += 1) {
         const [coverage, change] = addressRows[index]!;
+
         if (coverage.operations !== change.previous || coverage.version !== change.version)
           return false;
       }
+
       return true;
     },
     () => {
       for (let index = 0; index < bookRows.length; index += 1) {
         const row = bookRows[index]!;
+
         row[0].current = row[1].next;
         row[0].version = row[1].nextVersion;
       }
+
       for (let index = 0; index < addressRows.length; index += 1) {
         const row = addressRows[index]!;
         const coverage = row[0];
         const change = row[1];
+
         coverage.operations = change.next;
         coverage.version = change.nextVersion;
       }
+
       for (let index = 0; index < scopeRows.length; index += 1) {
         const row = scopeRows[index]!;
+
         row[0].scopes = row[1];
         row[0].version = nextVersions[index]!;
       }
     },
   );
+
   return Object.freeze({
     ...publication,
     scopes: Object.freeze(staged.map((entry) => entry.scope.handle)),
@@ -1122,17 +1267,22 @@ export function prepareTransferOperationRetirement(
   operation: TransferOperation,
 ): TransferPublication {
   const record = operationRecords.get(operation);
+
   if (record === undefined || !record.active || record.retired)
     throw new TypeError("Unknown active transfer operation");
+
   const version = record.version;
   const workRows = [...record.works] as { active: boolean; cleanupFailed: boolean }[];
   const finished = (): boolean => {
     for (let index = 0; index < record.dispatches.length; index += 1)
       if (!record.dispatches[index]!.joined) return false;
+
     for (let index = 0; index < workRows.length; index += 1)
       if (workRows[index]!.active || workRows[index]!.cleanupFailed) return false;
+
     return true;
   };
+
   if (!finished()) throw new TypeError("Native original retirement is still unknown or incomplete");
   const changes: {
     coverage: CoverageRecord;
@@ -1141,10 +1291,12 @@ export function prepareTransferOperationRetirement(
     version: object;
     nextVersion: object;
   }[] = [];
+
   for (const scope of record.scopes)
     if (!changes.some((change) => change.coverage === scope.coverage)) {
       const coverage = scope.coverage;
       const next = new Set(coverage.operations);
+
       next.delete(record);
       changes.push({
         coverage,
@@ -1154,30 +1306,37 @@ export function prepareTransferOperationRetirement(
         nextVersion: {},
       });
     }
+
   const nextVersion = {};
   const retiredScopes = new Set<ScopeRecord>();
   const retiredWorks = new Set<object>();
   const retiredDispatches: readonly DispatchExpectation[] = Object.freeze([]);
+
   return prepareTransferPublication(
     () => {
       if (!record.active || record.retired || record.version !== version || !finished())
         return false;
+
       for (let index = 0; index < changes.length; index += 1) {
         const change = changes[index]!;
+
         if (
           change.coverage.operations !== change.previous ||
           change.coverage.version !== change.version
         )
           return false;
       }
+
       return true;
     },
     () => {
       for (let index = 0; index < changes.length; index += 1) {
         const change = changes[index]!;
+
         change.coverage.operations = change.next;
         change.coverage.version = change.nextVersion;
       }
+
       record.active = false;
       record.retired = true;
       record.version = nextVersion;
@@ -1194,9 +1353,11 @@ export function transferStoreCurrent(
   admittedFailure = false,
 ): () => boolean {
   const targets: object[] = [runtime, runtime.graph.__runtime];
+
   if (runtime.binding !== undefined) {
     targets.push(runtime.binding, runtime.binding.context);
   }
+
   if (runtime.observation !== undefined) targets.push(runtime.observation);
   if (runtime.stream !== undefined) targets.push(runtime.stream);
   if (runtime.boundRetirement !== undefined) targets.push(runtime.boundRetirement);
@@ -1208,6 +1369,7 @@ export function transferStoreCurrent(
   const incarnation = runtime.incarnation;
   const workRows = targets.flatMap((target) => [...(workMembership.get(target)?.rows ?? [])]);
   const workGuards = workRows.map(transferEpochCurrent);
+
   return () => {
     if (
       runtime.graph.__runtime.resetEpoch !== reset ||
@@ -1219,9 +1381,12 @@ export function transferStoreCurrent(
       (runtime.baseAvailable && !runtime.transferEligible && !(admittedFailure && runtime.failing))
     )
       return false;
+
     for (let index = 0; index < guards.length; index += 1) if (!guards[index]!()) return false;
+
     for (let index = 0; index < workGuards.length; index += 1)
       if (!workGuards[index]!()) return false;
+
     return true;
   };
 }
@@ -1243,6 +1408,7 @@ export function transferStoreSemanticCurrent(
   const reset = runtime.graph.__runtime.resetEpoch;
   const incarnation = prospective?.incarnation ?? runtime.incarnation;
   const base = prospective?.base ?? runtime.baseAvailable;
+
   return () =>
     !runtime.disposed &&
     !runtime.graph.__runtime.disposed &&

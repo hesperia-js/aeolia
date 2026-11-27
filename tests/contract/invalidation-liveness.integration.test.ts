@@ -35,24 +35,30 @@ test.each(["observed", "unobserved", "unsubscribed", "metadata", "eager"] as con
         : mode === "metadata"
           ? subscribe(store.status, () => undefined)
           : () => undefined;
+
     try {
       const initial = store.ready;
+
       backend.resolve(backend.calls[0]!, []);
       await initial;
       if (mode === "unsubscribed") stop();
       const mutation = graph.api.create("Write a test");
+
       expect(backend.calls.filter((call) => call.name === "todos.list")).toHaveLength(1);
       backend.resolve(backend.calls[1]!, undefined);
       await mutation;
       const refreshes = mode === "observed" || mode === "eager";
+
       expect(backend.calls.filter((call) => call.name === "todos.list")).toHaveLength(
         refreshes ? 2 : 1,
       );
       expect(store.status.get()).toBe(refreshes ? "revalidating" : "stale");
       expect(store.pending.get()).toBe(refreshes);
       expect(store.value.get()).toStrictEqual([]);
+
       if (refreshes) {
         const ready = store.ready;
+
         backend.resolve(backend.calls[2]!, ["Write a test"]);
         expect(await ready).toStrictEqual(["Write a test"]);
         expect(store.value.get()).toStrictEqual(["Write a test"]);
@@ -85,12 +91,15 @@ test.each(["restore", "leave-again", "fail"] as const)(
     let stop = subscribe(store.value, (value) => values.push(value));
     let stopSecond = () => {};
     let stopStatus = () => {};
+
     try {
       const initial = store.ready;
+
       backend.resolve(backend.calls[0]!, ["Pending"]);
       await initial;
       stop();
       const mutation = graph.api.save();
+
       backend.resolve(backend.calls[1]!, undefined);
       await mutation;
       expect(store.status.get()).toBe("stale");
@@ -102,6 +111,7 @@ test.each(["restore", "leave-again", "fail"] as const)(
       stop = subscribe(store.value, (value) => values.push(value));
       stopSecond = subscribe(store.value, () => {});
       expect(backend.calls).toHaveLength(2);
+
       if (mode === "leave-again") {
         stop();
         stopSecond();
@@ -122,8 +132,10 @@ test.each(["restore", "leave-again", "fail"] as const)(
       expect(backend.calls).toHaveLength(3);
       const ready = store.ready.catch((error: unknown) => error);
       const failure = new Error("backend unavailable");
+
       if (mode === "fail") backend.reject(backend.calls[2]!, failure);
       else backend.resolve(backend.calls[2]!, ["Completed"]);
+
       expect(await ready).toStrictEqual(mode === "fail" ? failure : ["Completed"]);
       expect(store.status.get()).toBe(mode === "fail" ? "failed" : "ready");
       expect(values.at(-1)).toStrictEqual(mode === "fail" ? ["Pending"] : ["Completed"]);

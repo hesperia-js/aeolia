@@ -47,6 +47,7 @@ function waitForCaptureNotice(
       if (matches(notice)) resolve(notice);
     });
   });
+
   return pending.finally(() => stop?.());
 }
 
@@ -69,6 +70,7 @@ function streamMember<T>(graph: Graph): StreamStore<T> {
   const api = graph.api as unknown as {
     readonly stream: (input: void, options?: ValueOptions<T>) => StreamStore<T>;
   };
+
   return api.stream(undefined);
 }
 
@@ -78,6 +80,7 @@ describe("stream stores", () => {
     const graph = streamGraph(numberStream(backend, "reset-available"));
     const store = streamMember<number>(graph);
     const stop = subscribe(store.available, () => undefined);
+
     try {
       expect(store.available.get()).toBe(false);
       expect(backend.calls).toHaveLength(1);
@@ -130,8 +133,10 @@ describe("stream stores", () => {
       const graph = createGraph({
         contract: defineContract({ namespace: "cancel-setup", operations: { stream } }),
       });
+
       try {
         const cancelled = graph.api.stream(undefined, { initial: 7 });
+
         expect(firstSignal!.reason).toBe(reason);
         expect(cancelled.status.get()).toBe("closed");
         expect(cancelled.pending.get()).toBe(false);
@@ -144,12 +149,14 @@ describe("stream stores", () => {
         const stop = subscribe(successor.value, (value) => {
           if (value === 8) received.resolve();
         });
+
         try {
           backend.emit("cancel-setup.successor", 8);
           await received.promise;
         } finally {
           stop();
         }
+
         expect(successor.value.get()).toBe(8);
         expect(successor.status.get()).toBe("live");
         expect(backend.calls[0]!.aborted).toBe(false);
@@ -191,9 +198,11 @@ describe("stream stores", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "cancel-successor", operations: { stream } }),
     });
+
     try {
       const store = graph.api.stream(undefined, { initial: 4 });
       const reason = new Error("cancel old source");
+
       graph.cancelPending(reason);
       expect(opens).toBe(2);
       expect(returns).toBe(1);
@@ -232,6 +241,7 @@ describe("stream stores", () => {
     const graph = streamGraph(stream);
 
     const first = streamMember<number>(graph);
+
     expect(backend.calls).toHaveLength(1);
     expect(first.status.get()).toBe("opening");
     expect(first.pending.get()).toBe(true);
@@ -241,6 +251,7 @@ describe("stream stores", () => {
     // StreamStore view over the same keyed Store and stream lifecycle.
     first.value.get();
     const second = streamMember<number>(graph);
+
     expect(backend.calls).toHaveLength(1);
     expect(second.value).toBe(first.value);
     expect(second.status.get()).toBe("opening");
@@ -302,6 +313,7 @@ describe("stream stores", () => {
     expect(first.value.get()).toBe(1);
 
     const reopened = streamMember<number>(graph);
+
     expect(backend.calls).toHaveLength(2);
     expect(reopened.status.get()).toBe("opening");
     expect(reopened.pending.get()).toBe(true);
@@ -311,12 +323,14 @@ describe("stream stores", () => {
     expect(first.status.get()).toBe("opening");
 
     const streamFailure = new Error("source failed");
+
     backend.end("lifecycle", streamFailure);
     await flush();
     expect(reopened.status.get()).toBe("failed");
     expect(reopened.pending.get()).toBe(false);
     expect(reopened.error.get()).toBe(streamFailure);
     const third = streamMember<number>(graph);
+
     expect(backend.calls).toHaveLength(3);
     expect(third.status.get()).toBe("opening");
     graph.dispose();
@@ -333,6 +347,7 @@ describe("stream stores", () => {
     });
     const graph = streamGraph(stream);
     const store = streamMember<number>(graph);
+
     expect(store.status.get()).toBe("failed");
     expect(store.pending.get()).toBe(false);
     expect(store.error.get()).toBe(reason);
@@ -387,6 +402,7 @@ describe("stream stores", () => {
 
     const first = api.stream(undefined, { abortSignal: opener.signal });
     const call = backend.calls[0]!;
+
     api.stream(undefined, { abortSignal: joiner.signal });
     joiner.abort();
     expect(call.aborted).toBe(false);
@@ -396,6 +412,7 @@ describe("stream stores", () => {
     expect(first.status.get()).toBe("closed");
 
     const reopened = api.stream(undefined);
+
     expect(backend.calls).toHaveLength(2);
     expect(reopened.status.get()).toBe("opening");
     graph.dispose();
@@ -406,12 +423,14 @@ describe("stream stores", () => {
     const stream = numberStream(backend, "pre-aborted");
     const graph = streamGraph(stream);
     const opener = new AbortController();
+
     opener.abort();
     const api = graph.api as unknown as {
       readonly stream: (input: void, options?: ValueOptions<number>) => StreamStore<number>;
     };
 
     const store = api.stream(undefined, { abortSignal: opener.signal });
+
     expect(backend.calls).toHaveLength(0);
     expect(store.status.get()).toBe("closed");
     graph.dispose();
@@ -476,6 +495,7 @@ describe("stream stores", () => {
     const store = api.stream(undefined, { abortSignal: owner.signal });
     const stop = watch(store.status, () => undefined);
     const reset = graph.reset();
+
     expect(backend.calls).toHaveLength(2);
     expect(signals).toHaveLength(2);
     expect(backend.calls[0]!.aborted).toBe(true);
@@ -499,9 +519,11 @@ describe("stream stores", () => {
       readonly stream: (input: void, options?: ValueOptions<number>) => StreamStore<number>;
     };
     const preAbortedOwner = new AbortController();
+
     preAbortedOwner.abort();
     const closed = secondApi.stream(undefined, { abortSignal: preAbortedOwner.signal });
     const stopClosed = watch(closed.status, () => undefined);
+
     await expect(secondGraph.reset()).resolves.toBeUndefined();
     expect(preAbortedBackend.calls).toHaveLength(0);
     expect(closed.status.get()).toBe("closed");
@@ -516,11 +538,13 @@ describe("stream stores", () => {
     const stored = streamMember<number>(graph);
     const runtime = graphInternal.runtimeOf(stored);
     const before = runtime.generation;
+
     backend.emit("zero-max", 2);
     await flush();
     expect(runtime.generation).toBe(before + 1);
     stored.set(3);
     const afterWrite = runtime.generation;
+
     backend.emit("zero-max", 4);
     await flush();
     expect(runtime.generation).toBe(afterWrite + 1);
@@ -588,6 +612,7 @@ describe("stream stores", () => {
           captureState,
           (notice) => notice.kind === "closed" || notice.kind === "failed",
         );
+
         if (ending.kind === "closed") {
           if (resolveNext === undefined) throw new Error("The source has no pending first next");
           resolveNext({ done: true, value: undefined });
@@ -595,7 +620,9 @@ describe("stream stores", () => {
           if (rejectNext === undefined) throw new Error("The source has no pending first next");
           rejectNext(ending.cause);
         }
+
         const notice = await terminal;
+
         expect(notice).toStrictEqual(ending);
         expect(nextCalls).toBe(1);
         expect(source.status.get()).toBe(ending.kind);
@@ -624,6 +651,7 @@ describe("stream stores", () => {
         source: {
           open: (): AsyncIterable<Event> => {
             const session: Session = { nextCalls: 0, returnCalls: 0 };
+
             sessions.push(session);
             return {
               [Symbol.asyncIterator]() {
@@ -674,6 +702,7 @@ describe("stream stores", () => {
         const firstCheckpoint = capturePositionedStore(first, [firstProjection] as const);
         const firstState = observePositionedStoreCaptureState(firstCheckpoint);
         const firstNotices: PositionedStoreCaptureNotice[] = [];
+
         stopFirst = subscribe(firstState, (notice) => firstNotices.push(notice));
         expect(firstNotices[0]?.kind).toBe("changed");
         const terminal = waitForCaptureNotice(
@@ -683,11 +712,14 @@ describe("stream stores", () => {
 
         if (mode === "reset") await graph.reset();
         else owner.abort(new Error("owner stopped"));
+
         const closed = await terminal;
+
         expect(closed).toStrictEqual({ kind: "closed" });
         expect(firstNotices.map((notice) => notice.kind)).toStrictEqual(["changed", "closed"]);
 
         const lateNotices: PositionedStoreCaptureNotice[] = [];
+
         stopLate = subscribe(firstState, (notice) => lateNotices.push(notice));
         expect(lateNotices).toStrictEqual([closed]);
 
@@ -700,6 +732,7 @@ describe("stream stores", () => {
         const reopenedCheckpoint = capturePositionedStore(reopened, [reopenedProjection] as const);
         const reopenedState = observePositionedStoreCaptureState(reopenedCheckpoint);
         const reopenedNotices: PositionedStoreCaptureNotice[] = [];
+
         stopReopened = subscribe(reopenedState, (notice) => reopenedNotices.push(notice));
         expect(reopenedCheckpoint.sessionIdentity).not.toBe(firstCheckpoint.sessionIdentity);
         expect(reopenedNotices[0]?.kind).toBe("changed");

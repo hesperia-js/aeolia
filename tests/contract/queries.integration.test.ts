@@ -44,12 +44,14 @@ describe("query stores and freshness", () => {
       contract: defineContract({ namespace: "operations", operations: { query } }),
     });
     const reached = graph.at("users/read-only");
+
     expect(reached.value.get()).toBeUndefined();
     expect(reached.value.peek()).toBeUndefined();
     await flush();
     expect(backend.calls).toHaveLength(0);
 
     const first = graph.api.query({ id: "read-only" });
+
     expect(backend.calls).toHaveLength(1);
     expect(first.status.get()).toBe("fetching");
     expect(first.pending.get()).toBe(true);
@@ -75,6 +77,7 @@ describe("query stores and freshness", () => {
     });
     const short = graph.api.query({ id: "7" }, { revalidateAfterMs: 5 });
     const long = graph.api.query({ id: "7" }, { revalidateAfterMs: 50 });
+
     expect(short.value).toBe(long.value);
     expect(short.key).toBe(long.key);
     expect(short.pending).not.toBe(long.pending);
@@ -90,6 +93,7 @@ describe("query stores and freshness", () => {
     expect(long.value.get()).toEqual({ id: "7" });
     expect(backend.calls).toHaveLength(1);
     const refresh = short.revalidate();
+
     expect(short.status.get()).toBe("revalidating");
     expect(short.pending.get()).toBe(true);
     expect(long.status.get()).toBe("revalidating");
@@ -112,6 +116,7 @@ describe("query stores and freshness", () => {
     const input = { id: "same-object" };
     const slow = graph.api.query(input, { revalidateAfterMs: 100 });
     const fast = graph.api.query(input, { revalidateAfterMs: 10 });
+
     backend.resolve(backend.calls[0]!, { id: "base" });
     await flush();
     const stop = watch(slow.value, () => undefined);
@@ -136,6 +141,7 @@ describe("query stores and freshness", () => {
     });
     const short = graph.api.query(undefined, { revalidateAfterMs: 5 });
     const long = graph.api.query(undefined, { revalidateAfterMs: 50 });
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
 
@@ -160,6 +166,7 @@ describe("query stores and freshness", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "operations", operations: { query } }),
     });
+
     graph.api.query(undefined, { initial: 1 });
     expect(() => graph.api.query(undefined, { snapshot: false })).not.toThrow();
     expect(snapshot(graph).entries).not.toHaveProperty("identity");
@@ -180,10 +187,12 @@ describe("query stores and freshness", () => {
     const contract = defineContract({ namespace: "operations", operations: { query } });
 
     const equalsGraph = createGraph({ contract });
+
     expect(() => equalsGraph.api.query(undefined, { equals: callerEquals })).toThrow("equals");
     equalsGraph.dispose();
 
     const snapshotGraph = createGraph({ contract });
+
     expect(() => snapshotGraph.api.query(undefined, { snapshot: false })).toThrow("snapshot");
     snapshotGraph.dispose();
   });
@@ -232,8 +241,10 @@ describe("query stores and freshness", () => {
       contract: defineContract({ namespace: "operations", operations: { query, mutation } }),
     });
     const store = graph.api.query(undefined);
+
     store.set(1);
     const settlement = graph.api.mutation(undefined);
+
     expect(store.value.get()).toBe(2);
     let received: number | undefined;
 
@@ -265,6 +276,7 @@ describe("query stores and freshness", () => {
       contract: defineContract({ namespace: "operations", operations: { query } }),
     });
     const first = graph.api.query({ page: 1 }, { initial: 0 });
+
     graph.api.query({ page: 2 });
     expect(backend.calls).toHaveLength(0);
     const stop = watch(first.value, () => undefined);
@@ -289,9 +301,11 @@ describe("query stores and freshness", () => {
       contract: defineContract({ namespace: "operations", operations: { query } }),
     });
     const first = graph.api.query({ id: "first" });
+
     backend.resolve(backend.calls[0]!, { id: "first" });
     await flush();
     const stop = watch(first.value, () => undefined);
+
     await flush();
     jest.advanceTimersByTime(11);
     expect(backend.calls).toHaveLength(2);
@@ -318,6 +332,7 @@ describe("query stores and freshness", () => {
       contract: defineContract({ namespace: "operations", operations: { query } }),
     });
     const store = graph.api.query(undefined);
+
     expect(backend.calls).toHaveLength(1);
     const stop = watch(store.value, () => undefined);
 
@@ -345,9 +360,11 @@ describe("query stores and freshness", () => {
     });
     const held = graph.api.query({ id: "collect" });
     const base = graph.at("users/collect");
+
     backend.resolve(backend.calls[0]!, { id: "collect" });
     await flush();
     const stop = watch(held.value, () => undefined);
+
     stop();
     await flush();
     jest.advanceTimersByTime(11);
@@ -355,6 +372,7 @@ describe("query stores and freshness", () => {
     expect(graph.at("users/collect")).toBe(base);
 
     const revalidation = held.revalidate();
+
     expect(backend.calls).toHaveLength(2);
     backend.resolve(backend.calls[1]!, { id: "refilled" });
     await revalidation;
@@ -372,8 +390,10 @@ describe("query stores and freshness", () => {
     const store = graph.api.query({ id: "supersede" });
     const first = backend.calls[0]!;
     const firstRevalidate = store.revalidate();
+
     await flush();
     const second = backend.calls[1]!;
+
     expect(first.aborted).toBe(true);
     backend.reject(first, new Error("superseded"));
     await flush();
@@ -393,17 +413,20 @@ describe("query stores and freshness", () => {
     });
     const store = graph.api.query({ id: "failure" });
     const initial = backend.calls[0]!;
+
     backend.resolve(initial, { id: "base" });
     await flush();
     const revalidation = store.revalidate();
     const call = backend.calls[1]!;
     const error = new Error("offline");
+
     backend.reject(call, error);
     await expect(revalidation).resolves.toBeUndefined();
     expect(store.error.get()).toBe(error);
     expect(store.status.get()).toBe("failed");
     expect(store.value.peek()).toEqual({ id: "base" });
     const retry = store.revalidate();
+
     expect(store.status.get()).toBe("revalidating");
     expect(store.pending.get()).toBe(true);
     backend.resolve(backend.calls[2]!, { id: "recovered" });
@@ -431,6 +454,7 @@ describe("query stores and freshness", () => {
     });
     const refresh = store.revalidate();
     const call = backend.calls[0]!;
+
     store.set(local);
     expect(call.aborted).toBe(false);
     expect(notifications).toBe(0);
@@ -458,6 +482,7 @@ describe("query stores and freshness", () => {
       contract: defineContract({ namespace: "operations", operations: { query } }),
     });
     const store = graph.api.query({ id: "direct-deadline" });
+
     backend.resolve(backend.calls[0]!, { id: "remote" });
     await flush();
     const stop = watch(store.value, () => undefined);
@@ -489,9 +514,11 @@ describe("query stores and freshness", () => {
     });
     const store = graph.api.query({ id: "moved-past" });
     const first = backend.calls[0]!;
+
     store.set({ id: "local" });
     jest.setSystemTime(11);
     const refreshed = graph.api.query({ id: "moved-past" }, { revalidateAfterMs: 10 });
+
     expect(backend.calls).toHaveLength(2);
     expect(first.aborted).toBe(true);
     backend.resolve(first, { id: "late" });

@@ -44,18 +44,21 @@ export function storeEquals<T>(
   const incarnation = runtime.incarnation;
   const generation = runtime.generation;
   let equal: boolean;
+
   try {
     equal = runtime.equals(a, b);
   } catch {
     graphFault(runtime.graph.__runtime, new Fault("equals", [runtime.key as string]));
     equal = false;
   }
+
   // Equality runs before signal storage; a revoked bound write must not follow its callout.
   if (
     runtime.binding !== undefined &&
     (runtime.disposed || runtime.incarnation !== incarnation || runtime.generation !== generation)
   )
     return true;
+
   return equal;
 }
 
@@ -75,27 +78,34 @@ export function observeStoreReadable<T>(
     assertStoreOpen(runtime);
     touch(runtime);
   });
+
   runtime.readStops.push(readStop);
   const livenessStop = reactiveInternal.onLivenessChange(readable, (live) => {
     runtime.liveReadableCount += live ? 1 : -1;
     if (runtime.liveReadableCount < 0) runtime.liveReadableCount = 0;
+
     if (observation.metadata === true) {
       runtime.metadataReadableCount += live ? 1 : -1;
       if (runtime.metadataReadableCount < 0) runtime.metadataReadableCount = 0;
     }
+
     if (observation.isValue === true) runtime.valueLive = live;
+
     if (runtime.stream !== undefined) {
       if (live) runtime.stream.unobservedSince = undefined;
       else if (!isLive(runtime)) runtime.stream.unobservedSince = Date.now();
     }
+
     if (live) {
       touch(runtime);
       if (observation.metadata !== true) runtime.onReadableActivation?.();
       if (observation.armsFreshness === true) armStoreTimer(runtime);
     }
+
     updateCollectionCandidate(runtime);
     scheduleSweep(state);
   });
+
   runtime.livenessStops.push(livenessStop);
   return [readStop, livenessStop];
 }
@@ -107,9 +117,12 @@ export function subscribeStore<T>(
   const presentValue = computed<symbol | T | undefined>(
     () => {
       runtime.lifecycle.get();
+
       if (runtime.disposed || runtime.graph.__runtime.disposed || runtime.binding?.context.disposed)
         return STORE_ABSENT;
+
       const value = runtime.value.get();
+
       if (!runtime.store.available.get()) return STORE_ABSENT;
       return value;
     },
@@ -118,6 +131,7 @@ export function subscribeStore<T>(
       label: `store:${String(runtime.key)}:subscription-value`,
     },
   );
+
   return subscribe(presentValue, (value) => {
     if (value !== STORE_ABSENT) observer(value as T);
   });
@@ -131,11 +145,14 @@ export function directWrite<T>(
   assertStoreOpen(runtime);
   reactiveInternal.assertWritesAllowed(runtime.committed);
   nextGeneration(runtime.generation);
+
   if (runtime.stream?.positioned !== undefined) {
     noteTransferChange(runtime);
     runtime.stream.positioned.diverged = true;
   }
+
   nextValueRevision(runtime.valueRevision);
+
   if (runtime.binding === undefined) {
     interact(runtime.graph.__runtime);
     issue(runtime);
@@ -143,6 +160,7 @@ export function directWrite<T>(
     issue(runtime);
     interact(runtime.graph.__runtime);
   }
+
   // Direct writes issue a generation but intentionally do not abort a request.
   try {
     recordLanding(runtime, value, undefined, expectedSession);
@@ -207,6 +225,7 @@ export function makeStore<T>(
       const committedValue = committed.get();
       const predictions = predictionStack.get();
       let result = committedValue;
+
       for (const prediction of predictions) result = prediction.apply(result);
       return result;
     },
@@ -223,6 +242,7 @@ export function makeStore<T>(
       const revision = runtime.valueRevision;
       const incarnation = runtime.incarnation;
       const epoch = state.resetEpoch;
+
       reactiveInternal.nativePeek(
         folded,
         () =>
@@ -258,6 +278,7 @@ export function makeStore<T>(
       noteTransferChange(runtime);
       interact(state);
       const addressWrite = beginStoreAddress(runtime);
+
       try {
         directWrite(runtime, next(reactiveInternal.signalValue(runtime.committed)));
       } finally {
@@ -265,6 +286,7 @@ export function makeStore<T>(
       }
     },
   };
+
   Object.defineProperty(store, storeSubscribe, {
     configurable: false,
     enumerable: false,
@@ -322,6 +344,7 @@ export function makeStore<T>(
     disposed: false,
   };
   const report = (fault: Fault): void => graphFault(state, fault);
+
   for (const readable of [
     committed,
     predictionStack,
@@ -357,10 +380,13 @@ export function makeStore<T>(
 export function peekStore<T>(store: Store<T>): StoreCapture<T> {
   assertStoreHandlePublished(store);
   const runtime = runtimeByStore.get(store) as StoreRuntime<T> | undefined;
+
   if (runtime === undefined) throw new TypeError("The value is not an Aeolia store");
   const bound = boundStreamByStore.get(store);
+
   if (bound !== undefined) {
     assertBindingContextOpen(bound.binding.context);
+
     if (
       bound.phase !== "active" ||
       bound.session.ended ||
@@ -368,6 +394,7 @@ export function peekStore<T>(store: Store<T>): StoreCapture<T> {
     )
       throw new TypeError("The bound stream wrapper no longer has active session authority");
   }
+
   return captureStoreRuntime(runtime);
 }
 
@@ -383,18 +410,22 @@ export function getOrCreateStore<T>(
   if (binding?.context.disposed) throw new Fault("disposed", [String(state.graph.id)]);
   const existing =
     binding === undefined ? state.stores.get(String(key)) : binding.stores.get(String(key));
+
   if (existing != null) {
     inheritTransferCoverage(existing as StoreRuntime<T>);
     if (definition != null) configureDeclaredStore(existing as StoreRuntime<T>, definition);
     if (acquire) admitStore(existing);
     return existing as StoreRuntime<T>;
   }
+
   const runtime = makeStore(state, key, definition, binding);
+
   if (!acquire && definition === undefined) {
     noteTransferChange(runtime);
     runtime.incarnation = undefined;
     runtime.dropped = true;
   }
+
   inheritTransferCoverage(runtime);
   changeBoundAddress(runtime);
   if (binding !== undefined) binding.stores.set(String(key), runtime as StoreRuntime<unknown>);
@@ -411,6 +442,7 @@ export function admitDetachedStore<T>(runtime: StoreRuntime<T>): object {
   assertStoreOpen(runtime);
   const state = runtime.graph.__runtime;
   const graphKey = runtime.binding === undefined ? String(runtime.key) : runtime.identity;
+
   if (
     state.stores.get(graphKey) === runtime ||
     runtime.binding?.stores.get(String(runtime.key)) === runtime ||
@@ -419,11 +451,13 @@ export function admitDetachedStore<T>(runtime: StoreRuntime<T>): object {
     runtime.callers.length > 0
   )
     throw new TypeError("Only an unexposed empty Store can be passively admitted");
+
   if (runtime.incarnation === undefined || runtime.dropped) {
     noteTransferChange(runtime);
     runtime.incarnation = {};
     runtime.dropped = false;
   }
+
   return runtime.incarnation;
 }
 

@@ -71,6 +71,7 @@ function until<T>(readable: Readable<T>, matches: (value: T) => boolean): Promis
   return new Promise((resolve) => {
     let done = false;
     let stop: () => void = () => undefined;
+
     stop = subscribe(readable, (value) => {
       if (done || !matches(value)) return;
       done = true;
@@ -103,9 +104,11 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.value"),
     });
     const source = createGraph({ contract: queryContract({ query }) });
+
     source.api.query(undefined, { initial: value });
     const encoded = snapshot(source);
     const root = encoded.entries["realm/value"]!.value as Record<string, unknown>;
+
     expect(root.date).toEqual({ $ref: "/map/$map/0/0" });
     expect((root.map as { $map: unknown[][] }).$map[0]![0]).toEqual({
       $date: "2024-01-02T03:04:05.000Z",
@@ -116,13 +119,17 @@ describe("realm snapshots and adoption", () => {
 
     const target = createGraph({ contract: queryContract({ query }) });
     const report = adopt(target, encoded);
+
     expect(report.adopted.map(String)).toEqual(["realm/value"]);
     const decoded = target.at("realm/value").value.get() as Record<string, unknown>;
+
     expect(decoded.date).toBeInstanceOf(Date);
     const decodedMap = decoded.map as Map<unknown, unknown>;
     const decodedKey = [...decodedMap.keys()][0]!;
+
     expect(decodedKey === decoded.date).toBe(true);
     const decodedSet = decodedMap.get(decodedKey) as Set<number>;
+
     expect(decodedSet).toBeInstanceOf(Set);
     expect([...decodedSet][0]).toBeNaN();
     expect(Object.is(decoded.negativeZero, -0)).toBe(true);
@@ -135,10 +142,12 @@ describe("realm snapshots and adoption", () => {
   it("round-trips cycles, aliases, sparse arrays, and the $plain escape", () => {
     const backend = testBackend();
     const cyclic: Record<string, unknown> = {};
+
     cyclic.self = cyclic;
     const alias = { value: 7 };
     const dollar: Record<string, unknown> = { $status: "ok" };
     const array = Array.from<unknown>({ length: 2 });
+
     array[1] = alias;
     const query = createQuery({
       name: "realm.graph",
@@ -146,17 +155,22 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.graph"),
     });
     const source = createGraph({ contract: queryContract({ query }) });
+
     source.api.query(undefined, { initial: { cyclic, alias, again: alias, dollar, array } });
     const encoded = snapshot(source);
     const root = encoded.entries["realm/graph"]!.value as Record<string, unknown>;
+
     expect(root.dollar).toEqual({ $plain: { $status: "ok" } });
     expect((root.cyclic as Record<string, unknown>).self).toEqual({ $ref: "/cyclic" });
     const target = createGraph({ contract: queryContract({ query }) });
+
     adopt(target, encoded);
     const decoded = target.at("realm/graph").value.get() as Record<string, unknown>;
+
     expect((decoded.cyclic as Record<string, unknown>).self).toBe(decoded.cyclic);
     expect(decoded.alias).toBe(decoded.again);
     const decodedArray = decoded.array as unknown[];
+
     expect(decodedArray).toHaveLength(2);
     expect(decodedArray[0]).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(decodedArray, "0")).toBe(true);
@@ -168,6 +182,7 @@ describe("realm snapshots and adoption", () => {
   it("handles invalid dates and Date values from another realm", () => {
     const backend = testBackend();
     const foreignDate = vm.runInNewContext("new Date(0)") as Date;
+
     expect(foreignDate instanceof Date).toBe(false);
     const query = createQuery({
       name: "realm.date",
@@ -175,15 +190,19 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.date"),
     });
     const source = createGraph({ contract: queryContract({ query }) });
+
     source.api.query(undefined, { initial: { foreignDate, invalid: new Date(Number.NaN) } });
     const encoded = snapshot(source);
+
     expect(encoded.entries["realm/date"]!.value).toEqual({
       foreignDate: { $date: "1970-01-01T00:00:00.000Z" },
       invalid: { $date: null },
     });
     const target = createGraph({ contract: queryContract({ query }) });
+
     adopt(target, encoded);
     const value = target.at("realm/date").value.get() as Record<string, Date>;
+
     expect(value.foreignDate).toBeInstanceOf(Date);
     expect(value.foreignDate!.getTime()).toBe(0);
     expect(value.invalid).toBeInstanceOf(Date);
@@ -206,10 +225,12 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.second"),
     });
     const source = createGraph({ contract: queryContract({ first, second }) });
+
     source.api.first(undefined, { initial: shared });
     source.api.second(undefined, { initial: shared });
     const encoded = snapshot(source);
     const target = createGraph({ contract: queryContract({ first, second }) });
+
     adopt(target, encoded);
     expect(target.at("realm/first").value.get()).not.toBe(target.at("realm/second").value.get());
     source.dispose();
@@ -219,6 +240,7 @@ describe("realm snapshots and adoption", () => {
   it("keeps own prototype-looking keys and ignores symbol keys", () => {
     const backend = testBackend();
     const value: Record<string, unknown> = {};
+
     Object.defineProperty(value, "__proto__", {
       value: { safe: true },
       enumerable: true,
@@ -228,6 +250,7 @@ describe("realm snapshots and adoption", () => {
     value.visible = "yes";
     value["$tag"] = "literal";
     const dropped = Symbol("dropped");
+
     (value as Record<PropertyKey, unknown>)[dropped] = "gone";
     const query = createQuery({
       name: "realm.keys",
@@ -235,11 +258,14 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.keys"),
     });
     const source = createGraph({ contract: queryContract({ query }) });
+
     source.api.query(undefined, { initial: value });
     const encoded = snapshot(source);
     const target = createGraph({ contract: queryContract({ query }) });
+
     adopt(target, encoded);
     const decoded = target.at("realm/keys").value.get() as Record<string, unknown>;
+
     expect(Object.keys(decoded)).toEqual(["__proto__", "visible", "$tag"]);
     expect(decoded["__proto__"]).toEqual({ safe: true });
     expect(Object.getPrototypeOf(decoded)).toBe(Object.prototype);
@@ -252,6 +278,7 @@ describe("realm snapshots and adoption", () => {
     const contract = defineContract({ namespace: "realm-tests", operations: {} });
     const graph = createGraph({ contract });
     const entries: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+
     entries.bad = { value: { $nope: true }, generation: 0, age: 0 };
     entries.badPayload = { value: { $date: 5 }, generation: 0, age: 0 };
     entries.good = { value: { ok: true }, generation: 0, age: 0 };
@@ -261,6 +288,7 @@ describe("realm snapshots and adoption", () => {
       encoding: "aeolia-tagged/1",
       entries,
     } as never);
+
     expect(report.adopted.map(String)).toEqual(["good"]);
     expect(report.skipped.map(String)).toEqual(["bad", "badPayload"]);
     expect(graph.at("good").value.get()).toEqual({ ok: true });
@@ -276,18 +304,21 @@ describe("realm snapshots and adoption", () => {
       encoding: "aeolia-tagged/1" as EncodingId,
       entries: {},
     };
+
     for (const candidate of [
       { ...valid, version: 2 },
       { ...valid, encoding: "future/2" },
       { ...valid, namespace: "other" },
     ]) {
       expect(() => adopt(graph, candidate as Snapshot)).toThrow(Fault);
+
       try {
         adopt(graph, candidate as Snapshot);
       } catch (error) {
         expect((error as Fault).kind).toBe("snapshot");
       }
     }
+
     expect(Object.keys(snapshot(graph).entries)).toHaveLength(0);
     graph.dispose();
   });
@@ -307,6 +338,7 @@ describe("realm snapshots and adoption", () => {
       encoding: "aeolia-tagged/1",
       entries,
     } as never);
+
     expect(report.skipped.map(String)).toEqual([
       "negativeAge",
       "fractionalGeneration",
@@ -321,6 +353,7 @@ describe("realm snapshots and adoption", () => {
     let inOuter = false;
     let comparatorCalls = 0;
     let childAttempted = false;
+
     type ChildOutcome =
       | { readonly kind: "not-called" }
       | { readonly kind: "returned" }
@@ -335,8 +368,10 @@ describe("realm snapshots and adoption", () => {
       snapshot: true,
       equals: (previous, proposed) => {
         if (inOuter) comparatorCalls += 1;
+
         if (inOuter && !childAttempted) {
           childAttempted = true;
+
           try {
             writeLater(99);
             childOutcomes.push({ kind: "returned" });
@@ -344,6 +379,7 @@ describe("realm snapshots and adoption", () => {
             childOutcomes.push({ kind: "threw", error });
           }
         }
+
         return Object.is(previous, proposed);
       },
     });
@@ -351,9 +387,11 @@ describe("realm snapshots and adoption", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "realm-tests", operations: { first, later } }),
     });
+
     try {
       const firstStore = graph.api.first();
       const laterStore = graph.api.later();
+
       writeLater = (value) => laterStore.set(value);
       adopt(graph, {
         version: 1,
@@ -364,6 +402,7 @@ describe("realm snapshots and adoption", () => {
         },
       } as never);
       const before = snapshot(graph);
+
       expect(before.entries.first?.value).toBe(1);
       expect(Number(before.entries.later?.generation)).toBe(Number.MAX_SAFE_INTEGER - 1);
       expect(before.entries.later?.value).toBe(2);
@@ -372,6 +411,7 @@ describe("realm snapshots and adoption", () => {
         | { readonly kind: "not-started" }
         | { readonly kind: "returned"; readonly adopted: readonly string[] }
         | { readonly kind: "threw"; readonly error: unknown } = { kind: "not-started" };
+
       try {
         inOuter = true;
         const report = adopt(graph, {
@@ -383,6 +423,7 @@ describe("realm snapshots and adoption", () => {
             later: { value: 4, generation: 0, age: 0 },
           },
         } as never);
+
         outerOutcome = { kind: "returned", adopted: report.adopted.map(String) };
       } catch (error) {
         outerOutcome = { kind: "threw", error };
@@ -420,6 +461,7 @@ describe("realm snapshots and adoption", () => {
           },
         },
       };
+
       expect(observed).toEqual({
         outer: { kind: "threw", error: expect.any(RangeError) },
         comparatorCalls: expect.any(Number),
@@ -458,6 +500,7 @@ describe("realm snapshots and adoption", () => {
     try {
       const queryStore = graph.api.query("one");
       const siblingStore = graph.api.sibling();
+
       ready = queryStore.ready;
       const observation = observeQueryProgress(queryStore);
       const siblingValuesAtInterruption: unknown[] = [];
@@ -467,12 +510,14 @@ describe("realm snapshots and adoption", () => {
       stop = observation.subscribe(({ kind, snapshot }) => {
         if (kind !== "lifecycle" || snapshot.status !== "interrupted") return;
         siblingValuesAtInterruption.push(siblingStore.value.get());
+
         try {
           siblingStore.set(99);
           childWrites.push("returned");
         } catch {
           childWrites.push("threw");
         }
+
         nestedAdoptions.push(
           adopt(graph, {
             version: 1,
@@ -531,6 +576,7 @@ describe("realm snapshots and adoption", () => {
             childWrites.push("threw");
           }
         }
+
         return Object.is(previous, proposed);
       },
     });
@@ -540,6 +586,7 @@ describe("realm snapshots and adoption", () => {
     try {
       const triggerStore = graph.api.trigger();
       const laterStore = graph.api.later();
+
       writeLater = (value) => laterStore.set(value);
       adopt(graph, {
         version: 1,
@@ -569,6 +616,7 @@ describe("realm snapshots and adoption", () => {
       }
 
       const after = snapshot(graph);
+
       expect(childWrites).toEqual(["returned"]);
       expect(graph.at("uncreated").available.get()).toBe(false);
       expect(triggerStore.value.get()).toBe(1);
@@ -602,11 +650,14 @@ describe("realm snapshots and adoption", () => {
     const source = createGraph({ contract: queryContract({ query, mutation }) });
     const queryStore = source.api.query(undefined, { initial: { count: 0 } });
     const mutationPromise = source.api.mutation(undefined);
+
     await flush();
     expect(queryStore.value.get()).toEqual({ count: 1 });
     const encoded = snapshot(source);
+
     expect(encoded.entries["realm/predicted"]!.value).toEqual({ count: 0 });
     const encodedV2 = snapshot(source, { version: 2 });
+
     expect(encodedV2.entries).toHaveLength(1);
     expect(encodedV2.entries[0]).toMatchObject({
       address: { kind: "raw", key: "realm/predicted" },
@@ -621,6 +672,7 @@ describe("realm snapshots and adoption", () => {
     const stop = watch(combined, () => {
       notifications += 1;
     });
+
     adopt(target, {
       version: 1,
       namespace: "realm-tests",
@@ -650,16 +702,21 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.fresh"),
     });
     const source = createGraph({ contract: queryContract({ query }) });
+
     source.api.query(undefined, { initial: "server" });
     jest.advanceTimersByTime(50);
     const encoded = snapshot(source);
+
     expect(encoded.entries["realm/fresh"]!.age).toBe(50);
     const target = createGraph({ contract: queryContract({ query }) });
+
     adopt(target, encoded);
     expect(backend.calls).toHaveLength(0);
     const queryStore = target.api.query(undefined);
+
     expect(queryStore.status.get()).toBe("ready");
     const stop = watch(queryStore.value, () => undefined);
+
     jest.advanceTimersByTime(49);
     expect(backend.calls).toHaveLength(0);
     jest.advanceTimersByTime(1);
@@ -679,6 +736,7 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.old"),
     });
     const graph = createGraph({ contract: queryContract({ query }) });
+
     adopt(graph, {
       version: 1,
       namespace: "realm-tests",
@@ -686,6 +744,7 @@ describe("realm snapshots and adoption", () => {
       entries: { "realm/old": { value: "old", generation: 2, age: 100 } },
     } as never);
     const store = graph.api.query(undefined, { revalidateAfterMs: 50 });
+
     expect(backend.calls).toHaveLength(1);
     expect(store.value.get()).toBe("old");
     expect(store.status.get()).toBe("revalidating");
@@ -700,6 +759,7 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.configure"),
     });
     const graph = createGraph({ contract: queryContract({ query }) });
+
     adopt(graph, {
       version: 1,
       namespace: "realm-tests",
@@ -709,6 +769,7 @@ describe("realm snapshots and adoption", () => {
     // The stated initial configures the previously unconfigured at-store but
     // must not overwrite a value adoption has already landed.
     const store = graph.api.query(undefined, { initial: "configured" });
+
     expect(store.value.get()).toBe("adopted");
     expect(store.status.get()).toBe("ready");
     expect(backend.calls).toHaveLength(0);
@@ -723,6 +784,7 @@ describe("realm snapshots and adoption", () => {
       open: backend.stream<void, string>("realm.stream-configure"),
     });
     const graph = createGraph({ contract: queryContract({ stream }) });
+
     adopt(graph, {
       version: 1,
       namespace: "realm-tests",
@@ -733,6 +795,7 @@ describe("realm snapshots and adoption", () => {
     } as never);
 
     const store = graph.api.stream(undefined, { initial: "configured" });
+
     expect(store.value.get()).toBe("adopted");
     expect(store.status.get()).toBe("opening");
     expect(backend.calls).toHaveLength(1);
@@ -749,6 +812,7 @@ describe("realm snapshots and adoption", () => {
     const graph = createGraph({ contract: queryContract({ query }) });
     const store = graph.api.query(undefined);
     const oldCall = backend.calls[0]!;
+
     adopt(graph, {
       version: 1,
       namespace: "realm-tests",
@@ -775,6 +839,7 @@ describe("realm snapshots and adoption", () => {
       fetch: backend.respond("realm.accessor"),
     });
     const value: Record<string, unknown> = {};
+
     Object.defineProperty(value, "throws", {
       enumerable: true,
       get: () => {
@@ -782,23 +847,29 @@ describe("realm snapshots and adoption", () => {
       },
     });
     const graph = createGraph({ contract: queryContract({ badFunction, badAccessor }) });
+
     graph.api.badFunction(undefined, { initial: () => undefined });
     expect(() => snapshot(graph)).toThrow(Fault);
+
     try {
       snapshot(graph);
     } catch (error) {
       expect((error as Fault).kind).toBe("encoding");
       expect((error as Fault).involved).toEqual(["realm/fn"]);
     }
+
     const accessorGraph = createGraph({ contract: queryContract({ badAccessor }) });
+
     accessorGraph.api.badAccessor(undefined, { initial: value });
     expect(() => snapshot(accessorGraph)).toThrow(Fault);
+
     try {
       snapshot(accessorGraph);
     } catch (error) {
       expect((error as Fault).kind).toBe("encoding");
       expect((error as Fault).involved).toEqual(["realm/accessor"]);
     }
+
     graph.dispose();
     accessorGraph.dispose();
   });
@@ -813,6 +884,7 @@ describe("realm snapshots and adoption", () => {
       ["weak-map", new WeakMap<object, unknown>()],
       ["class", new CustomValue()],
     ];
+
     for (const [name, value] of unsupported) {
       const backend = testBackend();
       const query = createQuery({
@@ -821,7 +893,9 @@ describe("realm snapshots and adoption", () => {
         fetch: backend.respond(`realm.unsupported.${name}`),
       });
       const graph = createGraph({ contract: queryContract({ query }) });
+
       graph.api.query(undefined, { initial: value });
+
       try {
         snapshot(graph);
         throw new Error("expected an encoding fault");
@@ -830,6 +904,7 @@ describe("realm snapshots and adoption", () => {
         expect((error as Fault).kind).toBe("encoding");
         expect((error as Fault).involved).toEqual([`realm/unsupported/${name}`]);
       }
+
       graph.dispose();
     }
   });
@@ -850,10 +925,12 @@ describe("realm snapshots and adoption", () => {
       }),
     });
     const atOnly = graph.at("realm/at-only");
+
     atOnly.set("private");
     graph.api.persisted();
     graph.api.query(undefined, { initial: 2 });
     const encoded = snapshot(graph);
+
     expect(Object.keys(encoded.entries)).toEqual(["persisted", "realm/omit"]);
     graph.dispose();
     expect(() => snapshot(graph)).toThrow("disposed");
@@ -869,15 +946,18 @@ it("v1 refuses observation-only authority and preserves current accepted age and
     fetch: backend.respond<void, number | undefined>("raw"),
   });
   const graph = createGraph({ contract: { namespace: "observed-realm", operations: { query } } });
+
   try {
     const store = graph.api.query();
     const lease = observeStore(graph, store);
+
     lease.publish(undefined);
     expect(() => snapshot(graph)).toThrow(Fault);
     lease.publish(2, { transfer: "exclude" });
     expect(Object.keys(snapshot(graph).entries)).toEqual([]);
     expect(snapshot(graph, { version: 2 }).entries).toEqual([]);
     const ready = store.ready;
+
     backend.resolve(backend.calls[0]!, 3);
     await ready;
     jest.advanceTimersByTime(5);
@@ -904,9 +984,11 @@ it("v1 faults encoding reentry instead of returning old bytes with new observed 
     fetch: backend.respond<void, { value: number }>("raw"),
   });
   const graph = createGraph({ contract: { namespace: "encoding-reentry", operations: { query } } });
+
   try {
     const store = graph.api.query();
     const lease = observeStore(graph, store);
+
     store.set({
       get value() {
         lease.publish({ value: 2 });
@@ -930,20 +1012,26 @@ it("ordinary v1 adoption advances local visible revision without clearing an obs
   const contract = { namespace: "adopt-observed", operations: { query } };
   const source = createGraph({ contract });
   const target = createGraph({ contract });
+
   try {
     const original = source.api.query();
+
     original.set(undefined);
     const store = target.api.query();
     const lease = observeStore(target, store);
     const issue = Object.freeze({ invalid: true });
+
     lease.reject(issue);
     const before = peekStore(store);
     const report = adopt(target, snapshot(source));
     const after = peekStore(store);
+
     expect(report.adopted).toEqual([store.key]);
     expect(lease.issue.get()).toBe(issue);
+
     if (before.kind !== "stable" || after.kind !== "stable")
       throw new Error("Expected stable adoption captures");
+
     expect(after.valueRevision).toBeGreaterThan(before.valueRevision);
     expect(after).toMatchObject({ present: true, value: undefined });
     expect(await store.ready).toBeUndefined();
@@ -951,10 +1039,13 @@ it("ordinary v1 adoption advances local visible revision without clearing an obs
     const beforeV2 = peekStore(store);
     const v2Report = adopt(target, snapshot(source, { version: 2 }), {});
     const afterV2 = peekStore(store);
+
     expect(v2Report.adopted).toMatchObject([{ address: { kind: "raw", key: String(store.key) } }]);
     expect(lease.issue.get()).toBe(issue);
+
     if (beforeV2.kind !== "stable" || afterV2.kind !== "stable")
       throw new Error("Expected stable v2 adoption captures");
+
     expect(afterV2.valueRevision).toBeGreaterThan(beforeV2.valueRevision);
     expect(afterV2).toMatchObject({ present: true, value: undefined });
   } finally {
@@ -973,9 +1064,11 @@ it("ordinary v1 adoption admits a collected entry after a rejected recall and re
   const contract = { namespace: "adopt-after-rejection", operations: { query } };
   const source = createGraph({ contract });
   const target = createGraph({ contract, idleMs: 10 });
+
   try {
     const original = source.api.query(undefined, { initial: 9 });
     const store = target.api.query(undefined, { initial: 1 });
+
     await original.ready;
     await store.ready;
     jest.advanceTimersByTime(11);
@@ -983,6 +1076,7 @@ it("ordinary v1 adoption admits a collected entry after a rejected recall and re
     expect(() => observeStore(target, store)).toThrow(TypeError);
     expect(adopt(target, snapshot(source)).adopted).toEqual([store.key]);
     const lease = observeStore(target, store);
+
     expect(await store.ready).toBe(9);
     expect(lease.publish(10)).toBe(true);
     expect(peekStore(store)).toMatchObject({ kind: "stable", present: true, value: 10 });
@@ -1006,12 +1100,15 @@ it("v2 preserves an observed undefined landing:none and an accepted age after an
   const contract = queryContract({ query });
   const source = createGraph({ contract });
   const target = createGraph({ contract });
+
   try {
     const store = source.api.query(undefined);
     const lease = observeStore(source, store);
+
     lease.publish(undefined);
 
     const none = snapshot(source, { version: 2 });
+
     expect(none.entries).toHaveLength(1);
     expect(none.entries[0]).toMatchObject({
       address: { kind: "raw", key },
@@ -1021,16 +1118,19 @@ it("v2 preserves an observed undefined landing:none and an accepted age after an
     expect(none.entries[0]?.valueRevision).toBeGreaterThan(0);
     adopt(target, JSON.parse(JSON.stringify(none)) as typeof none, {});
     const adopted = target.at(key);
+
     expect(adopted.available.get()).toBe(true);
     expect(adopted.value.get()).toBeUndefined();
 
     const ready = store.ready;
+
     backend.resolve(backend.calls[0]!, "accepted");
     await ready;
     jest.advanceTimersByTime(40);
     lease.publish("observed");
 
     const accepted = snapshot(source, { version: 2 });
+
     expect(accepted.entries).toHaveLength(1);
     expect(accepted.entries[0]).toMatchObject({
       address: { kind: "raw", key },
@@ -1039,8 +1139,10 @@ it("v2 preserves an observed undefined landing:none and an accepted age after an
     });
     adopt(target, JSON.parse(JSON.stringify(accepted)) as typeof accepted, {});
     const adoptedQuery = target.api.query(undefined);
+
     expect(adoptedQuery.value.get()).toBe("observed");
     const reexported = snapshot(target, { version: 2 });
+
     expect(reexported.entries[0]).toMatchObject({
       address: { kind: "raw", key },
       value: "observed",
@@ -1063,6 +1165,7 @@ it("v2 skips a malformed row independently and rejects duplicate physical addres
   const source = createGraph({ contract });
   const target = createGraph({ contract });
   const duplicateTarget = createGraph({ contract });
+
   try {
     source.api.query(undefined, { initial: 4 });
     const valid = snapshot(source, { version: 2 });
@@ -1079,6 +1182,7 @@ it("v2 skips a malformed row independently and rejects duplicate physical addres
       ],
     };
     const report = adopt(target, withMalformed, {});
+
     expect(report.adopted.map((row) => row.address)).toEqual([{ kind: "raw", key: "good" }]);
     expect(report.skipped).toHaveLength(1);
     expect(report.skipped[0]?.address).toBe(malformedAddress);
@@ -1088,6 +1192,7 @@ it("v2 skips a malformed row independently and rejects duplicate physical addres
       ...valid,
       entries: [valid.entries[0]!, valid.entries[0]!],
     } as typeof valid;
+
     expect(() => adopt(duplicateTarget, duplicate, {})).toThrow(Fault);
     expect(duplicateTarget.at("good").available.get()).toBe(false);
     expect(snapshot(duplicateTarget, { version: 2 }).entries).toHaveLength(0);
@@ -1110,6 +1215,7 @@ it.each([false, true])(
     const contract = queryContract({ query });
     const source = createGraph({ contract });
     const target = createGraph({ contract });
+
     try {
       source.api.query(undefined, { initial: 4 });
       const incumbent = target.api.query(undefined, { initial: 9 });
@@ -1148,6 +1254,7 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
     const emit = (event: Event): void => {
       if (ended) return;
       const waiter = waiters.shift();
+
       if (waiter !== undefined) waiter({ done: false, value: event });
       else queued.push(event);
     };
@@ -1156,6 +1263,7 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
         return {
           next: () => {
             const event = queued.shift();
+
             if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
             if (ended) return Promise.resolve({ done: true as const, value: undefined });
             return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
@@ -1168,10 +1276,12 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
         };
       },
     };
+
     return { iterable, emit };
   };
   const reserve = (input: Input, after: number, seed: unknown): object => {
     const reader = Object.freeze({});
+
     reservations.set(reader, { input, after, seed });
     return reader;
   };
@@ -1182,12 +1292,14 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
     source: {
       open: (input, options) => {
         const channel = makeChannel();
+
         openings.push({ room: input.room, reader: options.reader });
         if (options.reader === undefined) liveEmitters.set(input.room, channel.emit);
         return channel.iterable;
       },
       validateReader: (input, reader, after, checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           checkpoint === undefined &&
           reservation !== undefined &&
@@ -1198,6 +1310,7 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1227,6 +1340,7 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
   try {
     const folded = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
+
       stop = subscribe(projection.value, (value) => {
         if (value !== 5) return;
         stop();
@@ -1234,13 +1348,16 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
       });
     });
     const emit = liveEmitters.get(input.room);
+
     if (emit === undefined) throw new Error("The source Store did not open");
     emit({ position: 5, value: 5 });
     await folded;
 
     const checkpoint = capturePositionedStore(source, [projection] as const);
+
     if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
       throw new Error("The actual source Store has no positioned landing");
+
     const after: number = checkpoint.position;
     const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
     const firstReader = reserve(input, after, seed);
@@ -1259,26 +1376,31 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
       seed,
       secondReader,
     );
+
     firstDiscard = () => first.discard();
     secondDiscard = () => second.discard();
 
     expect(first.source.identity).not.toBe(second.source.identity);
     expect(openings).toHaveLength(1);
     let v1Fault: unknown;
+
     try {
       snapshot(targetGraph);
     } catch (error) {
       v1Fault = error;
     }
+
     expect(v1Fault).toBeInstanceOf(Fault);
     expect(v1Fault).toMatchObject({ kind: "encoding" });
 
     let v2Fault: unknown;
+
     try {
       snapshot(targetGraph, { version: 2 });
     } catch (error) {
       v2Fault = error;
     }
+
     expect(v2Fault).toBeInstanceOf(Fault);
     expect(v2Fault).toMatchObject({ kind: "encoding" });
     expect(openings).toHaveLength(1);
@@ -1300,10 +1422,13 @@ it("refuses generic snapshots for multiple reader-scoped Stores sharing one logi
       excludedReader,
       { snapshot: false },
     );
+
     try {
       const v1 = snapshot(excludedGraph);
+
       expect(Object.keys(v1.entries)).toEqual([String(ordinaryStore.key)]);
       const v2 = snapshot(excludedGraph, { version: 2 });
+
       expect(v2.entries).toHaveLength(1);
       expect(openings).toHaveLength(1);
     } finally {
@@ -1324,6 +1449,7 @@ it("refuses a required capture when its codec changes the cached source", () => 
   });
   const sourceState = signal(1);
   const source = computed(() => sourceState.get() * 2);
+
   expect(source.get()).toBe(2);
   const construction = captureReactiveConstruction(source);
   let changed = false;
@@ -1334,6 +1460,7 @@ it("refuses a required capture when its codec changes the cached source", () => 
         changed = true;
         sourceState.set(2);
       }
+
       return value as ClosedEncodedValue;
     },
   };
@@ -1381,6 +1508,7 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     const sourceStore = sourceGraph.api.query("one");
     const sourceReady = sourceStore.ready;
     const sourceRequest = backend.calls[0]!;
+
     backend.resolve(sourceRequest, 4);
     sourceRequestResolved = true;
     await sourceReady;
@@ -1390,19 +1518,23 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
       sourceRuns += 1;
       return (sourceStore.value.get() ?? 0) * 2;
     });
+
     expect(sourceValue.get()).toBe(8);
     const sourceConstruction = captureReactiveConstruction(sourceValue);
+
     capturePlan = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
       roots: [{ source: sourceValue, construction: sourceConstruction }],
       codec: requiredTransferCodec,
     });
     const captured = capturePlan.image;
+
     expect(captured.stores).toHaveLength(1);
     expect(captured.stores[0]).toMatchObject({ hasValue: false, kind: "query" });
     expect(Object.isFrozen(captured)).toBe(true);
     expect(Object.isFrozen(captured.nodes)).toBe(true);
     const captureCommit = capturePlan.seal();
+
     if (captureCommit === undefined) throw new Error("The stable required capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -1412,6 +1544,7 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     const claim = preparePassiveTransferClaim(targetGraph, targetGraph.api.query, "one", {
       snapshot: false,
     });
+
     discardClaim = () => claim.discard();
     claimRetired = claim.retired;
     expect(backend.calls).toHaveLength(1);
@@ -1423,6 +1556,7 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     const targetConstruction = captureReactiveConstruction(targetValue);
     const mappedState = signal<unknown>("before");
     const mappedConstruction = captureReactiveConstruction(mappedState);
+
     valueWatcher.watch(targetValue);
     mappedWatcher.watch(mappedState);
     cleanupWatchers = () => {
@@ -1431,6 +1565,7 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     };
 
     const valueNode = captured.nodes.find((node) => node.slot === captured.roots[0]);
+
     if (valueNode === undefined) throw new Error("The required computed slot is missing");
     adoptionPlan = prepareRequiredTransferAdoption(captured, {
       graphs: [targetGraph],
@@ -1444,6 +1579,7 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     expect(() => peekStore(claim.store)).toThrow("still dormant");
     const forbidden: { commit?: ReturnType<typeof adoptionPlan.seal> } = {};
     let refusal: unknown;
+
     try {
       withoutWrites(() => {
         forbidden.commit = adoptionPlan!.seal();
@@ -1452,25 +1588,30 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     } catch (error) {
       refusal = error;
     }
+
     if (forbidden.commit !== undefined) {
       adoptionPublished = true;
+
       try {
         forbidden.commit.notifications.deliver();
       } catch {
         // The existing watcher intentionally fails after publication.
       }
     }
+
     expect(refusal).toBeInstanceOf(Fault);
     expect((refusal as Fault).kind).toBe("write-forbidden");
     expect(mappedState.get()).toBe("before");
     expect(() => peekStore(claim.store)).toThrow("still dormant");
     expect(notifications).toEqual([]);
     const commit = adoptionPlan.seal();
+
     if (commit === undefined) throw new Error("The stable required adoption did not seal");
     const retirementOutcome = adoptionPlan.retired.then(
       () => undefined,
       (error: unknown) => error,
     );
+
     commit.publish();
     adoptionPublished = true;
     expect(mappedState.get()).toBe("published");
@@ -1479,11 +1620,13 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     expect(notifications).toEqual([]);
 
     let deliveryError: unknown;
+
     try {
       commit.notifications.deliver();
     } catch (error) {
       deliveryError = error;
     }
+
     expect(deliveryError).toBeDefined();
     expect(notifications).toContain("value");
     expect(notifications).toContain("mapped");
@@ -1496,6 +1639,7 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     const revalidation = claim.store.revalidate();
     const targetReady = claim.store.ready;
     const targetRequest = backend.calls[1]!;
+
     expect(targetRequest).toBeDefined();
     backend.resolve(targetRequest, 5);
     targetRequestResolved = true;
@@ -1504,30 +1648,38 @@ it("adopts an excluded query cache with mapped State writes before deferred noti
     expect(targetRuns).toBe(1);
   } finally {
     cleanupWatchers?.();
+
     if (!adoptionPublished) {
       if (adoptionPlan !== undefined) adoptionPlan.discard();
       else discardClaim?.();
     }
+
     if (claimRetired !== undefined)
       await claimRetired.then(
         () => undefined,
         () => undefined,
       );
+
     if (!capturePublished) capturePlan?.discard();
+
     if (!sourceRequestResolved && backend.calls[0] !== undefined)
       backend.resolve(backend.calls[0], 4);
+
     if (!targetRequestResolved && backend.calls[1] !== undefined)
       backend.resolve(backend.calls[1], 5);
+
     if (adoptionPlan !== undefined)
       await adoptionPlan.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (capturePlan !== undefined)
       await capturePlan.retired.then(
         () => undefined,
         () => undefined,
       );
+
     sourceGraph.dispose();
     targetGraph.dispose();
   }
@@ -1555,6 +1707,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
     const channel = () => {
       const waiters: Array<(result: IteratorResult<Event>) => void> = [];
       let ended = false;
+
       return {
         iterable: {
           [Symbol.asyncIterator]() {
@@ -1573,8 +1726,10 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
         } as AsyncIterable<Event>,
         emit(event: Event) {
           const waiter = waiters.shift();
+
           if (waiter === undefined)
             throw new Error("The positioned opening has no pending next call");
+
           waiter({ done: false, value: event });
         },
       };
@@ -1583,13 +1738,17 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
     const source: PositionedStreamSource<string, number, number, object> = {
       open: (_input, options) => {
         const opened = channel();
+
         openings.push({ reader: options.reader, after: options.after });
+
         if (options.reader === undefined) emitLive = opened.emit;
         else readers.set(options.reader, opened.emit);
+
         return opened.iterable;
       },
       readerLifetime: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         if (
           reservation === undefined ||
           reservation.input !== _input ||
@@ -1597,10 +1756,12 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
           reservation.seed !== seed
         )
           throw new TypeError("The reader lifetime does not match its exact reservation");
+
         return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
       },
       validateReader: (input, reader, after, _checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1610,6 +1771,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1622,12 +1784,14 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
         releases.set(reader, (releases.get(reader) ?? 0) + 1);
       },
     };
+
     return {
       source,
       openings,
       acknowledgements,
       reserve(input: string, after: number, seed: unknown) {
         const reader = Object.freeze({});
+
         reservations.set(reader, {
           input,
           after,
@@ -1643,6 +1807,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       },
       emitReader(reader: object, event: Event) {
         const emit = readers.get(reader);
+
         if (emit === undefined) throw new Error("The positioned reader did not open");
         emit(event);
       },
@@ -1719,10 +1884,12 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
   try {
     const firstLanding = until(sourceFirst.value, (value) => value === 5);
     const secondLanding = until(sourceSecond.value, (value) => value === 1);
+
     providerA.emitLive({ position: 5, value: 3 });
     await Promise.all([firstLanding, secondLanding]);
     expect(sourceStore.value.get()).toBe(3);
     const checkpoint = capturePositionedStore(sourceStore, [sourceFirst, sourceSecond] as const);
+
     expect(checkpoint.present).toBe(true);
     expect(checkpoint.hasPosition).toBe(true);
     expect(checkpoint.position).toBe(5);
@@ -1753,9 +1920,11 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
           (value as { readonly $ref?: unknown }).$ref === seedId
         ) {
           const decoded = decodedSeeds.get(seedId);
+
           if (decoded === undefined) throw new Error("The positioned seed reference is missing");
           return decoded;
         }
+
         return value;
       },
       decodeFailure: (failure) => new Error(String(failure)),
@@ -1763,6 +1932,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
     const sourceAlias = computed(() => sourceFirst.value.get());
     const sourceAliasAgain = computed(() => sourceFirst.value.get());
     const sourceOther = computed(() => sourceSecond.value.get());
+
     expect([sourceAlias.get(), sourceAliasAgain.get(), sourceOther.get()]).toEqual([5, 5, 1]);
     capturePlan = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
@@ -1775,9 +1945,11 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       codec,
     });
     const image = capturePlan.image;
+
     expect(image.version).toBe(2);
     expect(image.stores).toHaveLength(1);
     const positionedRows = image.positioned;
+
     if (positionedRows === undefined) throw new Error("The projection group row was omitted");
     expect(positionedRows).toHaveLength(1);
     expect(positionedRows).toMatchObject([
@@ -1792,10 +1964,12 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       (node) =>
         node.kind === "native" && node.positioned === "p0" && node.facet === "projection-value",
     );
+
     expect(projectionNodes).toHaveLength(2);
     expect(projectionNodes.map((node) => node.projection).sort()).toEqual([0, 1]);
     expect(image.roots[0]).not.toBe(image.roots[1]);
     const captureCommit = capturePlan.seal();
+
     if (captureCommit === undefined) throw new Error("The positioned group capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -1809,6 +1983,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       values: [5, 1],
     });
     const targetReader = providerB.reserve(input, 5, seed);
+
     reader = targetReader;
     const receiverClaim = preparePassiveTransferClaim(
       targetGraph,
@@ -1821,6 +1996,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
         reader: targetReader,
       },
     );
+
     claim = receiverClaim;
     const firstProjection = receiverClaim.restoration.projections[0];
     const secondProjection = receiverClaim.restoration.projections[1];
@@ -1839,6 +2015,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       secondRuns += 1;
       return secondProjection.value.get();
     });
+
     adoption = prepareRequiredTransferAdoption(image, {
       graphs: [targetGraph],
       sources: [{ slot: image.stores[0]!.slot, claim: receiverClaim }],
@@ -1864,6 +2041,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
       mappedStateWrites: [],
     });
     const commit = adoption.seal();
+
     if (commit === undefined) throw new Error("The positioned projection adoption did not seal");
     commit.publish();
     adoptionPublished = true;
@@ -1880,6 +2058,7 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
     const firstSuffix = until(firstRoot, (value) => value === 9);
     const aliasSuffix = until(aliasRoot, (value) => value === 9);
     const secondSuffix = until(secondRoot, (value) => value === 2);
+
     providerB.emitReader(targetReader, { position: 6, value: 4 });
     await Promise.all([firstSuffix, aliasSuffix, secondSuffix]);
     expect(firstProjection.value.get()).toBe(9);
@@ -1893,8 +2072,10 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
 
     const firstReceipt = positionedFoldReceipt(firstProjection);
     const secondReceipt = positionedFoldReceipt(secondProjection);
+
     if (firstReceipt === undefined || secondReceipt === undefined)
       throw new Error("The suffix did not produce both tuple receipts");
+
     acknowledgePositionedFold(firstProjection, firstReceipt);
     acknowledgePositionedFold(secondProjection, secondReceipt);
     expect(providerB.acknowledgements.map(({ receipt }) => receipt.position)).toEqual([6, 6]);
@@ -1904,26 +2085,32 @@ it("maps positioned projection ordinals and aliases from one captured cut", asyn
     expect(providerB.releaseCount(targetReader)).toBe(1);
   } finally {
     if (!capturePublished) capturePlan?.discard();
+
     if (!adoptionPublished) {
       adoption?.discard();
       claim?.discard();
     } else claim?.restoration.discard();
+
     sourceFirst.close();
     sourceSecond.close();
     sourceGraph.dispose();
     targetGraph.dispose();
+
     if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
       providerB.source.releaseReader(input, reader);
+
     if (capturePlan !== undefined)
       await capturePlan.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (adoption !== undefined)
       await adoption.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (claim !== undefined) {
       await claim.retired.then(
         () => undefined,
@@ -1964,6 +2151,7 @@ it("joins staged observation metadata only through the exact pending lease", asy
   try {
     const baseline = sourceGraph.api.query("one");
     const baselineReady = baseline.ready;
+
     backend.resolve(backend.calls[0]!, 4);
     sourceRequestResolved = true;
     await baselineReady;
@@ -1972,6 +2160,7 @@ it("joins staged observation metadata only through the exact pending lease", asy
     const zeroReady = zeroWindow.ready;
     const oneSecond = sourceGraph.api.query("one", { revalidateAfterMs: 1000 });
     const oneSecondReady = oneSecond.ready;
+
     expect(backend.calls).toHaveLength(2);
     backend.resolve(backend.calls[1]!, 5);
     revalidationRequestResolved = true;
@@ -1988,6 +2177,7 @@ it("joins staged observation metadata only through the exact pending lease", asy
         sourceLease.active.get() &&
         sourceLease.issue.get() === undefined,
     );
+
     expect(sourceValue.get()).toBe(true);
     capturePlan = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
@@ -1995,6 +2185,7 @@ it("joins staged observation metadata only through the exact pending lease", asy
       codec: requiredTransferCodec,
     });
     const captured = capturePlan.image;
+
     expect(captured.stores).toHaveLength(1);
     expect(captured.callers).toHaveLength(2);
     const zeroCaller = captured.callers.find(
@@ -2003,10 +2194,13 @@ it("joins staged observation metadata only through the exact pending lease", asy
     const oneSecondCaller = captured.callers.find(
       (caller) => caller.window.kind === "finite" && caller.window.milliseconds === 1000,
     );
+
     if (zeroCaller === undefined || oneSecondCaller === undefined)
       throw new Error("The source caller slots were not captured");
+
     const physicalSlot = captured.stores[0]!.slot;
     const captureCommit = capturePlan.seal();
+
     if (captureCommit === undefined) throw new Error("The caller observation capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -2025,9 +2219,11 @@ it("joins staged observation metadata only through the exact pending lease", asy
       "one",
       { revalidateAfterMs: 1000 },
     );
+
     independentClaims = [independentFirst, independentSecond];
     const independentObservationFirst = independentFirst.prepareObservation();
     const independentObservationSecond = independentSecond.prepareObservation();
+
     expect(independentObservationFirst.lease).not.toBe(independentObservationSecond.lease);
     expect(independentObservationFirst.lease.active.get()).toBe(false);
     expect(independentObservationSecond.lease.active.get()).toBe(false);
@@ -2038,6 +2234,7 @@ it("joins staged observation metadata only through the exact pending lease", asy
         independentObservationFirst.lease.active.get() &&
         independentObservationFirst.lease.issue.get() === undefined,
     );
+
     expect(() => {
       independentAdoption = prepareRequiredTransferAdoption(captured, {
         graphs: [independentGraph],
@@ -2070,9 +2267,11 @@ it("joins staged observation metadata only through the exact pending lease", asy
     const joinedSecond = preparePassiveTransferClaim(joinedGraph, joinedGraph.api.query, "one", {
       revalidateAfterMs: 1000,
     });
+
     joinedClaims = [joinedFirst, joinedSecond];
     const joinedObservationFirst = joinedFirst.prepareObservation();
     const joinedObservationSecond = joinedSecond.prepareObservation(joinedObservationFirst.lease);
+
     expect(joinedObservationSecond.lease).toBe(joinedObservationFirst.lease);
     expect(joinedObservationSecond.retired).toBe(joinedSecond.retired);
     expect(joinedObservationFirst.lease.active.get()).toBe(false);
@@ -2088,6 +2287,7 @@ it("joins staged observation metadata only through the exact pending lease", asy
         joinedObservationFirst.lease.issue.get() === undefined
       );
     });
+
     joinedAdoption = prepareRequiredTransferAdoption(captured, {
       graphs: [joinedGraph],
       sources: [
@@ -2106,6 +2306,7 @@ it("joins staged observation metadata only through the exact pending lease", asy
       mappedStateWrites: [],
     });
     const joinedCommit = joinedAdoption.seal();
+
     if (joinedCommit === undefined) throw new Error("The exact-lease caller cohort did not seal");
     joinedNotifications = joinedCommit.notifications;
     joinedCommit.publish();
@@ -2124,21 +2325,27 @@ it("joins staged observation metadata only through the exact pending lease", asy
   } finally {
     if (joinedPublished && joinedNotifications !== undefined) {
       const notifications = joinedNotifications;
+
       joinedNotifications = undefined;
+
       try {
         notifications.deliver();
       } catch (cause) {
         deliveryFailure = { cause };
       }
     }
+
     if (!capturePublished) capturePlan?.discard();
+
     if (capturePlan !== undefined)
       await capturePlan.retired.then(
         () => undefined,
         () => undefined,
       );
+
     independentAdoption?.discard();
     for (const claim of independentClaims) claim.discard();
+
     if (independentClaims.length > 0)
       await Promise.all(
         independentClaims.map((claim) =>
@@ -2148,8 +2355,10 @@ it("joins staged observation metadata only through the exact pending lease", asy
           ),
         ),
       );
+
     if (!joinedPublished) joinedAdoption?.discard();
     for (const claim of joinedClaims) claim.discard();
+
     if (joinedClaims.length > 0)
       await Promise.all(
         joinedClaims.map((claim) =>
@@ -2159,32 +2368,40 @@ it("joins staged observation metadata only through the exact pending lease", asy
           ),
         ),
       );
+
     if (independentAdoption !== undefined)
       await independentAdoption.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (joinedAdoption !== undefined)
       await joinedAdoption.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (!sourceRequestResolved && backend.calls[0] !== undefined)
       backend.resolve(backend.calls[0], 4);
+
     if (!revalidationRequestResolved && backend.calls[1] !== undefined)
       backend.resolve(backend.calls[1], 5);
+
     sourceGraph.dispose();
     independentGraph.dispose();
     joinedGraph.dispose();
   }
+
   if (bodyFailure !== undefined) {
     if (deliveryFailure !== undefined)
       throw new AggregateError(
         [bodyFailure.cause, deliveryFailure.cause],
         "Required adoption body and notification cleanup failed",
       );
+
     throw bodyFailure.cause;
   }
+
   if (deliveryFailure !== undefined) throw deliveryFailure.cause;
 });
 
@@ -2218,6 +2435,7 @@ it("publishes a genuine passive observation lease with required adoption", async
     const sourceStore = sourceGraph.api.query("one");
     const sourceReady = sourceStore.ready;
     const sourceRequest = backend.calls[0]!;
+
     backend.resolve(sourceRequest, 4);
     sourceRequestResolved = true;
     await sourceReady;
@@ -2228,8 +2446,10 @@ it("publishes a genuine passive observation lease with required adoption", async
         sourceLease.active.get() &&
         sourceLease.issue.get() === undefined,
     );
+
     expect(sourceValue.get()).toBe(true);
     const sourceConstruction = captureReactiveConstruction(sourceValue);
+
     capturePlan = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
       roots: [{ source: sourceValue, construction: sourceConstruction }],
@@ -2238,6 +2458,7 @@ it("publishes a genuine passive observation lease with required adoption", async
     const captured = capturePlan.image;
     const storeRow = captured.stores[0]!;
     const callerRow = captured.callers[0]!;
+
     expect(captured.stores).toHaveLength(1);
     expect(captured.callers).toHaveLength(1);
     expect(callerRow.store).toBe(storeRow.slot);
@@ -2262,6 +2483,7 @@ it("publishes a genuine passive observation lease with required adoption", async
       ]),
     );
     const captureCommit = capturePlan.seal();
+
     if (captureCommit === undefined) throw new Error("The stable observation capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -2269,14 +2491,18 @@ it("publishes a genuine passive observation lease with required adoption", async
     await capturePlan.retired;
 
     const claim = preparePassiveTransferClaim(targetGraph, targetGraph.api.query, "one");
+
     claimDiscard = () => claim.discard();
     claimRetired = claim.retired;
     const preparedObservation = claim.prepareObservation();
+
     expect(preparedObservation.retired).toBe(claim.retired);
     const siblingClaim = preparePassiveTransferClaim(targetGraph, targetGraph.api.query, "one");
+
     siblingDiscard = () => siblingClaim.discard();
     siblingRetired = siblingClaim.retired;
     const siblingObservation = siblingClaim.prepareObservation();
+
     expect(siblingObservation.lease).not.toBe(preparedObservation.lease);
     expect(siblingObservation.lease.active.get()).toBe(false);
     expect(backend.calls).toHaveLength(1);
@@ -2296,6 +2522,7 @@ it("publishes a genuine passive observation lease with required adoption", async
     });
     const targetConstruction = captureReactiveConstruction(targetValue);
     const targetRoot = captured.roots[0]!;
+
     adoptionPlan = prepareRequiredTransferAdoption(captured, {
       graphs: [targetGraph],
       sources: [
@@ -2307,8 +2534,10 @@ it("publishes a genuine passive observation lease with required adoption", async
       mappedStateWrites: [],
     });
     const adoptionCommit = adoptionPlan.seal();
+
     if (adoptionCommit === undefined)
       throw new Error("The stable observation adoption did not seal");
+
     deliverAdoption = () => adoptionCommit.notifications.deliver();
     adoptionCommit.publish();
     adoptionPublished = true;
@@ -2340,9 +2569,11 @@ it("publishes a genuine passive observation lease with required adoption", async
     expect(preparedObservation.lease.active.get()).toBe(true);
 
     const reuseClaim = preparePassiveTransferClaim(targetGraph, targetGraph.api.query, "one");
+
     reuseDiscard = () => reuseClaim.discard();
     reuseRetired = reuseClaim.retired;
     const reusedObservation = reuseClaim.prepareObservation(preparedObservation.lease);
+
     expect(reusedObservation.lease).toBe(preparedObservation.lease);
     expect(reusedObservation.retired).toBe(reuseClaim.retired);
     reusedObservation.discard();
@@ -2355,9 +2586,11 @@ it("publishes a genuine passive observation lease with required adoption", async
       abandonedGraph.api.query,
       "one",
     );
+
     abandonedDiscard = () => abandonedClaim.discard();
     abandonedRetired = abandonedClaim.retired;
     const abandonedObservation = abandonedClaim.prepareObservation();
+
     expect(abandonedObservation.retired).toBe(abandonedClaim.retired);
     expect(abandonedObservation.lease.active.get()).toBe(false);
     abandonedObservation.lease.dispose();
@@ -2370,6 +2603,7 @@ it("publishes a genuine passive observation lease with required adoption", async
         abandonedObservation.lease.issue.get() === undefined,
     );
     const abandonedConstruction = captureReactiveConstruction(abandonedValue);
+
     expect(() =>
       prepareRequiredTransferAdoption(captured, {
         graphs: [abandonedGraph],
@@ -2391,46 +2625,57 @@ it("publishes a genuine passive observation lease with required adoption", async
     expect(preparedObservation.lease.active.get()).toBe(false);
   } finally {
     if (deliverAdoption !== undefined) deliverAdoption();
+
     if (!adoptionPublished) {
       if (adoptionPlan !== undefined) adoptionPlan.discard();
       else claimDiscard?.();
     }
+
     siblingDiscard?.();
     reuseDiscard?.();
     abandonedDiscard?.();
+
     if (claimRetired !== undefined)
       await claimRetired.then(
         () => undefined,
         () => undefined,
       );
+
     if (siblingRetired !== undefined)
       await siblingRetired.then(
         () => undefined,
         () => undefined,
       );
+
     if (reuseRetired !== undefined)
       await reuseRetired.then(
         () => undefined,
         () => undefined,
       );
+
     if (abandonedRetired !== undefined)
       await abandonedRetired.then(
         () => undefined,
         () => undefined,
       );
+
     if (!capturePublished) capturePlan?.discard();
+
     if (capturePlan !== undefined)
       await capturePlan.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (adoptionPlan !== undefined)
       await adoptionPlan.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (!sourceRequestResolved && backend.calls[0] !== undefined)
       backend.resolve(backend.calls[0], 4);
+
     sourceGraph.dispose();
     targetGraph.dispose();
     abandonedGraph.dispose();

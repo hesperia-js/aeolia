@@ -49,7 +49,9 @@ export function captureQueryProgressCohort<T, P>(
   if (!Array.isArray(value)) throw new TypeError("Query progress entries must be an array");
 
   const length: unknown = Reflect.get(value, "length", value);
+
   assertCurrent();
+
   if (
     typeof length !== "number" ||
     !Number.isSafeInteger(length) ||
@@ -59,38 +61,53 @@ export function captureQueryProgressCohort<T, P>(
     throw new TypeError("Query progress entries must be an array");
 
   const values: unknown[] = [];
+
   for (let index = 0; index < length; index += 1) {
     const entry: unknown = Reflect.get(value, String(index), value);
+
     assertCurrent();
     values.push(entry);
   }
 
   const captured: CapturedQueryProgressCohortEntry<T, P>[] = [];
+
   for (const entryValue of values) {
     if (!isObject(entryValue) || typeof entryValue === "function")
       throw new TypeError("Each progress cohort entry must be an object");
+
     const receiver = entryValue as QueryProgressCohortEntry<T, P>;
     const signalValue: unknown = Reflect.get(entryValue, "signal", entryValue);
+
     assertCurrent();
     const onEventValue: unknown = Reflect.get(entryValue, "onEvent", entryValue);
+
     assertCurrent();
+
     if (typeof onEventValue !== "function")
       throw new TypeError("Each progress cohort entry requires an onEvent function");
+
     if (!isObject(signalValue)) throw new TypeError("Each progress cohort entry requires a signal");
 
     const signal = signalValue as AbortSignal;
     const aborted: unknown = Reflect.get(signal, "aborted", signal);
+
     assertCurrent();
     const onabort: unknown = Reflect.get(signal, "onabort", signal);
+
     assertCurrent();
     const addAbortListener: unknown = Reflect.get(signal, "addEventListener", signal);
+
     assertCurrent();
     const removeAbortListener: unknown = Reflect.get(signal, "removeEventListener", signal);
+
     assertCurrent();
     const dispatchEvent: unknown = Reflect.get(signal, "dispatchEvent", signal);
+
     assertCurrent();
     const throwIfAborted: unknown = Reflect.get(signal, "throwIfAborted", signal);
+
     assertCurrent();
+
     if (
       typeof aborted !== "boolean" ||
       (onabort !== null && typeof onabort !== "function") ||
@@ -100,6 +117,7 @@ export function captureQueryProgressCohort<T, P>(
       typeof throwIfAborted !== "function"
     )
       throw new TypeError("Each progress cohort entry requires an AbortSignal");
+
     captured.push({
       receiver,
       signal,
@@ -108,6 +126,7 @@ export function captureQueryProgressCohort<T, P>(
       removeAbortListener: removeAbortListener as AbortSignal["removeEventListener"],
     });
   }
+
   return Object.freeze({ entries: Object.freeze(captured) });
 }
 
@@ -134,6 +153,7 @@ function snapshot<P>(
 
 function progressCell<T>(runtime: StoreRuntime<T>) {
   const existing = runtime.queryProgressCell;
+
   if (existing !== undefined) return existing;
 
   const state = runtime.graph.__runtime;
@@ -141,6 +161,7 @@ function progressCell<T>(runtime: StoreRuntime<T>) {
   const created = signal(initial, {
     label: `query:${String(runtime.key)}:progress`,
   });
+
   noteTransferChange(runtime);
   runtime.queryProgressCell = created;
   runtime.queryProgressAuthority = {
@@ -194,6 +215,7 @@ function retainProgress<T>(runtime: StoreRuntime<T>, amount: number): void {
 function currentRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   const state = runtime.graph.__runtime;
   const context = runtime.binding?.context;
+
   return (
     runtime.activeRequest === request &&
     !request.settled &&
@@ -211,6 +233,7 @@ function currentRequest<T>(runtime: StoreRuntime<T>, request: QueryRequest): boo
 function ownsSnapshot<T>(runtime: StoreRuntime<T>, request: QueryRequest): boolean {
   const state = runtime.graph.__runtime;
   const current = runtime.queryProgressAuthority?.current;
+
   return (
     current?.execution === request.progressIdentity &&
     request.generation === runtime.generation &&
@@ -225,6 +248,7 @@ function ownsSnapshot<T>(runtime: StoreRuntime<T>, request: QueryRequest): boole
 function nextSequence(current: number): number {
   if (!Number.isSafeInteger(current) || current < 0 || current >= Number.MAX_SAFE_INTEGER)
     throw new RangeError("Query progress event sequence exhausted");
+
   return current + 1;
 }
 
@@ -248,35 +272,43 @@ function seedIsCurrent<T>(
   delivery: QueryProgressDelivery,
 ): boolean {
   const { event, request } = delivery;
+
   if (runtime.disposed || runtime.graph.__runtime.disposed) return false;
   if (runtime.binding?.context.disposed === true) return false;
+
   if (event.snapshot.execution === undefined)
     return (
       request === undefined &&
       owner.current.execution === undefined &&
       owner.current.status === event.snapshot.status
     );
+
   if (owner.current.execution !== event.snapshot.execution) return false;
+
   if (request === undefined)
     return (
       owner.request === undefined &&
       event.snapshot.status !== "active" &&
       owner.current.status === event.snapshot.status
     );
+
   if (owner.request !== request) return false;
   if (event.snapshot.status === "interrupted") return owner.current.status === "interrupted";
+
   if (
     request.generation !== runtime.generation ||
     request.resetEpoch !== runtime.graph.__runtime.resetEpoch ||
     request.incarnation !== runtime.incarnation
   )
     return false;
+
   if (event.snapshot.status === "active")
     return (
       owner.current.status === "active" ||
       owner.current.status === "complete" ||
       owner.current.status === "failed"
     );
+
   return owner.current.status === event.snapshot.status;
 }
 
@@ -287,6 +319,7 @@ function deferContinuationError(owner: QueryProgressAuthority, error: unknown): 
 function deliveryIsCurrent<T>(runtime: StoreRuntime<T>, delivery: QueryProgressDelivery): boolean {
   const owner = authority(runtime);
   const { event, request } = delivery;
+
   if (runtime.disposed || runtime.graph.__runtime.disposed) return false;
   if (runtime.binding?.context.disposed === true) return false;
 
@@ -296,6 +329,7 @@ function deliveryIsCurrent<T>(runtime: StoreRuntime<T>, delivery: QueryProgressD
       owner.current.execution === undefined &&
       owner.current.status === event.snapshot.status
     );
+
   if (!sameExecution(owner, request)) return false;
 
   if (event.snapshot.status === "interrupted") return owner.current.status === "interrupted";
@@ -308,10 +342,13 @@ function deliveryIsCurrent<T>(runtime: StoreRuntime<T>, delivery: QueryProgressD
     return false;
 
   const currentStatus = owner.current.status;
+
   if (event.kind === "report")
     return currentStatus === "active" || currentStatus === "complete" || currentStatus === "failed";
+
   if (event.snapshot.status === "active")
     return currentStatus === "active" || currentStatus === "complete" || currentStatus === "failed";
+
   return currentStatus === event.snapshot.status;
 }
 
@@ -321,6 +358,7 @@ function deliverTo(
   event: QueryProgressEvent<unknown>,
 ): void {
   if (!listener.active) return;
+
   try {
     listener.observer(event);
   } catch (error) {
@@ -331,18 +369,25 @@ function deliverTo(
 function drain<T>(runtime: StoreRuntime<T>, owner: QueryProgressAuthority): void {
   while (owner.queue.length !== 0) {
     const delivery = owner.queue.shift()!;
+
     if (delivery.target !== undefined) {
       const target = delivery.target;
+
       if (!target.active) continue;
+
       if (runtime.disposed || runtime.graph.__runtime.disposed || runtime.binding?.context.disposed)
         continue;
+
       const current = seedIsCurrent(runtime, owner, delivery);
       const event = current ? delivery.event : makeEvent("current", owner.current);
+
       target.frontier = current ? Math.max(target.frontier, delivery.sequence) : owner.sequence;
       deliverTo(owner, target, event);
       continue;
     }
+
     if (!deliveryIsCurrent(runtime, delivery)) continue;
+
     for (const listener of [...owner.listeners]) {
       if (!listener.active || delivery.sequence <= listener.frontier) continue;
       if (!deliveryIsCurrent(runtime, delivery)) break;
@@ -358,8 +403,10 @@ function drainAndReport<T>(runtime: StoreRuntime<T>, owner: QueryProgressAuthori
     while (owner.queue.length !== 0 || owner.continuationErrors.length !== 0) {
       drain(runtime, owner);
       const errors = owner.continuationErrors.splice(0);
+
       for (const error of errors) reportContinuationError(runtime.graph.__runtime, error);
     }
+
     if (owner.current.status !== "active") owner.request = undefined;
   } finally {
     owner.dispatching = false;
@@ -374,6 +421,7 @@ function publish<T, P>(
 ): void {
   const cell = progressCell(runtime);
   const owner = authority(runtime);
+
   reactiveInternal.assertWritesAllowed(cell);
   const sequence = nextSequence(owner.sequence);
   const event = makeEvent(kind, value) as QueryProgressEvent<unknown>;
@@ -385,17 +433,22 @@ function publish<T, P>(
 
   noteTransferChange(runtime);
   owner.current = value as QueryProgressSnapshot<unknown>;
+
   if (request !== undefined) owner.request = request;
   else if (value.execution === undefined) owner.request = undefined;
+
   owner.sequence = sequence;
   owner.queue.push(delivery);
   const ownsDispatch = !owner.dispatching;
+
   if (ownsDispatch) owner.dispatching = true;
+
   try {
     cell.set(value as QueryProgressSnapshot<unknown>);
   } catch (error) {
     deferContinuationError(owner, error);
   }
+
   if (ownsDispatch) drainAndReport(runtime, owner);
 }
 
@@ -412,6 +465,7 @@ function subscribeProgress<T, P>(
     active: true,
     frontier: owner.sequence,
   };
+
   owner.listeners.add(listener);
   retainProgress(runtime, 1);
   let stopped = false;
@@ -429,6 +483,7 @@ function subscribeProgress<T, P>(
     ...(owner.request === undefined ? {} : { request: owner.request }),
     target: listener,
   };
+
   if (owner.dispatching) {
     owner.queue.push(seedDelivery);
     return stop;
@@ -437,6 +492,7 @@ function subscribeProgress<T, P>(
   owner.dispatching = true;
   let seedFailed = false;
   let seedError: unknown;
+
   try {
     listener.observer(seed as QueryProgressEvent<P>);
   } catch (error) {
@@ -444,6 +500,7 @@ function subscribeProgress<T, P>(
     seedError = error;
     stop();
   }
+
   drainAndReport(runtime, owner);
   if (seedFailed) throw seedError;
   return stop;
@@ -457,12 +514,14 @@ function clearQueryProgress<T>(runtime: StoreRuntime<T>): void {
 /** Releases observer callbacks and request references when their store is disposed. @internal */
 export function retireQueryProgress<T>(runtime: StoreRuntime<T>): void {
   const owner = runtime.queryProgressAuthority;
+
   if (owner === undefined) return;
   noteTransferChange(runtime);
   owner.request = undefined;
   owner.queue.length = 0;
   const cleanupFailures: unknown[] = [];
   const listeners = Array.from(owner.listeners);
+
   for (const listener of listeners) {
     if (listener.cohortStop !== undefined) {
       try {
@@ -474,6 +533,7 @@ export function retireQueryProgress<T>(runtime: StoreRuntime<T>): void {
       listener.active = false;
     }
   }
+
   owner.listeners.clear();
   runtime.progressReadableCount = 0;
   for (const error of cleanupFailures) reportContinuationError(runtime.graph.__runtime, error);
@@ -491,6 +551,7 @@ export interface PreparedQueryProgressCell {
 
 export function prepareQueryProgressCell<T>(runtime: StoreRuntime<T>): PreparedQueryProgressCell {
   const existing = runtime.queryProgressCell;
+
   if (existing !== undefined) {
     return {
       readable: existing as Readable<QueryProgressSnapshot<unknown>>,
@@ -501,6 +562,7 @@ export function prepareQueryProgressCell<T>(runtime: StoreRuntime<T>): PreparedQ
       discard: () => undefined,
     };
   }
+
   const state = runtime.graph.__runtime;
   const initial = idleSnapshot();
   const created = signal(initial, { label: "query:" + String(runtime.key) + ":progress" });
@@ -512,6 +574,7 @@ export function prepareQueryProgressCell<T>(runtime: StoreRuntime<T>): PreparedQ
     continuationErrors: [],
     dispatching: false,
   };
+
   registerTransferReadable(created, runtime, "query-progress");
   reactiveInternal.bindReadable(created, {
     graphId: state.graph.id,
@@ -525,6 +588,7 @@ export function prepareQueryProgressCell<T>(runtime: StoreRuntime<T>): PreparedQ
   let published = false;
   let delivered = false;
   let discarded = false;
+
   return {
     readable: created as Readable<QueryProgressSnapshot<unknown>>,
     cell: created,
@@ -583,6 +647,7 @@ export function enrollQueryProgressCohort<T, P>(
   assertCurrent();
   if (captured.entries.length === 0) return () => undefined;
   const observation = queryProgressObservation<T, P>(runtime);
+
   assertCurrent();
   const owner = authority(runtime);
   const cleanupOwner = runtime.binding?.context.retirement ?? runtime.graph.__runtime.retirement;
@@ -600,6 +665,7 @@ export function enrollQueryProgressCohort<T, P>(
   let revokeCohort: () => void = () => undefined;
   const checkCurrent = (): void => {
     if (enrollmentFailed) throw enrollmentError;
+
     try {
       assertCurrent();
     } catch (error) {
@@ -624,20 +690,24 @@ export function enrollQueryProgressCohort<T, P>(
       observer: (event) => {
         let callbackFailed = false;
         let callbackError: unknown;
+
         try {
           Reflect.apply(entry.onEvent, entry.receiver, [event as QueryProgressEvent<P>, context]);
         } catch (error) {
           callbackFailed = true;
           callbackError = error;
         }
+
         let currentFailed = false;
         let currentError: unknown;
+
         if (enrollmentOpen) {
           try {
             checkCurrent();
           } catch (error) {
             currentFailed = true;
             currentError = error;
+
             try {
               revokeCohort();
             } catch (cleanupError) {
@@ -645,6 +715,7 @@ export function enrollQueryProgressCohort<T, P>(
             }
           }
         }
+
         if (callbackFailed) throw callbackError;
         if (currentFailed) throw currentError;
       },
@@ -658,25 +729,31 @@ export function enrollQueryProgressCohort<T, P>(
     });
     const unlink = (): void => {
       if (!addAttempted || removeAttempted) return;
+
       if (adding) {
         removePending = true;
         return;
       }
+
       removeAttempted = true;
       physicalCleanup(cleanupOwner, () =>
         Reflect.apply(entry.removeAbortListener, entry.signal, ["abort", abortHandler]),
       );
       if (enrollmentOpen && !enrollmentFailed) checkCurrent();
     };
+
     stop = (retiring = false): void => {
       if (stopped) return;
       stopped = true;
       const failures: unknown[] = [];
+
       if (listener.active) {
         listener.active = false;
         owner.listeners.delete(listener);
+
         if (retained && !retiring) {
           retained = false;
+
           try {
             retainProgress(runtime, -1);
           } catch (error) {
@@ -686,12 +763,15 @@ export function enrollQueryProgressCohort<T, P>(
           retained = false;
         }
       }
+
       try {
         unlink();
       } catch (error) {
         failures.push(error);
       }
+
       if (failures.length === 1) throw failures[0];
+
       if (failures.length > 1)
         throw new AggregateError(failures, "Query progress listener cleanup failed");
     };
@@ -716,14 +796,18 @@ export function enrollQueryProgressCohort<T, P>(
       },
       attach: (): void => {
         const before: unknown = Reflect.get(entry.signal, "aborted", entry.signal);
+
         checkCurrent();
         if (typeof before !== "boolean") throw new TypeError("Invalid progress cohort signal");
+
         if (before) {
           stop(false);
           return;
         }
+
         addAttempted = true;
         adding = true;
+
         try {
           Reflect.apply(entry.addAbortListener, entry.signal, [
             "abort",
@@ -733,38 +817,46 @@ export function enrollQueryProgressCohort<T, P>(
         } catch (error) {
           adding = false;
           const failures: unknown[] = [error];
+
           try {
             stop(false);
           } catch (cleanupError) {
             failures.push(cleanupError);
           }
+
           try {
             unlink();
           } catch (cleanupError) {
             failures.push(cleanupError);
           }
+
           if (failures.length === 1) throw error;
           throw new AggregateError(
             failures,
             "Progress cohort signal attachment and cleanup failed",
           );
         }
+
         adding = false;
         if (removePending || stopped) unlink();
         checkCurrent();
         const after: unknown = Reflect.get(entry.signal, "aborted", entry.signal);
+
         checkCurrent();
         if (typeof after !== "boolean") throw new TypeError("Invalid progress cohort signal");
         if (after) stop(false);
       },
     };
+
     return registration;
   };
 
   const ownsDispatcher = !owner.dispatching;
+
   if (ownsDispatcher) owner.dispatching = true;
   const rollback = (): void => {
     const failures: unknown[] = [];
+
     for (const registration of [...registrations].reverse()) {
       try {
         registration.stop(false);
@@ -772,16 +864,20 @@ export function enrollQueryProgressCohort<T, P>(
         failures.push(error);
       }
     }
+
     if (failures.length === 1) throw failures[0];
+
     if (failures.length > 1)
       throw new AggregateError(failures, "Query progress cohort rollback failed");
   };
+
   revokeCohort = rollback;
 
   try {
     for (const entry of captured.entries) {
       checkCurrent();
       const registration = makeRegistration(entry);
+
       registrations.push(registration);
       registration.attach();
     }
@@ -796,8 +892,10 @@ export function enrollQueryProgressCohort<T, P>(
     const seedSequence = owner.sequence;
     const seedRequest = owner.request;
     const seedEvent = makeEvent("current", seedSnapshot);
+
     for (const registration of registrations) {
       const listener = registration.listener;
+
       if (!listener.active) continue;
       listener.frontier = seedSequence;
       owner.queue.push({
@@ -815,11 +913,13 @@ export function enrollQueryProgressCohort<T, P>(
   } catch (cause) {
     enrollmentOpen = false;
     const failures: unknown[] = [cause, ...invalidationCleanupErrors];
+
     try {
       rollback();
     } catch (cleanupError) {
       failures.push(cleanupError);
     }
+
     if (ownsDispatcher && owner.dispatching) {
       try {
         drainAndReport(runtime, owner);
@@ -827,6 +927,7 @@ export function enrollQueryProgressCohort<T, P>(
         failures.push(drainError);
       }
     }
+
     if (failures.length === 1) throw cause;
     throw new AggregateError(failures, "Query progress cohort enrollment and cleanup failed");
   }
@@ -852,9 +953,12 @@ export function reportQueryProgress<T, P>(
   if (!currentRequest(runtime, request)) return;
   const owner = authority(runtime);
   const current = owner.current;
+
   if (current.execution !== request.progressIdentity || current.status !== "active") return;
+
   if (current.reportRevision >= Number.MAX_SAFE_INTEGER)
     throw new RangeError("Query progress report revision exhausted");
+
   publish(
     runtime,
     snapshot(
@@ -874,6 +978,7 @@ export function reportQueryProgress<T, P>(
 export function completeQueryProgress<T>(runtime: StoreRuntime<T>, request: QueryRequest): void {
   if (!ownsSnapshot(runtime, request)) return;
   const current = authority(runtime).current;
+
   if (current.status !== "active") return;
   publish(
     runtime,
@@ -898,6 +1003,7 @@ export function failQueryProgress<T>(
 ): void {
   if (!ownsSnapshot(runtime, request)) return;
   const current = authority(runtime).current;
+
   if (current.status !== "active") return;
   publish(
     runtime,
@@ -927,11 +1033,14 @@ export function interruptQueryProgress<T>(
 ): void {
   if (runtime.disposed || runtime.graph.__runtime.disposed) return;
   const current = runtime.queryProgressAuthority?.current;
+
   if (current?.execution !== request.progressIdentity || current.status !== "active") return;
+
   if (options?.authorityChanged === true) {
     if (!runtime.requests.has(request) && runtime.queryProgressAuthority?.request !== request)
       return;
   } else if (runtime.activeRequest !== request && !ownsSnapshot(runtime, request)) return;
+
   publish(
     runtime,
     snapshot(

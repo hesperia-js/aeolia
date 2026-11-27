@@ -73,6 +73,7 @@ function createMutationOutput<T>(physical: PhysicalWork): MutationOutput<T> {
   const { promise, resolve, reject } = createPhysicalCompletion<T>(() => {
     if (output.acknowledged) finishPhysicalWork(physical);
   });
+
   output = { promise, resolve, reject, acknowledged: true };
   physical.original = promise;
   physical.continuation = promise;
@@ -98,16 +99,22 @@ function resolveMutationTarget(
 ): MutationTarget | undefined {
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const select = affected.select;
+
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const queryInput = nativeApply(select, affected, [input]);
+
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const query = affected.query;
+
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const keyForInput = query.key;
+
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const key = storeKey(nativeApply(keyForInput, query, [queryInput]));
+
   if (!isCurrentMutationEpoch(state, resetEpoch)) return undefined;
   const runtime = state.stores.get(String(key));
+
   return {
     affected,
     key,
@@ -127,8 +134,10 @@ function applyMutationEffects(
     if (!isCurrentMutationEpoch(state, resetEpoch)) return;
     let target: MutationTarget;
     const admission = beginTransferAdmission(state, definition, undefined, input);
+
     try {
       const resolved = resolveMutationTarget(state, affected, input, resetEpoch);
+
       if (resolved === undefined) return;
       target = resolved;
       if (target.runtime !== undefined) registerTransferDispatchTarget(dispatch, target.runtime);
@@ -139,12 +148,16 @@ function applyMutationEffects(
     } finally {
       finishTransferAdmission(admission);
     }
+
     const runtime = target.runtime;
+
     if (runtime === undefined || runtime.disposed) continue;
+
     if (affected.on === "invalidate") {
       invalidateStore(runtime);
       if (!runtime.valueLive) continue;
     }
+
     try {
       const caller = callerForSource(runtime, {
         query: target.affected.query,
@@ -152,6 +165,7 @@ function applyMutationEffects(
       });
       const recovering =
         runtime.recoveryDisarmed || runtime.activeRequest?.automaticRecovery === true;
+
       void startQuery(runtime, caller, true, undefined, recovering);
     } catch (error) {
       reportContinuationError(state, error);
@@ -169,20 +183,24 @@ export function runMutation<I, R>(
   assertGraphOpen(state);
   const acquisition = beginPhysicalWork(state.retirement, "acquisition");
   let output: MutationOutput<R>;
+
   try {
     output = createMutationOutput<R>(acquisition);
   } catch (error) {
     finishPhysicalWork(acquisition);
     throw error;
   }
+
   let sourceStarted = false;
   const superseded = (): Promise<R> => {
     output.reject(new AbortError("The mutation was superseded by a graph reset."));
     return output.promise;
   };
   let admission: TransferAdmission | undefined;
+
   try {
     const resetEpoch = state.resetEpoch;
+
     admission = beginTransferAdmission(state, definition, undefined, input);
     const dispatch = beginTransferDispatch(
       state.graph,
@@ -193,46 +211,60 @@ export function runMutation<I, R>(
       source,
     );
     const targets: MutationTarget[] = [];
+
     for (const affected of definition.affects) {
       const target = resolveMutationTarget(state, affected, input, resetEpoch);
+
       if (target === undefined) return superseded();
       if (target.runtime !== undefined) registerTransferDispatchTarget(dispatch, target.runtime);
       targets.push(target);
     }
+
     if (admission !== undefined) {
       finishTransferAdmission(admission);
       admission = undefined;
     }
+
     const prepared: Array<{
       readonly runtime: StoreRuntime<unknown>;
       readonly prediction: Prediction<unknown>;
     }> = [];
+
     for (const target of targets) {
       if (target.runtime === undefined) continue;
       const declared = target.affected.optimistic as
         | ((current: unknown, input: unknown) => unknown)
         | undefined;
+
       if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
       const optimistic = options?.optimistic;
+
       if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
       let supplied: ((current: unknown, input: unknown) => unknown) | undefined;
+
       if (optimistic !== undefined) {
         const get = optimistic.get;
+
         if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
         supplied = nativeApply(get, optimistic, [target.key]);
       }
+
       const predictor = (supplied ?? declared) as
         | ((current: unknown, input: unknown) => unknown)
         | undefined;
+
       if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
       if (predictor === undefined) continue;
       const prediction = preparePrediction(target.runtime, predictor, input, () =>
         isCurrentMutationEpoch(state, resetEpoch),
       );
+
       if (!isCurrentMutationEpoch(state, resetEpoch)) return superseded();
       if (prediction != null) prepared.push({ runtime: target.runtime, prediction });
     }
+
     const predictions: Array<{ readonly runtime: StoreRuntime<unknown>; readonly id: number }> = [];
+
     reactiveInternal.batch(() => {
       for (const job of prepared) {
         if (pushPrediction(job.runtime, job.prediction))
@@ -244,6 +276,7 @@ export function runMutation<I, R>(
 
     const controller = new AbortController();
     let removeAbort: () => void;
+
     try {
       removeAbort = addSignalAbortWithDefaultReason(
         options?.abortSignal,
@@ -266,23 +299,29 @@ export function runMutation<I, R>(
           // Registration keeps its original error; retirement records cleanup failure.
         }
       }
+
       throw error;
     }
+
     if (!isCurrentMutationEpoch(state, resetEpoch)) {
       physicalCleanup(state.retirement, removeAbort);
       return superseded();
     }
+
     state.activeControllers.add(controller);
     let runResult: unknown;
     let runReturned = false;
     let returned: Promise<R>;
+
     try {
       const run = definition.run;
+
       if (!isCurrentMutationEpoch(state, resetEpoch)) {
         physicalCleanup(state.retirement, removeAbort);
         state.activeControllers.delete(controller);
         return superseded();
       }
+
       sourceStarted = true;
       runResult = nativeApply(run, definition, [
         input,
@@ -294,11 +333,14 @@ export function runMutation<I, R>(
     } catch (error) {
       if (runReturned && isObject(runResult)) output.acknowledged = false;
       const rejected = createPhysicalCompletion<R>();
+
       rejected.reject(error);
       returned = rejected.promise;
     }
+
     const observer = returned.then;
     const nativeObserver = canReplacePhysicalCarrier(returned, observer);
+
     if (!nativeObserver) output.acknowledged = false;
     const succeeded = (result: R): R | void => {
       try {
@@ -307,18 +349,21 @@ export function runMutation<I, R>(
         } finally {
           state.activeControllers.delete(controller);
         }
+
         if (isCurrentMutationEpoch(state, resetEpoch)) {
           try {
             reactiveInternal.batch(() => {
               for (const prediction of predictions) {
                 markPredictionSucceeded(prediction.runtime, prediction.id);
               }
+
               applyMutationEffects(state, definition, input, resetEpoch, dispatch);
             });
           } catch (error) {
             if (isCurrentMutationEpoch(state, resetEpoch)) reportContinuationError(state, error);
           }
         }
+
         if (nativeObserver) output.resolve(result);
         else return result;
       } catch (error) {
@@ -333,6 +378,7 @@ export function runMutation<I, R>(
         } finally {
           state.activeControllers.delete(controller);
         }
+
         if (isCurrentMutationEpoch(state, resetEpoch)) {
           try {
             reactiveInternal.batch(() => {
@@ -345,6 +391,7 @@ export function runMutation<I, R>(
               reportContinuationError(state, cleanupError);
           }
         }
+
         if (nativeObserver) output.reject(error);
         else return Promise.reject(error);
       } catch (failure) {
@@ -353,11 +400,13 @@ export function runMutation<I, R>(
       }
     };
     const completion = nativeApply(observer, returned, [succeeded, failed]) as Promise<R>;
+
     if (!nativeObserver) {
       acquisition.continuation = completion;
       output.resolve(undefined as R);
       return completion;
     }
+
     return output.promise;
   } catch (error) {
     if (sourceStarted) output.acknowledged = false;
@@ -396,6 +445,7 @@ export function beginBoundMutation(binding: MutationBindingRuntime): BoundMutati
   const physical = beginPhysicalWork(binding.context.retirement, "acquisition");
   const outputPhysical = beginPhysicalWork(binding.context.retirement, "mutation");
   let output: MutationOutput<unknown> | undefined;
+
   try {
     output = createMutationOutput(outputPhysical);
     const controller = new AbortController();
@@ -411,6 +461,7 @@ export function beginBoundMutation(binding: MutationBindingRuntime): BoundMutati
       unacknowledged: false,
       outputStarted: false,
     };
+
     binding.context.mutationControllers.add(controller);
     binding.context.state.activeControllers.add(controller);
     return attempt;
@@ -429,6 +480,7 @@ export function finishBoundMutation(attempt: BoundMutationAttempt): void {
   attempt.stage = "finished";
   attempt.binding.context.mutationControllers.delete(attempt.controller);
   attempt.binding.context.state.activeControllers.delete(attempt.controller);
+
   try {
     physicalCleanup(attempt.binding.context.retirement, () => attempt.removeAbort?.());
   } catch (error) {
@@ -458,6 +510,7 @@ function assertBoundPhase(attempt: BoundMutationAttempt): void {
 
 function targetOwnedByPhase(phase: EffectPhaseRuntime, value: object): QueryTargetRuntime {
   const target = queryTargetByHandle.get(value);
+
   if (
     target === undefined ||
     target.binding.context !== phase.binding.context ||
@@ -465,6 +518,7 @@ function targetOwnedByPhase(phase: EffectPhaseRuntime, value: object): QueryTarg
     phase.members.get(target.runtime)?.has(target.incarnation) !== true
   )
     throw new TypeError("Effect target was not discovered by this phase");
+
   return target;
 }
 
@@ -482,13 +536,16 @@ function effectPhase(
     input,
   );
   let selectedInput: unknown;
+
   try {
     const select = effect.affected.select;
+
     assertBoundPhase(attempt);
     selectedInput = nativeApply(select, effect.affected, [input]);
   } finally {
     finishTransferAdmission(selectorAdmission);
   }
+
   assertBoundPhase(attempt);
   const phase: EffectPhaseRuntime = {
     binding: attempt.binding,
@@ -499,6 +556,7 @@ function effectPhase(
   };
   const assertActive = (): void => {
     assertBoundPhase(attempt);
+
     if (!phase.active || attempt.stage !== kind)
       throw new TypeError("Effect phase has already completed");
   };
@@ -511,6 +569,7 @@ function effectPhase(
     assertActive();
     const target = targetOwnedByPhase(phase, value);
     const handle = Object.freeze({});
+
     effectInstructionByHandle.set(handle, {
       phase,
       target,
@@ -533,17 +592,22 @@ function effectPhase(
         queryInput,
       );
       let key: ReturnType<typeof storeKey>;
+
       try {
         const keyForInput = effect.query.key;
+
         assertActive();
         key = storeKey(nativeApply(keyForInput, effect.query, [queryInput]));
       } finally {
         finishTransferAdmission(admission);
       }
+
       assertActive();
       const targets: ExistingTarget<any>[] = [];
+
       for (const binding of phase.binding.context.bindings.get(effect.query)?.values() ?? []) {
         const runtime = binding.stores.get(String(key));
+
         if (
           runtime === undefined ||
           runtime.disposed ||
@@ -551,17 +615,22 @@ function effectPhase(
           runtime.incarnation === undefined
         )
           continue;
+
         const ticket = captureQueryTarget(binding, runtime);
+
         if (ticket === undefined) continue;
         let incarnations = phase.members.get(runtime);
+
         if (incarnations === undefined) {
           incarnations = new Set();
           phase.members.set(runtime, incarnations);
         }
+
         registerTransferDispatchTarget(attempt.transferDispatch, runtime);
         incarnations.add(runtime.incarnation);
         targets.push(ticket);
       }
+
       return Object.freeze(targets);
     },
   };
@@ -576,6 +645,7 @@ function effectPhase(
       assertActive();
       targetOwnedByPhase(phase, target);
       const prediction = captureBoundProducer(attempt.binding.definition, target, producer);
+
       assertActive();
       return instruction(target, "predict", undefined, prediction) as PreparedEffect;
     },
@@ -586,10 +656,13 @@ function effectPhase(
       instruction(target, "selected", queryInput) as SettledEffect,
     current: (target: ExistingTarget<any>) => instruction(target, "current") as SettledEffect,
   });
+
   try {
     const callback = kind === "prepare" ? effect.prepare : effect.settle;
+
     assertBoundPhase(attempt);
     const result = nativeApply(callback, effect, [kind === "prepare" ? prepare : settle]);
+
     return { phase, result };
   } catch (error) {
     phase.active = false;
@@ -604,11 +677,15 @@ function phaseInstructions(
 ): readonly EffectInstructionRuntime[] {
   try {
     assertBoundPhase(attempt);
+
     if (!Array.isArray(result))
       throw new TypeError("Effect resolver must return an instruction array");
+
     const instructions: EffectInstructionRuntime[] = [];
+
     for (const value of result) {
       const checked = effectInstructionByHandle.get(value);
+
       if (
         checked === undefined ||
         checked.phase !== phase ||
@@ -617,8 +694,10 @@ function phaseInstructions(
           : checked.kind !== "selected" && checked.kind !== "current")
       )
         throw new TypeError("Effect resolver returned a foreign or wrong-phase instruction");
+
       instructions.push(checked);
     }
+
     assertBoundPhase(attempt);
     return instructions;
   } finally {
@@ -645,8 +724,10 @@ function afterPhase<T>(
     // Revoked thenables cannot gain new callouts to manufacture an acknowledgement.
     physical.original = value;
   };
+
   try {
     const then: unknown = isObject(value) ? Reflect.get(value, "then") : undefined;
+
     thenCaptured = true;
     thenCallable = typeof then === "function";
     assertBoundPhase(attempt);
@@ -658,18 +739,22 @@ function afterPhase<T>(
         reject(new AbortError("Mutation preparation was canceled."));
         return;
       }
+
       const aborted = (): void => reject(new AbortError("Mutation preparation was canceled."));
+
       try {
         if (attempt.stage === "prepare") {
           removeWait = () => attempt.controller.signal.removeEventListener("abort", aborted);
           attempt.controller.signal.addEventListener("abort", aborted, { once: true });
         }
+
         assertBoundPhase(attempt);
       } catch (error) {
         retainUnacknowledgedOriginal();
         reject(error);
         return;
       }
+
       physical.original = value;
       const original = createPhysicalPromise<unknown>((resolveOriginal, rejectOriginal) => {
         try {
@@ -679,6 +764,7 @@ function afterPhase<T>(
           rejectOriginal(error);
         }
       });
+
       retained = true;
       const continuation = continuePhysicalPromise<unknown, void>(original, (certified) => {
         if (!certified) retainUnacknowledgedMutation(attempt);
@@ -699,8 +785,10 @@ function afterPhase<T>(
           },
         };
       });
+
       if (physical.active) physical.continuation = continuation.promise;
     });
+
     // Cancellation ends this wait; the invoked original keeps its separate physical owner.
     return continuePhysicalPromise<{ readonly value: unknown }, T>(pending, (certified) => {
       if (!certified) retainUnacknowledgedMutation(attempt);
@@ -736,6 +824,7 @@ function prepareBoundEffects(
     const resolved = afterPhase(attempt, result, (value) =>
       phaseInstructions(attempt, phase, value),
     );
+
     if (resolved instanceof Promise)
       return continuePhysicalPromise<
         readonly EffectInstructionRuntime[],
@@ -749,8 +838,10 @@ function prepareBoundEffects(
           },
         };
       }).promise;
+
     prepared.push(...resolved);
   }
+
   return prepared;
 }
 
@@ -758,6 +849,7 @@ function removeBoundPredictions(attempt: BoundMutationAttempt): void {
   reactiveInternal.batch(() => {
     for (const prediction of attempt.predictions) {
       if (!isQueryTargetCurrent(prediction.target)) continue;
+
       try {
         removePrediction(prediction.target.runtime, prediction.id);
       } catch (error) {
@@ -777,9 +869,11 @@ function publishBoundPredictions(
     readonly target: QueryTargetRuntime;
     readonly prediction: Prediction<unknown>;
   }> = [];
+
   for (const instruction of instructions) {
     assertBoundPhase(attempt);
     const target = instruction.target;
+
     if (!isQueryTargetCurrent(target)) continue;
     const override = overrides.get(target.runtime.identity);
     const explicit =
@@ -789,6 +883,7 @@ function publishBoundPredictions(
     const original =
       instruction.kind === "original" ? instruction.phase.effect.affected.optimistic : undefined;
     const producer = explicit?.producer ?? instruction.prediction?.producer ?? original;
+
     if (producer === undefined) continue;
     const prediction = preparePrediction(
       target.runtime,
@@ -799,9 +894,11 @@ function publishBoundPredictions(
         isQueryTargetCurrent(target) &&
         (attempt.stage !== "prepare" || !attempt.controller.signal.aborted),
     );
+
     assertBoundPhase(attempt);
     if (prediction !== undefined) jobs.push({ target, prediction });
   }
+
   reactiveInternal.batch(() => {
     for (const job of jobs) {
       assertBoundPhase(attempt);
@@ -820,8 +917,10 @@ function applyBoundEffect(
 ): void {
   assertBoundPhase(attempt);
   const target = instruction.target;
+
   if (!isQueryTargetCurrent(target)) return;
   const runtime = target.runtime;
+
   if (instruction.kind === "selected") {
     const query = instruction.phase.effect.query;
     const admission = beginTransferAdmission(
@@ -831,35 +930,46 @@ function applyBoundEffect(
       instruction.input,
     );
     let key: ReturnType<typeof storeKey>;
+
     try {
       const keyForInput = query.key;
+
       assertBoundPhase(attempt);
       key = storeKey(nativeApply(keyForInput, query, [instruction.input]));
     } finally {
       finishTransferAdmission(admission);
     }
+
     assertBoundPhase(attempt);
     if (!isQueryTargetCurrent(target)) return;
+
     if (key !== runtime.key)
       throw new TypeError("Selected effect input does not match its target key");
   }
+
   const effectMode = instruction.phase.effect.affected.on;
+
   assertBoundPhase(attempt);
   if (!isQueryTargetCurrent(target)) return;
+
   if (effectMode === "invalidate") {
     invalidateStore(runtime);
     assertBoundPhase(attempt);
     if (!isQueryTargetCurrent(target) || !runtime.valueLive) return;
   }
+
   const source = runtime.source;
+
   if (source === undefined) return;
   const caller = callerForSource(runtime, {
     query: source.query,
     input: instruction.kind === "selected" ? instruction.input : source.input,
   });
+
   assertBoundPhase(attempt);
   if (!isQueryTargetCurrent(target)) return;
   const recovering = runtime.recoveryDisarmed || runtime.activeRequest?.automaticRecovery === true;
+
   void startQuery(runtime, caller, true, undefined, recovering, target.incarnation);
 }
 
@@ -873,6 +983,7 @@ function settleBoundEffects(
     let resolved:
       | readonly EffectInstructionRuntime[]
       | Promise<readonly EffectInstructionRuntime[]>;
+
     try {
       const { phase, result } = effectPhase(
         attempt,
@@ -880,15 +991,19 @@ function settleBoundEffects(
         input,
         "settle",
       );
+
       resolved = afterPhase(attempt, result, (value) => phaseInstructions(attempt, phase, value));
     } catch (error) {
       if (currentBoundLifetime(attempt))
         reportContinuationError(attempt.binding.context.state, error);
+
       continue;
     }
+
     const apply = (instructions: readonly EffectInstructionRuntime[]): void => {
       for (const instruction of instructions) {
         if (!currentBoundLifetime(attempt)) return;
+
         try {
           applyBoundEffect(attempt, instruction);
         } catch (error) {
@@ -897,6 +1012,7 @@ function settleBoundEffects(
         }
       }
     };
+
     if (resolved instanceof Promise) {
       const applied = continuePhysicalPromise<readonly EffectInstructionRuntime[], void>(
         resolved,
@@ -911,11 +1027,13 @@ function settleBoundEffects(
           };
         },
       ).promise;
+
       return continuePhysicalPromise<void, void>(applied, (certified) => {
         if (!certified) retainUnacknowledgedMutation(attempt);
         return { fulfilled: () => settleBoundEffects(attempt, input, position + 1) };
       }).promise;
     }
+
     apply(resolved);
   }
 }
@@ -928,19 +1046,25 @@ export function runBoundMutation(
   suppliedOverrides: readonly unknown[],
 ): Promise<unknown> {
   const overrides = new Map<object, BoundProducerRuntime>();
+
   for (const value of suppliedOverrides) {
     const checked = targetPredictionByHandle.get(value as object);
+
     if (
       checked === undefined ||
       checked.mutation !== attempt.binding.definition ||
       checked.target.binding.context !== attempt.binding.context
     )
       throw new TypeError("Mutation override requires its exact mutation and context");
+
     const identity = checked.target.runtime.identity;
+
     if (overrides.has(identity))
       throw new TypeError("Duplicate prediction override for one store identity");
+
     overrides.set(identity, checked);
   }
+
   const admission = beginTransferAdmission(
     attempt.binding.context.state,
     attempt.binding.definition,
@@ -953,6 +1077,7 @@ export function runBoundMutation(
     admissionOpen = false;
     finishTransferAdmission(admission);
   };
+
   attempt.outputStarted = true;
   const cleanFailedMutation = (): void => {
     try {
@@ -972,6 +1097,7 @@ export function runBoundMutation(
       attempt.output.reject(failure);
     }
   };
+
   try {
     attempt.transferDispatch = beginTransferDispatch(
       attempt.binding.context.state.graph,
@@ -983,18 +1109,24 @@ export function runBoundMutation(
     );
     registerTransferWork(attempt, attempt.physical);
     assertBoundPhase(attempt);
+
     if (signal !== undefined) {
       const abort = (): void => attempt.controller.abort();
+
       attempt.removeAbort = () => signal.removeEventListener("abort", abort);
       const aborted = signal.aborted;
+
       assertBoundPhase(attempt);
+
       if (aborted) attempt.controller.abort();
       else {
         const add = signal.addEventListener;
+
         assertBoundPhase(attempt);
         nativeApply(add, signal, ["abort", abort, { once: true }]);
       }
     }
+
     assertBoundPhase(attempt);
     const preparation = prepareBoundEffects(attempt, input, 0, []);
     const dispatch = (instructions: readonly EffectInstructionRuntime[]): Promise<unknown> => {
@@ -1004,6 +1136,7 @@ export function runBoundMutation(
       attempt.stage = "run";
       let returned: unknown;
       let runReturned = false;
+
       try {
         returned = attempt.binding.run(input, {
           graph: attempt.binding.context.state.graph.id,
@@ -1014,6 +1147,7 @@ export function runBoundMutation(
       } catch (error) {
         returned = Promise.reject(error);
       }
+
       try {
         const output = normalizePhysicalPromise(returned);
         const completion = continuePhysicalPromise(output, (certified) => {
@@ -1023,16 +1157,20 @@ export function runBoundMutation(
               noteTransferChange(attempt);
               attempt.stage = "settle";
               if (!currentBoundLifetime(attempt)) return result;
+
               for (const prediction of attempt.predictions) {
                 if (!currentBoundLifetime(attempt)) return result;
                 if (!isQueryTargetCurrent(prediction.target)) continue;
+
                 try {
                   markPredictionSucceeded(prediction.target.runtime, prediction.id);
                 } catch (error) {
                   reportContinuationError(attempt.binding.context.state, error);
                 }
               }
+
               const settlement = settleBoundEffects(attempt, input);
+
               return settlement instanceof Promise
                 ? continuePhysicalPromise<void, unknown>(settlement, (settlementCertified) => {
                     if (!settlementCertified) retainUnacknowledgedMutation(attempt);
@@ -1042,6 +1180,7 @@ export function runBoundMutation(
             },
           };
         });
+
         return completion.promise;
       } catch (error) {
         if (runReturned && isObject(returned)) retainUnacknowledgedMutation(attempt);
@@ -1058,17 +1197,20 @@ export function runBoundMutation(
             },
           ).promise
         : dispatch(preparation);
+
     try {
       let replaceFinalCarrier = false;
       const final = continuePhysicalPromise(running, (certified) => {
         if (!certified) retainUnacknowledgedMutation(attempt);
         const nativeObserver = certified && !attempt.unacknowledged;
+
         replaceFinalCarrier = nativeObserver;
         const succeeded = (result: unknown): unknown => {
           if (!nativeObserver) {
             finishBoundMutation(attempt);
             return result;
           }
+
           try {
             finishBoundMutation(attempt);
             attempt.output.resolve(result);
@@ -1083,19 +1225,24 @@ export function runBoundMutation(
             return Promise.reject(error);
           }
         };
+
         return { fulfilled: succeeded, rejected: failed };
       });
       const completion = final.promise;
+
       if (attempt.physical.active) attempt.physical.continuation = completion;
+
       if (!replaceFinalCarrier) {
         attempt.outputPhysical.original = completion;
         attempt.output.resolve(undefined);
         return completion;
       }
+
       return attempt.output.promise;
     } catch (error) {
       if (attempt.stage !== "prepare" && isObject(attempt.physical.original))
         retainUnacknowledgedMutation(attempt);
+
       throw error;
     }
   } catch (error) {
