@@ -7,6 +7,7 @@ export function sharedProjectionTypes(source: StreamStore<number>, plain: Store<
     initial: "",
     step: (previous, item) => previous + item.toFixed(0),
   });
+
   // @ts-expect-error Numeric source items cannot satisfy a string reducer.
   project(source, {
     kind: "reduce",

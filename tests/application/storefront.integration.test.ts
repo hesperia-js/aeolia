@@ -68,6 +68,7 @@ function pendingCall(backend: TestBackend, name: string, key?: string): CallReco
   const call = backend
     .pending(name)
     .find((candidate) => key === undefined || String(candidate.key) === key);
+
   if (call === undefined) throw new Error(`Expected pending ${name} call`);
   return call;
 }
@@ -82,6 +83,7 @@ function waitFor<T>(readable: Readable<T>, predicate: (value: T) => boolean): Pr
       stop?.();
       resolve();
     };
+
     stop = subscribe(readable, (value) => {
       if (predicate(value)) finish();
     });
@@ -198,6 +200,7 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
     const initialInventory: Inventory = { productId: "sku-1", available: 8 };
     const initialCart: Cart = [];
     const initialHistory: readonly Order[] = [];
+
     backend.resolve(pendingCall(backend, "product.get", "product/sku-1"), initialProduct);
     backend.resolve(pendingCall(backend, "inventory.get", "inventory/sku-1"), initialInventory);
     backend.resolve(pendingCall(backend, "cart.get", "cart/user-1"), initialCart);
@@ -213,6 +216,7 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
 
     const line: CartLine = { productId: "sku-1", quantity: 1 };
     const add = graph.api.addToCart({ userId: "user-1", line });
+
     expect(cart.value.get()).toEqual([line]);
     expect(cartValues).toStrictEqual([initialCart, [line]]);
     backend.resolve(pendingCall(backend, "cart.add"), undefined);
@@ -221,6 +225,7 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
     const cartAfterAddReady = cart.ready;
     const equalAuthoritativeCart: Cart = [{ ...line }];
     const cartNotificationsAfterPrediction = cartValues.length;
+
     backend.resolve(pendingCall(backend, "cart.get", "cart/user-1"), equalAuthoritativeCart);
     await expect(cartAfterAddReady).resolves.toEqual(equalAuthoritativeCart);
     expect(cartValues).toHaveLength(cartNotificationsAfterPrediction);
@@ -234,6 +239,7 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
       productId: "sku-1",
       quantity: 1,
     };
+
     backend.resolve(pendingCall(backend, "order.purchase"), receipt);
     await expect(purchase).resolves.toEqual(receipt);
     expect(product.value.get()).toEqual(initialProduct);
@@ -247,6 +253,7 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
     const inventoryReadyAfterFailure = inventory.ready;
     const refreshedInventory: Inventory = { productId: "sku-1", available: 7 };
     const refreshedHistory: readonly Order[] = [receipt];
+
     backend.resolve(pendingCall(backend, "cart.get", "cart/user-1"), []);
     backend.resolve(pendingCall(backend, "orders.history", "orders/user-1"), refreshedHistory);
     backend.reject(
@@ -265,6 +272,7 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
 
     const inventoryRetry = inventory.revalidate();
     const inventoryRetryReady = inventory.ready;
+
     backend.resolve(pendingCall(backend, "inventory.get", "inventory/sku-1"), refreshedInventory);
     await inventoryRetry;
     await expect(inventoryRetryReady).resolves.toEqual(refreshedInventory);
@@ -294,6 +302,7 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
     const stopOrder = subscribe(orderStream, (value) => orderValues.push(value));
     const stopInventoryLog = subscribe(inventoryLog, (value) => inventoryLogs.push(value));
     const stopSummary = subscribe(orderSummary, (value) => summaries.push(value));
+
     expect(inventoryStream.status.get()).toBe("opening");
     expect(orderStream.status.get()).toBe("opening");
     expect(inventoryValues).toStrictEqual([]);
@@ -307,21 +316,26 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
     const inventoryEvent2: InventoryEvent = { productId: "sku-1", available: 6 };
     const orderEvent: OrderEvent = { orderId: "order-1", userId: "user-1", kind: "paid" };
     const firstInventory = waitFor(inventoryLog.value, (value) => value.length === 1);
+
     backend.emit("inventory.events", inventoryEvent1);
     await firstInventory;
     const secondInventory = waitFor(inventoryLog.value, (value) => value.length === 2);
+
     backend.emit("inventory.events", inventoryEvent1);
     await secondInventory;
     const thirdInventory = waitFor(
       inventoryLog.value,
       (value) => value.length === 2 && value[0] === inventoryEvent1 && value[1] === inventoryEvent2,
     );
+
     backend.emit("inventory.events", inventoryEvent2);
     await thirdInventory;
     const firstOrder = waitFor(orderSummary.value, (value) => value.seen === 1);
+
     backend.emit("order.events", orderEvent);
     await firstOrder;
     const secondOrder = waitFor(orderSummary.value, (value) => value.seen === 2);
+
     backend.emit("order.events", orderEvent);
     await secondOrder;
     expect(inventoryStream.value.get()).toEqual(inventoryEvent2);
@@ -363,6 +377,7 @@ test("runs a storefront flow through joined queries, effects, streams, and dispo
         expect(error).toMatchObject({ kind: "disposed" });
       },
     );
+
     graph.dispose();
     expect(pendingInventoryCall.aborted).toBe(true);
     expect(streamCalls.every((call) => call.aborted)).toBe(true);

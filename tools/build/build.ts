@@ -53,6 +53,7 @@ try {
     "--emitDeclarationOnly",
     "--noEmitOnError",
   ];
+
   await $`${process.execPath} ${compilerArgs}`.cwd(root);
 } catch (error) {
   await rm(output, { recursive: true, force: true });

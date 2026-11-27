@@ -46,6 +46,7 @@ describe("branded operation options", () => {
     };
 
     const oneArgumentStore = api.oneArgumentQuery(queryOptions({ initial: 7 }));
+
     expect(oneArgumentStore.value.get()).toBe(7);
 
     const firstQuerySignal = new AbortController();
@@ -54,11 +55,13 @@ describe("branded operation options", () => {
       initial: 2,
       abortSignal: queryOverrideSignal.signal,
     });
+
     expect(store.value.get()).toBe(2);
     expect(backend.calls).toHaveLength(0);
 
     const oneArgumentMutation = api.mutation(queryOptions({}));
     const oneArgumentCall = backend.calls[0]!;
+
     expect(oneArgumentCall.input).toBeUndefined();
     backend.resolve(oneArgumentCall, "saved once");
     await expect(oneArgumentMutation).resolves.toBe("saved once");
@@ -69,6 +72,7 @@ describe("branded operation options", () => {
       abortSignal: mutationOverrideSignal.signal,
     });
     const call = backend.calls[1]!;
+
     expect(call.input).toBeUndefined();
     firstMutationSignal.abort();
     expect(call.aborted).toBe(false);
@@ -122,6 +126,7 @@ describe("branded operation options", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "custom-options", operations: { query, mutation } }),
     });
+
     try {
       const options = Object.assign(Object.create(null), {
         initial: 1,
@@ -132,6 +137,7 @@ describe("branded operation options", () => {
       const input = { optimistic: "application data" };
       const task = graph.api.mutation(input, { abortSignal: signal, optimistic });
       const call = backend.calls[0]!;
+
       expect(call.input).toBe(input);
       expect(store.value.get()).toBe(9);
       controller.abort();
@@ -160,6 +166,7 @@ describe("bound mutation options and capability validation", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "bound-options", operations: { empty, business } }),
     });
+
     try {
       const context = createBindingContext(graph);
       const inputless = bindOperation(graph, empty, {
@@ -175,6 +182,7 @@ describe("bound mutation options and capability validation", () => {
         effects: [],
       });
       const first = inputless.member(queryOptions({}));
+
       expect(backend.pending("empty")[0]!.input).toBeUndefined();
       backend.resolve(backend.pending("empty")[0]!, "one");
       await first;
@@ -184,6 +192,7 @@ describe("bound mutation options and capability validation", () => {
         abortSignal: selected.signal,
       });
       const call = backend.pending("empty")[0]!;
+
       original.abort();
       expect(call.aborted).toBe(false);
       selected.abort();
@@ -192,6 +201,7 @@ describe("bound mutation options and capability validation", () => {
       await second;
       const data = { optimistic: "business data" };
       const third = required.member(data, {});
+
       expect(backend.pending("business")[0]!.input).toBe(data);
       backend.resolve(backend.pending("business")[0]!, "three");
       await third;
@@ -205,6 +215,7 @@ describe("bound mutation options and capability validation", () => {
         throwIfAborted: () => undefined,
       };
       const fourth = inputless.member({ abortSignal: structural });
+
       expect(backend.pending("empty")[0]!.aborted).toBe(false);
       backend.resolve(backend.pending("empty")[0]!, "four");
       await fourth;
@@ -222,6 +233,7 @@ describe("bound mutation options and capability validation", () => {
       const reads: Record<string, number> = {};
       const structural = <T extends object>(data: T): T => {
         const owner = {};
+
         for (const field of Object.keys(data))
           Object.defineProperty(owner, field, {
             enumerable: shape === "inherited",
@@ -230,6 +242,7 @@ describe("bound mutation options and capability validation", () => {
               return Reflect.get(data, field);
             },
           });
+
         return (shape === "inherited" ? Object.create(owner) : owner) as T;
       };
       const query = createQuery({ name: "query", key: () => "same", fetch: async () => 1 });
@@ -251,6 +264,7 @@ describe("bound mutation options and capability validation", () => {
           operations: { query, mutation },
         }),
       });
+
       try {
         const context = createBindingContext(graph);
         const first = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
@@ -272,11 +286,13 @@ describe("bound mutation options and capability validation", () => {
           return 10;
         });
         const canceled = new AbortController();
+
         canceled.abort();
         const denied = bound.member(
           undefined,
           structural({ abortSignal: canceled.signal, optimistic: [override] }),
         );
+
         expect(backend.calls).toHaveLength(0);
         expect(selections).toBe(0);
         expect(producerCalls).toBe(0);
@@ -288,6 +304,7 @@ describe("bound mutation options and capability validation", () => {
           undefined,
           structural({ abortSignal: live.signal, optimistic: [override] }),
         );
+
         expect(reads).toEqual({ abortSignal: 2, optimistic: 2 });
         expect([a.value.get(), b.value.get()]).toEqual([10, 2]);
         expect(producerCalls).toBeGreaterThan(0);
@@ -331,6 +348,7 @@ describe("bound mutation options and capability validation", () => {
         operations: { query, mutation, other },
       }),
     });
+
     try {
       const context = createBindingContext(graph);
       const first = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
@@ -359,8 +377,10 @@ describe("bound mutation options and capability validation", () => {
         predictionFor(other, first.target(a)!, () => 4),
         predictionFor(mutation, foreign.target(c)!, () => 4),
       ];
+
       for (const optimistic of invalid)
         expect(() => invoke(undefined, { optimistic: [optimistic] })).toThrow(TypeError);
+
       expect(() => invoke(undefined, { optimistic: [p, p] })).toThrow(TypeError);
       expect(() => invoke(undefined, { optimistic: new Map() })).toThrow(TypeError);
       expect(() => invoke(undefined, { abortSignal: {} })).toThrow(TypeError);

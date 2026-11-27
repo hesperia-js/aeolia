@@ -47,6 +47,7 @@ function deferred<T>(): Deferred<T> {
     resolve = accept;
     reject = decline;
   });
+
   return { promise, resolve, reject };
 }
 
@@ -86,11 +87,13 @@ function throwingRemovalSignal(
           options?: boolean | AddEventListenerOptions,
         ) => {
           nativeAdd(type, listener, options);
+
           if (type === "abort") {
             state.addCalls += 1;
             registeredListener = listener;
           }
         };
+
       if (property === "removeEventListener")
         return (
           type: string,
@@ -100,15 +103,20 @@ function throwingRemovalSignal(
           nativeRemove(type, listener, options);
           if (type !== "abort") return;
           state.removeCalls += 1;
+
           if (listener !== null && listener === registeredListener)
             state.removedRegisteredListener = true;
+
           onRemove?.();
           throw cleanupCause;
         };
+
       const value: unknown = Reflect.get(target, property, target);
+
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+
   return { signal, state };
 }
 
@@ -118,6 +126,7 @@ const requiredTransferCodec: RequiredTransferCodec = {
   decodeValue: (value) => value,
   decodeFailure: (failure) => new Error(String(failure)),
 };
+
 beforeEach(() => {
   jest.useFakeTimers();
   jest.setSystemTime(0);
@@ -146,12 +155,14 @@ describe("query progress", () => {
       });
       const graph = createGraph({ contract, idleMs: 2 });
       const donor = createGraph({ contract });
+
       donor.api.query(undefined, { initial: 17 });
       const image = snapshot(donor, { version: 2 });
       const store = graph.api.query(undefined, { initial: 1 });
       const caller = new AbortController();
       const nativeRemove = caller.signal.removeEventListener.bind(caller.signal);
       let removals = 0;
+
       Object.defineProperty(caller.signal, "removeEventListener", {
         value(...args: Parameters<AbortSignal["removeEventListener"]>) {
           removals += 1;
@@ -161,10 +172,12 @@ describe("query progress", () => {
       const stop = observeQueryProgress(store).subscribe(({ kind, snapshot }) => {
         if (fired || kind !== "lifecycle" || snapshot.status !== "active") return;
         fired = true;
+
         if (action === "revalidate") replacement = store.revalidate();
         else if (action === "write") store.set(17);
         else adopt(graph, image, {});
       });
+
       try {
         await store.revalidate({ abortSignal: caller.signal });
         await replacement;
@@ -213,6 +226,7 @@ describe("query progress", () => {
       });
       const sourceStore =
         kind === "raw" ? source.api.query("one", { initial: 17 }) : sourceBinding.member("one");
+
       await sourceStore.ready;
       const store = kind === "raw" ? target.api.query("one") : targetBinding.member("one");
       const events: string[] = [];
@@ -228,8 +242,10 @@ describe("query progress", () => {
         version: 2,
         bindings: [{ binding: sourceBinding, reference }],
       });
+
       adopt(target, image, { bindings: [{ binding: targetBinding, reference }] });
       const adopted = peekStore(store);
+
       report("late");
       held.resolve(19);
       await held.promise;
@@ -269,6 +285,7 @@ describe("query progress", () => {
     const contract = defineContract({ namespace: "progress-v2-rejected", operations: { query } });
     const donor = createGraph({ contract });
     const graph = createGraph({ contract });
+
     donor.api.query("one", { initial: 17 });
     const store = graph.api.query("one", { initial: 1 });
     const progress = observeQueryProgress(store);
@@ -276,8 +293,10 @@ describe("query progress", () => {
     const stop = progress.subscribe(({ kind, snapshot }) => {
       if (kind === "lifecycle") events.push(snapshot.status);
     });
+
     try {
       const original = store.revalidate();
+
       writeDuringComparison = () => {
         writeDuringComparison = undefined;
         store.set(42);
@@ -296,6 +315,7 @@ describe("query progress", () => {
       await Promise.all([graph.retire(), donor.retire()]);
     }
   });
+
   for (const kind of ["raw", "bound"] as const) {
     it(`enrolls both ${kind} call listeners before synchronous reports`, async () => {
       let calls = 0;
@@ -325,17 +345,20 @@ describe("query progress", () => {
           receivers[index] = this;
           stores[index] = view.store;
           stops[index] = view.stop;
+
           if (event.kind === "report" && event.snapshot.hasValue) {
             values[index]!.push(event.snapshot.value!);
             captures[index]!.push(view.observation.capture().reportRevision);
           }
         },
       }));
+
       try {
         const store =
           kind === "raw"
             ? callQueryWithProgress(graph.api.query, ["one"], entries)
             : callQueryWithProgress(binding.member, ["one"], entries);
+
         expect(calls).toBe(1);
         expect(values).toEqual([
           [1, 2],
@@ -388,6 +411,7 @@ describe("query progress", () => {
       callQueryWithProgress(graph.api.query, [], entries);
       report(2);
     });
+
     try {
       report(0);
       report(1);
@@ -409,6 +433,7 @@ describe("query progress", () => {
     const first = new AbortController();
     const second = new AbortController();
     const alreadyAborted = new AbortController();
+
     alreadyAborted.abort();
     const values: number[][] = [[], [], []];
     const stops: Array<() => void> = [];
@@ -437,8 +462,10 @@ describe("query progress", () => {
         },
       }),
     );
+
     try {
       const store = callQueryWithProgress(graph.api.query, [], entries);
+
       expect(await store.ready).toBe(3);
       expect(calls).toBe(1);
       expect(values).toEqual([[1], [1, 2], []]);
@@ -478,13 +505,16 @@ describe("query progress", () => {
         signal: new AbortController().signal,
         onEvent(event, context) {
           stops[1] = context.stop;
+
           if (event.kind === "report" && event.snapshot.hasValue)
             received.push(event.snapshot.value!);
         },
       },
     ];
+
     try {
       const store = callQueryWithProgress(graph.api.query, [], entries);
+
       expect(await store.ready).toBe(3);
       expect(received).toEqual([1, 2]);
       expect(diagnostics).toContain(callbackCause);
@@ -509,6 +539,7 @@ describe("query progress", () => {
     });
     const context = createBindingContext(graph);
     const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+
     try {
       expect(() =>
         callQueryWithProgress(
@@ -540,6 +571,7 @@ describe("query progress", () => {
         onEvent(event, context) {
           stops[0] = context.stop;
           if (event.kind === "current") initial = context.store.value.get();
+
           if (event.kind === "report" && event.snapshot.hasValue)
             values.push(event.snapshot.value!);
         },
@@ -557,12 +589,14 @@ describe("query progress", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "cohort-options-override", operations: { query } }),
     });
+
     try {
       const store = callQueryWithProgress(
         graph.api.query,
         [queryOptions({ initial: 7 }), { initial: 9 }],
         entries,
       );
+
       expect(await store.ready).toBe(2);
       expect(initial).toBe(9);
       expect(values).toEqual([1]);
@@ -585,12 +619,14 @@ describe("query progress", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "cohort-input-data", operations: { query } }),
     });
+
     try {
       const store = callQueryWithProgress(
         graph.api.query,
         [{ progressCohort: "actual-input" }],
         [],
       );
+
       expect(await store.ready).toBe(1);
       expect(received).toEqual(["actual-input"]);
     } finally {
@@ -612,6 +648,7 @@ describe("query progress", () => {
       calls += 1;
       return graph.api.query(input);
     };
+
     try {
       expect(() => callQueryWithProgress(wrapper, ["one"], [])).toThrow(TypeError);
       expect(calls).toBe(0);
@@ -638,13 +675,16 @@ describe("query progress", () => {
             target.addEventListener(type, listener, options);
             throw registrationCause;
           };
+
         if (property === "removeEventListener")
           return (type: string, listener: EventListenerOrEventListenerObject) => {
             target.removeEventListener(type, listener);
             removals += 1;
             throw cleanupCause;
           };
+
         const value: unknown = Reflect.get(target, property, target);
+
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
@@ -659,8 +699,10 @@ describe("query progress", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "cohort-registration-failure", operations: { query } }),
     });
+
     try {
       let failure: unknown;
+
       try {
         callQueryWithProgress(
           graph.api.query,
@@ -683,9 +725,12 @@ describe("query progress", () => {
       } catch (cause) {
         failure = cause;
       }
+
       expect(failure).toBeInstanceOf(AggregateError);
+
       if (!(failure instanceof AggregateError))
         throw new Error("Expected registration and cleanup failures");
+
       expect(failure.errors).toEqual([registrationCause, cleanupCause]);
       expect(removals).toBe(1);
       expect(events).toBe(0);
@@ -711,6 +756,7 @@ describe("query progress", () => {
     const store = graph.api.query("one");
     const ready = store.ready;
     const execution = store.progress.get().execution;
+
     expect(execution).toBeDefined();
     expect(Object.isFrozen(execution)).toBe(true);
     expect(Reflect.ownKeys(execution!)).toEqual([]);
@@ -831,6 +877,7 @@ describe("query progress", () => {
       depth += 1;
       maximumDepth = Math.max(maximumDepth, depth);
       firstEvents.push([kind, snapshot.reportRevision, snapshot.value]);
+
       if (kind === "report" && snapshot.reportRevision === 1) {
         report("second");
         report("third");
@@ -842,6 +889,7 @@ describe("query progress", () => {
         });
         expect(observation.capture()).toMatchObject({ reportRevision: 3, value: "third" });
       }
+
       depth -= 1;
     });
 
@@ -883,11 +931,13 @@ describe("query progress", () => {
     const stopFirst = observation.subscribe(({ kind, snapshot }) => {
       if (kind !== "report") return;
       firstReports.push(snapshot.reportRevision);
+
       if (snapshot.reportRevision === 1) {
         stopRemoved();
         report("second");
       }
     });
+
     stopRemoved = observation.subscribe(({ kind }) => removedEvents.push(kind));
 
     report("first");
@@ -923,6 +973,7 @@ describe("query progress", () => {
     const ready = store.ready;
     const observation = observeQueryProgress(store);
     const directSeedError = new Error("direct seed failed");
+
     expect(() =>
       observation.subscribe(() => {
         throw directSeedError;
@@ -958,6 +1009,7 @@ describe("query progress", () => {
       key: (input) => input,
       fetch: (_input, options) => {
         const work = deferred<number>();
+
         runs.push({ work, report: options.reportProgress });
         return work.promise;
       },
@@ -981,6 +1033,7 @@ describe("query progress", () => {
         });
         replacementReady = store.revalidate();
       }
+
       reentrantEvents.push([kind, snapshot.execution, snapshot.status]);
     });
     const firstExecution = observation.capture().execution;
@@ -1022,6 +1075,7 @@ describe("query progress", () => {
     const events: Array<[string, number, string]> = [];
     const stop = observation.subscribe(({ kind, snapshot }) => {
       events.push([kind, snapshot.reportRevision, snapshot.status]);
+
       if (kind === "report" && snapshot.reportRevision === 1) {
         report("second");
         report("third");
@@ -1077,6 +1131,7 @@ describe("query progress", () => {
                   callbackResult = typeof callback === "function" ? callback(value) : fallback();
                   return callbackResult;
                 };
+
                 forwardSettlement = release;
                 // The source Promise has settled; forward its outcome during report delivery.
                 report("first");
@@ -1105,6 +1160,7 @@ describe("query progress", () => {
       const ready = store.ready;
       const observation = observeQueryProgress(store);
       const execution = observation.capture().execution;
+
       type ProgressEventRecord = [string, number, string, unknown, unknown];
       const events: ProgressEventRecord[] = [];
       const deliveredPrefixAtCapture: ProgressEventRecord[][] = [];
@@ -1117,14 +1173,17 @@ describe("query progress", () => {
           snapshot.value,
           snapshot.error,
         ]);
+
         if (kind === "report" && snapshot.reportRevision === 1) {
           report("second");
           report("third");
           const release = forwardSettlement;
+
           if (release !== undefined) {
             release();
             forwardedDuringReport = true;
           }
+
           deliveredPrefixAtCapture.push([...events]);
           capturesDuringReport.push(observation.capture());
         }
@@ -1132,6 +1191,7 @@ describe("query progress", () => {
 
       if (terminal === "complete") work.resolve(success);
       else work.reject(failure);
+
       const outcome = await Promise.allSettled([ready]);
 
       expect(forwardedDuringReport).toBe(true);
@@ -1152,6 +1212,7 @@ describe("query progress", () => {
         error: terminal === "failed" ? failure : undefined,
       });
       expect(capturesDuringReport[0]?.error).toBe(terminal === "failed" ? failure : undefined);
+
       if (terminal === "complete") {
         expect(outcome[0]?.status).toBe("fulfilled");
         if (outcome[0]?.status === "fulfilled") expect(outcome[0].value).toBe(success);
@@ -1159,6 +1220,7 @@ describe("query progress", () => {
         expect(outcome[0]?.status).toBe("rejected");
         if (outcome[0]?.status === "rejected") expect(outcome[0].reason).toBe(failure);
       }
+
       expect(events).toEqual([
         ["current", 0, "active", undefined, undefined],
         ["report", 1, "active", "first", undefined],
@@ -1212,6 +1274,7 @@ describe("query progress", () => {
         const continuation = store.revalidate({ abortSignal: callerSignal.signal });
         const continuationOutcome = observeOutcome(continuation);
         const execution = observation.capture().execution;
+
         stop = observation.subscribe(({ kind, snapshot }) => {
           events.push({ kind, snapshot });
         });
@@ -1219,8 +1282,10 @@ describe("query progress", () => {
         const beforeSourceSettlement = observation.capture();
 
         workSettled = true;
+
         if (terminal === "complete") work.resolve(success);
         else work.reject(sourceCause);
+
         const [sourceResult, continuationResult] = await Promise.all([
           sourceOutcome,
           continuationOutcome,
@@ -1231,10 +1296,12 @@ describe("query progress", () => {
         const ordinaryError = store.error.peek();
         const registeredListenerWasRemoved = callerSignal.state.removedRegisteredListener;
         const callerSignalWasAborted = controller.signal.aborted;
+
         stop();
 
         const retirement = graph.retire();
         const retirementOutcome = await observeOutcome(retirement);
+
         retirementWasCached = graph.retire() === retirement;
 
         expect(fetchCallsBeforeRevalidation).toBe(0);
@@ -1252,14 +1319,20 @@ describe("query progress", () => {
           error: undefined,
         });
         expect(sourceResult.status).toBe(terminal === "complete" ? "fulfilled" : "rejected");
+
         if (sourceResult.status === "fulfilled") expect(sourceResult.value).toBe(success);
         else expect(sourceResult.reason).toBe(sourceCause);
+
         expect(continuationResult.status).toBe("rejected");
+
         if (continuationResult.status === "rejected")
           expect(continuationResult.reason).toBe(cleanupCause);
+
         expect(retirementOutcome.status).toBe("rejected");
+
         if (retirementOutcome.status === "rejected")
           expect(retirementOutcome.reason).toBe(cleanupCause);
+
         expect(retirementWasCached).toBe(true);
         expect(ordinaryValue).toBe(initial);
         expect(ordinaryError).toBeUndefined();
@@ -1295,9 +1368,11 @@ describe("query progress", () => {
       } finally {
         if (!workSettled) {
           workSettled = true;
+
           if (terminal === "complete") work.resolve(success);
           else work.reject(sourceCause);
         }
+
         stop();
         await graph.retire().then(
           () => undefined,
@@ -1330,10 +1405,12 @@ describe("query progress", () => {
       key: (input) => input,
       fetch: (_input, options) => {
         fetchCalls += 1;
+
         if (fetchCalls === 1) {
           firstReport = options.reportProgress;
           return firstWork.promise;
         }
+
         secondReport = options.reportProgress;
         return secondWork.promise;
       },
@@ -1362,6 +1439,7 @@ describe("query progress", () => {
       });
       startReplacement = () => {
         replacementStarts += 1;
+
         try {
           replacementOutcome = observeOutcome(store.revalidate());
         } catch (cause) {
@@ -1371,6 +1449,7 @@ describe("query progress", () => {
       const firstContinuation = store.revalidate({ abortSignal: callerSignal.signal });
       const firstContinuationOutcome = observeOutcome(firstContinuation);
       const firstExecution = observation.capture().execution;
+
       firstReport?.("first progress");
 
       firstWorkSettled = true;
@@ -1383,6 +1462,7 @@ describe("query progress", () => {
       const eventsBeforeSettlement = events.slice();
       const ordinaryValueBeforeSettlement = store.value.peek();
       const ordinaryErrorBeforeSettlement = store.error.peek();
+
       firstReport?.("late first progress");
       const afterLateFirstReport = observation.capture();
       const eventsAfterLateReport = events.slice();
@@ -1399,10 +1479,12 @@ describe("query progress", () => {
       const ordinaryValueAfterSettlement = store.value.peek();
       const ordinaryErrorAfterSettlement = store.error.peek();
       const registeredListenerWasRemoved = callerSignal.state.removedRegisteredListener;
+
       stop();
 
       const retirement = graph.retire();
       const retirementOutcome = await observeOutcome(retirement);
+
       retirementWasCached = graph.retire() === retirement;
 
       expect(callerSignal.state.addCalls).toBe(1);
@@ -1415,8 +1497,10 @@ describe("query progress", () => {
       expect(firstSource.status).toBe("fulfilled");
       if (firstSource.status === "fulfilled") expect(firstSource.value).toBe(firstResult);
       expect(firstContinuationResult.status).toBe("rejected");
+
       if (firstContinuationResult.status === "rejected")
         expect(firstContinuationResult.reason).toBe(cleanupCause);
+
       expect(replacementBeforeSettlement.execution).toBeDefined();
       expect(replacementBeforeSettlement.execution).not.toBe(firstExecution);
       expect(replacementBeforeSettlement).toMatchObject({
@@ -1441,6 +1525,7 @@ describe("query progress", () => {
             snapshot.status === "active",
         );
       const replacementFrontier = replacementActiveIndex(eventsBeforeSettlement);
+
       expect(replacementFrontier).toBeGreaterThanOrEqual(0);
       const predecessorTerminalEvents = eventsBeforeSettlement
         .slice(0, replacementFrontier)
@@ -1450,6 +1535,7 @@ describe("query progress", () => {
             snapshot.execution === firstExecution &&
             snapshot.status !== "active",
         );
+
       expect(predecessorTerminalEvents).toHaveLength(1);
       expect(predecessorTerminalEvents[0]).toMatchObject({
         kind: "lifecycle",
@@ -1464,10 +1550,12 @@ describe("query progress", () => {
       });
       const oldEventsAfterReplacement = (records: typeof events) => {
         const frontier = replacementActiveIndex(records);
+
         return records
           .slice(frontier + 1)
           .filter(({ snapshot }) => snapshot.execution === firstExecution);
       };
+
       expect(oldEventsAfterReplacement(eventsBeforeSettlement)).toEqual([]);
       expect(oldEventsAfterReplacement(eventsAfterLateReport)).toEqual([]);
       expect(oldEventsAfterReplacement(finalEvents)).toEqual([]);
@@ -1487,18 +1575,22 @@ describe("query progress", () => {
       expect(ordinaryValueAfterSettlement).toBe(secondResult);
       expect(ordinaryErrorAfterSettlement).toBeUndefined();
       expect(retirementOutcome.status).toBe("rejected");
+
       if (retirementOutcome.status === "rejected")
         expect(retirementOutcome.reason).toBe(cleanupCause);
+
       expect(retirementWasCached).toBe(true);
     } finally {
       if (!firstWorkSettled) {
         firstWorkSettled = true;
         firstWork.resolve(firstResult);
       }
+
       if (!secondWorkSettled) {
         secondWorkSettled = true;
         secondWork.resolve(secondResult);
       }
+
       stop();
       await graph.retire().then(
         () => undefined,
@@ -1519,6 +1611,7 @@ describe("query progress", () => {
           wroteDuringEquality = true;
           writeDuringLanding();
         }
+
         return Object.is(a, b);
       },
       fetch: async () => work.promise,
@@ -1527,6 +1620,7 @@ describe("query progress", () => {
       contract: defineContract({ namespace: "progress-landing-write", operations: { query } }),
     });
     const store = graph.api.query("one", { initial: 1 });
+
     writeDuringLanding = () => store.set(9);
     const refresh = store.revalidate();
     const observation = observeQueryProgress(store);
@@ -1567,6 +1661,7 @@ describe("query progress", () => {
     const stop = subscribe(capturedRevision, (revision) => revisions.push(revision));
     const beforeForbiddenReport = observation.capture();
     const forbiddenReporter = computed(() => withoutWrites(() => report("forbidden")));
+
     expect(() => forbiddenReporter.get()).toThrow(Fault);
     expect(observation.capture()).toBe(beforeForbiddenReport);
     report("partial");
@@ -1593,6 +1688,7 @@ describe("query progress", () => {
       fetch: (_input, options) => {
         const work = deferred<number>();
         const returned = work.promise;
+
         runs.push({ work, returned, report: options.reportProgress });
         return returned;
       },
@@ -1602,6 +1698,7 @@ describe("query progress", () => {
     });
     const first = graph.api.query("same");
     const joined = graph.api.query("same");
+
     expect(first.progress).toBe(joined.progress);
     expect(runs).toHaveLength(1);
     const firstExecution = first.progress.get().execution;
@@ -1612,8 +1709,10 @@ describe("query progress", () => {
 
     const controller = new AbortController();
     const refresh = first.revalidate({ abortSignal: controller.signal });
+
     expect(runs).toHaveLength(2);
     const replacement = first.progress.get();
+
     expect(replacement.execution).not.toBe(firstExecution);
     expect(replacement).toMatchObject({ status: "active", reportRevision: 0, hasValue: false });
 
@@ -1671,6 +1770,7 @@ describe("query progress", () => {
         const returned = work.promise.finally(() => {
           if (isFirstRun) oldHostSettled = true;
         });
+
         runs.push({ work, returned, report: options.reportProgress });
         return returned;
       },
@@ -1680,9 +1780,11 @@ describe("query progress", () => {
     });
     const first = graph.api.query("same");
     const firstExecution = first.progress.get().execution;
+
     runs[0]!.report("before-reset");
 
     const reset = graph.reset();
+
     expect(first.progress.get()).toMatchObject({
       execution: firstExecution,
       status: "interrupted",
@@ -1695,8 +1797,10 @@ describe("query progress", () => {
 
     const replacement = graph.api.query("same");
     const replacementReady = replacement.ready;
+
     expect(runs).toHaveLength(2);
     const nextExecution = replacement.progress.get().execution;
+
     expect(nextExecution).not.toBe(firstExecution);
     runs[0]!.report("late-after-reset");
     expect(replacement.progress.get()).toMatchObject({
@@ -1740,6 +1844,7 @@ describe("query progress", () => {
         const returned = work.promise.finally(() => {
           settled = true;
         });
+
         runs.push({
           input,
           work,
@@ -1757,10 +1862,12 @@ describe("query progress", () => {
     const manualGraph = createGraph({ contract });
     const sourceGraph = createGraph({ contract });
     const targetGraph = createGraph({ contract });
+
     try {
       const manual = manualGraph.api.query("manual");
       const manualRun = runs.find((run) => run.input === "manual")!;
       const manualExecution = manual.progress.get().execution;
+
       manualRun.report("before-write");
       manual.set(11);
 
@@ -1778,11 +1885,13 @@ describe("query progress", () => {
       expect(manual.progress.get().reportRevision).toBe(1);
 
       const source = sourceGraph.api.query("adopt", { initial: 5 });
+
       await expect(source.ready).resolves.toBe(5);
       const transfer = snapshot(sourceGraph);
       const adopted = targetGraph.api.query("adopt");
       const adoptedRun = runs.find((run) => run.input === "adopt")!;
       const adoptedExecution = adopted.progress.get().execution;
+
       adoptedRun.report("before-adoption");
 
       adopt(targetGraph, transfer);
@@ -1851,6 +1960,7 @@ describe("query progress", () => {
         profile: selectedProfile,
         fetch: (_input, options) => {
           const work = deferred<number>();
+
           runs.push({ work, report: options.reportProgress });
           return work.promise;
         },
@@ -1871,6 +1981,7 @@ describe("query progress", () => {
     const firstExecution = first.progress.get().execution;
     const profileExecution = otherProfileStore.progress.get().execution;
     const contextExecution = otherContextStore.progress.get().execution;
+
     expect(new Set([firstExecution, profileExecution, contextExecution]).size).toBe(3);
 
     runs[0]!.report({ value: "first-profile" });
@@ -1886,6 +1997,7 @@ describe("query progress", () => {
     const joinedReady = joined.ready;
     const otherProfileReady = otherProfileStore.ready;
     const otherContextReady = otherContextStore.ready;
+
     runs.forEach((run, index) => run.work.resolve(index + 1));
 
     await expect(
@@ -1940,6 +2052,7 @@ describe("query progress", () => {
       hasValue: false,
     });
     const cancellation = store.error.peek();
+
     expect(store.progress.get().error).toBe(cancellation);
     await expect(ready).rejects.toBe(cancellation);
     expect(hostPromiseSettled).toBe(false);
@@ -1971,6 +2084,7 @@ describe("query progress", () => {
     });
     const store = graph.api.query(undefined);
     const ready = store.ready;
+
     backend.resolve(backend.calls[0]!, 1);
     await expect(ready).resolves.toBe(1);
     const execution = store.progress.get().execution;
@@ -2003,9 +2117,11 @@ describe("query progress", () => {
     });
     const first = graph.api.query(undefined);
     const firstReady = first.ready;
+
     backend.resolve(backend.calls[0]!, 1);
     await expect(firstReady).resolves.toBe(1);
     const firstObservation = observeQueryProgress(first);
+
     expect(firstObservation.capture().status).toBe("complete");
 
     jest.advanceTimersByTime(16);
@@ -2014,6 +2130,7 @@ describe("query progress", () => {
 
     const second = graph.api.query(undefined);
     const secondReady = second.ready;
+
     backend.resolve(backend.calls[1]!, 2);
     await expect(secondReady).resolves.toBe(2);
     const secondObservation = observeQueryProgress(second);
@@ -2050,12 +2167,14 @@ describe("query progress", () => {
     const events: Array<[string, number, string]> = [];
     const stop = observation.subscribe(({ kind, snapshot }) => {
       events.push([kind, snapshot.reportRevision, snapshot.status]);
+
       if (kind === "report" && snapshot.reportRevision === 1) {
         report("second");
         report("third");
         work.reject(undefined);
       }
     });
+
     report("partial");
     const outcome = await Promise.allSettled([ready]);
 
@@ -2114,10 +2233,13 @@ describe("query progress", () => {
     let claim: PassiveTransferClaim<typeof targetGraph.api.query> | undefined;
     let stop: (() => void) | undefined;
     let adoptionPublished = false;
+
     try {
       const sourceStore = sourceGraph.api.query("one");
+
       await expect(sourceStore.ready).resolves.toBe(7);
       const sourceRoot = computed(() => sourceStore.progress.get().reportRevision);
+
       expect(sourceRoot.get()).toBe(2);
       const sourceConstruction = captureReactiveConstruction(sourceRoot);
       const capture = prepareRequiredTransferCapture({
@@ -2126,6 +2248,7 @@ describe("query progress", () => {
         codec: requiredTransferCodec,
       });
       const captureCommit = capture.seal();
+
       if (captureCommit === undefined) throw new Error("The progress capture did not seal");
       captureCommit.publish();
       captureCommit.notifications.deliver();
@@ -2146,20 +2269,26 @@ describe("query progress", () => {
         mappedStateWrites: [],
       });
       const adoptionCommit = adoption.seal();
+
       if (adoptionCommit === undefined)
         throw new Error("The passive progress adoption did not seal");
+
       adoptionCommit.publish();
       adoptionPublished = true;
       adoptionCommit.notifications.deliver();
       await Promise.all([adoption.retired, claim.retired]);
 
       const seen: number[] = [];
+
       stop = subscribe(targetRoot, (revision) => seen.push(revision));
       const revalidation = claim.store.revalidate();
       const ready = claim.store.ready;
+
       expect(targetFetches).toBe(1);
+
       if (targetReport === undefined)
         throw new Error("The target query did not receive its progress reporter");
+
       targetReport("target-report");
       expect(targetRoot.get()).toBe(1);
       expect(seen).toContain(1);
@@ -2207,6 +2336,7 @@ describe("query progress", () => {
 
     try {
       const sibling = binding.member(input);
+
       siblingStop = observeQueryProgress(sibling).subscribe((event) => {
         if (event.kind === "report" && event.snapshot.hasValue)
           siblingReports.push(event.snapshot.value!);
@@ -2219,6 +2349,7 @@ describe("query progress", () => {
 
       let didThrow = false;
       let failure: unknown;
+
       try {
         callQueryWithProgress(
           binding.member,
@@ -2228,6 +2359,7 @@ describe("query progress", () => {
               signal: new AbortController().signal,
               onEvent(event, view) {
                 attemptStop = view.stop;
+
                 if (event.kind === "current" && event.snapshot.reportRevision === 1) {
                   attemptSeeded = true;
                   attemptAuthority.abort();
@@ -2350,22 +2482,28 @@ describe("query progress", () => {
             target.addEventListener(type, listener, options);
             foreignStore ??= graph.api.query(inputB);
           };
+
         if (property === "removeEventListener")
           return (type: string, listener: EventListenerOrEventListenerObject) => {
             removes += 1;
             target.removeEventListener(type, listener);
           };
+
         const value: unknown = Reflect.get(target, property, target);
+
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+
     try {
       let refused = false;
+
       try {
         callQueryWithProgress(graph.api.query, [inputA, { abortSignal: signal }], [], () => {});
       } catch {
         refused = true;
       }
+
       expect(refused).toBe(true);
       expect(removes).toBe(1);
       expect(fetchInputs).toEqual(["B"]);
@@ -2400,6 +2538,7 @@ describe("query progress", () => {
       key: (input) => input.key,
       fetch: (input, options) => {
         fetchInputs.push(input.label);
+
         if (input.label === "first") {
           options.abortSignal.addEventListener("abort", () => {
             interruptions += 1;
@@ -2407,6 +2546,7 @@ describe("query progress", () => {
           });
           return firstWork.promise;
         }
+
         foreignSignal = options.abortSignal;
         return foreignWork.promise;
       },
@@ -2418,14 +2558,17 @@ describe("query progress", () => {
       }),
     });
     const first = graph.api.query(inputFirst);
+
     try {
       first.set("manual value");
       let refused = false;
+
       try {
         callQueryWithProgress(graph.api.query, [inputA], [], () => {});
       } catch {
         refused = true;
       }
+
       expect(interruptions).toBe(1);
       expect(refused).toBe(true);
       expect(fetchInputs).toEqual(["first", "B"]);
@@ -2550,8 +2693,10 @@ describe("query progress", () => {
 
       expect(didThrow).toBe(true);
       expect(failure).toBeInstanceOf(AggregateError);
+
       if (!(failure instanceof AggregateError))
         throw new Error("Expected authority refusal and signal cleanup failures");
+
       expect(failure.errors).toHaveLength(2);
       expect(failure.errors[0]).toBeUndefined();
       expect(failure.errors[1]).toBe(cleanupCause);
@@ -2581,13 +2726,16 @@ describe("query progress", () => {
             target.addEventListener(type, listener, options);
             current = false;
           };
+
         if (property === "removeEventListener")
           return (type: string, listener: EventListenerOrEventListenerObject) => {
             target.removeEventListener(type, listener);
             removes += 1;
             throw cleanupCause;
           };
+
         const value: unknown = Reflect.get(target, property, target);
+
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
@@ -2605,9 +2753,11 @@ describe("query progress", () => {
         operations: { query },
       }),
     });
+
     try {
       let didThrow = false;
       let failure: unknown;
+
       try {
         callQueryWithProgress(graph.api.query, ["one", { abortSignal: signal }], [], () => {
           if (!current) throw undefined;
@@ -2616,10 +2766,13 @@ describe("query progress", () => {
         didThrow = true;
         failure = cause;
       }
+
       expect(didThrow).toBe(true);
       expect(failure).toBeInstanceOf(AggregateError);
+
       if (!(failure instanceof AggregateError))
         throw new Error("Expected refusal and caller cleanup failures");
+
       expect(failure.errors).toEqual([undefined, cleanupCause]);
       expect(removes).toBe(1);
       expect(calls).toBe(0);
@@ -2653,15 +2806,19 @@ describe("query progress", () => {
           throw observationCause;
         },
       });
+
       for (const guard of [async () => undefined, () => shadowed, () => ({})]) {
         expect(() => callQueryWithProgress(graph.api.query, ["one"], [], guard)).toThrow(TypeError);
       }
+
       let failure: unknown;
+
       try {
         callQueryWithProgress(graph.api.query, ["one"], [], () => observationFault);
       } catch (cause) {
         failure = cause;
       }
+
       expect(failure).toBe(observationCause);
       expect(calls).toBe(0);
     } finally {

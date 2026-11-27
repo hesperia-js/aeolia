@@ -15,11 +15,13 @@ export function isCurrentRequest<T>(runtime: StoreRuntime<T>): QueryRequest | un
     )
       return request;
   }
+
   return undefined;
 }
 
 export function asWindow(value: number | undefined, fallback: number | undefined): number {
   const result = value ?? fallback;
+
   return result === undefined
     ? Number.POSITIVE_INFINITY
     : finiteNonNegative(result, "revalidateAfterMs");
@@ -31,8 +33,10 @@ export function statusFor<T>(
   landingGeneration?: number,
 ): StoreStatus {
   const runtime = caller.runtime;
+
   assertStoreOpen(runtime);
   const current = isCurrentRequest(runtime);
+
   if (current != null) return runtime.hasAcceptedLanding ? "revalidating" : "fetching";
   if (!runtime.hasAcceptedLanding && runtime.failing) return "failed";
   if (!runtime.hasAcceptedLanding) return "empty";
@@ -42,6 +46,7 @@ export function statusFor<T>(
   const stale =
     runtime.invalidated ||
     (runtime.lastLandingAt != null && at - runtime.lastLandingAt >= caller.windowMs);
+
   if (stale) return "stale";
   return "ready";
 }
@@ -60,6 +65,7 @@ export function writeAllStatuses<T>(
   landingGeneration?: number,
 ): void {
   const errors: unknown[] = [];
+
   for (const caller of runtime.callers) {
     try {
       writeCallerStatus(caller, at, landingGeneration);
@@ -67,20 +73,24 @@ export function writeAllStatuses<T>(
       errors.push(error);
     }
   }
+
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) throw new AggregateError(errors, "Several caller status writes failed");
 }
 
 export function writeElapsedStatuses<T>(runtime: StoreRuntime<T>, base: number, at: number): void {
   const errors: unknown[] = [];
+
   for (const caller of runtime.callers) {
     if (!Number.isFinite(caller.windowMs) || at - base < caller.windowMs) continue;
+
     try {
       writeCallerStatus(caller, at);
     } catch (error) {
       errors.push(error);
     }
   }
+
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) throw new AggregateError(errors, "Several elapsed status writes failed");
 }
@@ -88,6 +98,7 @@ export function writeElapsedStatuses<T>(runtime: StoreRuntime<T>, base: number, 
 export function makePending(status: Readable<StoreStatus>): Readable<boolean> {
   return computed(() => {
     const value = status.get();
+
     return value === "fetching" || value === "revalidating";
   });
 }
@@ -121,6 +132,7 @@ export function createCaller<T>(
     ...(abortSignal === undefined ? {} : { abortSignal }),
   };
   const report = (fault: Fault): void => graphFault(runtime.graph.__runtime, fault);
+
   reactiveInternal.bindReadable(statusCell, { graphId: runtime.graph.id, reportFault: report });
   reactiveInternal.bindReadable(status, { graphId: runtime.graph.id, reportFault: report });
   writeCallerStatus(caller);
@@ -129,6 +141,7 @@ export function createCaller<T>(
 
 export function queryIsStale<T>(caller: QueryCaller<T>): boolean {
   const runtime = caller.runtime;
+
   if (!runtime.hasAcceptedLanding || runtime.failing || runtime.invalidated) return true;
   return runtime.lastLandingAt != null && Date.now() - runtime.lastLandingAt >= caller.windowMs;
 }

@@ -8,11 +8,14 @@ export function isAbortSignal(value: unknown, afterRead?: () => void): value is 
   const signal = value as Partial<AbortSignal>;
   const read = (key: keyof AbortSignal) => {
     const result = signal[key];
+
     afterRead?.();
     return result;
   };
+
   if (typeof read("aborted") !== "boolean") return false;
   const onabort = read("onabort");
+
   if (onabort !== null && typeof onabort !== "function") return false;
   return (
     typeof read("addEventListener") === "function" &&
@@ -43,11 +46,15 @@ export function addSignalAbortWithDefaultReason(
   const abort = (): void => controller.abort();
   const remove = (): void => signalToWatch.removeEventListener("abort", abort);
   const aborted = signalToWatch.aborted;
+
   if (!isCurrent()) return () => undefined;
+
   if (aborted) abort();
   else {
     const add = signalToWatch.addEventListener;
+
     if (!isCurrent()) return () => undefined;
+
     try {
       Reflect.apply(add, signalToWatch, ["abort", abort, { once: true }]);
     } catch (error) {
@@ -56,8 +63,10 @@ export function addSignalAbortWithDefaultReason(
       } catch {
         // The owner records cleanup failure separately from registration failure.
       }
+
       throw error;
     }
   }
+
   return remove;
 }

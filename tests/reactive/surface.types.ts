@@ -42,6 +42,7 @@ const observer = createObserver({
 const tracked: number = observer.track(() => state.get());
 const invalidated: boolean = observer.check();
 const cancelAfterPropagation = afterPropagation(() => undefined);
+
 observer.dispose();
 cancelAfterPropagation();
 void tracked;

@@ -28,6 +28,7 @@ test("a whole-Store subscriber joining from V2 interruption receives the adopted
   const contract = { namespace: "adoption-subscription", operations: { query } };
   const source = createGraph({ contract });
   const receiver = createGraph({ contract });
+
   source.api.query("key", { initial: 17 });
   const store = receiver.api.query("key", { initial: 1 });
   const existing: Array<number | undefined> = [];
@@ -40,8 +41,10 @@ test("a whole-Store subscriber joining from V2 interruption receives the adopted
     stopJoined = subscribe(store, (value) => joined.push(value));
     during = peekStore(store);
   });
+
   try {
     const pending = store.revalidate();
+
     adopt(receiver, snapshot(source, { version: 2 }), {});
     held.resolve(99);
     await pending;
@@ -83,16 +86,19 @@ test.each(["whole Store", "value"] as const)(
     const store = graph.api.entry();
     const stopExisting = subscribe(store.value, (value) => existing.push(value));
     let during: StoreCapture<number> | undefined;
+
     nestedWrite = () => {
       nestedWrite = undefined;
       store.set(2);
       const onValue = (value: number | undefined) => joined.push(value);
+
       stopJoined =
         subscription === "whole Store"
           ? subscribe(store, onValue)
           : subscribe(store.value, onValue);
       during = peekStore(store);
     };
+
     try {
       store.set(1);
       expect(during).toStrictEqual(peekStore(store));
@@ -102,6 +108,7 @@ test.each(["whole Store", "value"] as const)(
         [2, 3],
         [0, 2, 3],
       ];
+
       expect(allowed).toContainEqual(joined);
       expect(existing).toEqual([0, 2, 3]);
     } finally {
@@ -130,17 +137,21 @@ for (const read of ["none", "ordinary", "capture", "available"] as const) {
             if (read === "available") inside = target.available.get();
             target.set(final);
           }
+
           return Object.is(previous, proposed);
         },
       });
       const graph = createGraph({
         contract: { namespace: "settled-subscription", operations: { entry, trigger } },
       });
+
       target = graph.api.entry();
       const values: Array<number | undefined> = [];
       const stop = subscribe(target.value, (value) => values.push(value));
+
       try {
         graph.api.trigger().set(1);
+
         if (read === "capture")
           expect(inside).toMatchObject({
             kind: "stable",
@@ -148,6 +159,7 @@ for (const read of ["none", "ordinary", "capture", "available"] as const) {
             value: 2,
             valueRevision: 2,
           });
+
         if (read === "available") expect(inside).toBe(true);
         expect(values).toEqual(final === 1 ? [1] : [1, 3]);
         target.set(2);
@@ -207,6 +219,7 @@ test.each(["distinct", "equal"] as const)(
     const stop = subscribe(store.value, (value) => values.push(value));
     let first: StoreCapture<{ amount: number }> | undefined;
     let second: StoreCapture<{ amount: number }> | undefined;
+
     write = () => {
       write = undefined;
       store.set({ amount: 2 });
@@ -214,8 +227,10 @@ test.each(["distinct", "equal"] as const)(
       second = peekStore(store);
       if (settled === "equal") setting.set(true);
     };
+
     try {
       graph.api.trigger().set(1);
+
       if (
         first?.kind !== "stable" ||
         !first.present ||
@@ -223,6 +238,7 @@ test.each(["distinct", "equal"] as const)(
         !second.present
       )
         throw new Error("Expected both in-batch captures to be present");
+
       expect(first.value).toEqual({ amount: 20 });
       expect(second.valueRevision).toBe(first.valueRevision);
       expect(second.value).toBe(first.value);
@@ -266,6 +282,7 @@ for (const suppressPolicyNotification of [false, true]) {
             setting.set(true);
             if (mode === "with capture") inside = peekStore(target);
           }
+
           return Object.is(previous, proposed);
         },
       });
@@ -275,8 +292,10 @@ for (const suppressPolicyNotification of [false, true]) {
       const target = graph.api.entry();
       const delivered: Array<number | undefined> = [];
       const stop = subscribe(target.value, (value) => delivered.push(value));
+
       try {
         graph.api.trigger().set(1);
+
         if (mode === "with capture") {
           expect(inside).toMatchObject({
             kind: "stable",
@@ -285,6 +304,7 @@ for (const suppressPolicyNotification of [false, true]) {
             valueRevision: 2,
           });
         }
+
         expect(target.value.peek()).toBe(2);
         expect(delivered).toEqual([1]);
       } finally {
@@ -324,21 +344,26 @@ test.each(["without capture", "with capture"] as const)(
           if (mode === "with capture") inside = peekStore(target);
           side.set(true);
         }
+
         return Object.is(previous, proposed);
       },
     });
     const graph = createGraph({
       contract: { namespace: "subscription-validation", operations: { entry, trigger } },
     });
+
     target = graph.api.entry();
     const stopController = watch(controller, () => {});
     const delivered: Array<number | undefined> = [];
     const stop = subscribe(target.value, (value) => delivered.push(value));
+
     try {
       graph.api.trigger().set(1);
+
       if (mode === "with capture") {
         expect(inside).toMatchObject({ kind: "stable", present: true, value: 2, valueRevision: 2 });
       }
+
       expect(snapshot(graph).entries.target?.value).toBe(3);
       expect(target.value.peek()).toBe(3);
       expect(peekStore(target)).toMatchObject({

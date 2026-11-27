@@ -19,24 +19,29 @@ import { chromium } from "playwright";
 const root = resolve(import.meta.dir, "../..");
 const chromeExecutablePath = process.env.AEOLIA_CHROME_EXECUTABLE_PATH;
 const expectedChromeVersion = process.env.AEOLIA_CHROME_EXPECTED_VERSION;
+
 if (
   expectedChromeVersion !== undefined &&
   (!expectedChromeVersion.trim() || chromeExecutablePath === undefined)
 )
   throw new Error("AEOLIA_CHROME_EXPECTED_VERSION requires an explicit Chrome executable");
+
 if (chromeExecutablePath !== undefined) {
   if (!chromeExecutablePath.trim() || !isAbsolute(chromeExecutablePath))
     throw new Error("AEOLIA_CHROME_EXECUTABLE_PATH must be a nonempty absolute path");
 
   let executable;
+
   try {
     executable = await stat(chromeExecutablePath);
   } catch (cause) {
     throw new Error("Cannot inspect AEOLIA_CHROME_EXECUTABLE_PATH", { cause });
   }
+
   if (!executable.isFile())
     throw new Error("AEOLIA_CHROME_EXECUTABLE_PATH must name a regular file");
 }
+
 const archiveArguments = Bun.argv.slice(2);
 
 if (archiveArguments.length > 1 || archiveArguments[0]?.startsWith("-"))
@@ -44,15 +49,18 @@ if (archiveArguments.length > 1 || archiveArguments[0]?.startsWith("-"))
 
 const archiveArgument = archiveArguments[0];
 let suppliedArchive: string | undefined;
+
 if (archiveArgument !== undefined) {
   try {
     suppliedArchive = await realpath(resolve(process.cwd(), archiveArgument));
     if (!(await stat(suppliedArchive)).isFile()) throw new Error("Path is not a regular file");
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+
     throw new Error(`Cannot read package archive "${archiveArgument}": ${reason}`);
   }
 }
+
 const temporary = await mkdtemp(join(tmpdir(), "aeolia-package-"));
 const consumer = join(temporary, "consumer");
 const archive = join(temporary, "aeolia.tgz");
@@ -65,6 +73,7 @@ async function run(args: string[], cwd: string, expectedExit = 0): Promise<strin
     new Response(child.stderr).text(),
     child.exited,
   ]);
+
   assert.equal(exitCode, expectedExit, `${args.join(" ")}\n${stdout}\n${stderr}`);
   return stdout + stderr;
 }
@@ -128,17 +137,21 @@ async function installedPeerFact(
 ): Promise<InstalledPeerFact> {
   const visited = new Set<string>();
   let directory = installed;
+
   while (true) {
     const modules =
       directory.split(sep).at(-1) === "node_modules" ? directory : join(directory, "node_modules");
     const packageRoot = join(modules, ...name.split("/"));
+
     if (!visited.has(packageRoot)) {
       visited.add(packageRoot);
       const manifestPath = join(packageRoot, "package.json");
+
       try {
         const bytes = await readFile(manifestPath);
         const peerManifest = JSON.parse(bytes.toString("utf8"));
         const realPackageRoot = await realpath(packageRoot);
+
         return {
           name,
           range,
@@ -163,7 +176,9 @@ async function installedPeerFact(
         if (!isMissingFile(error)) throw error;
       }
     }
+
     const parent = dirname(directory);
+
     if (parent === directory) break;
     directory = parent;
   }
@@ -180,9 +195,11 @@ async function installedPeerFact(
 
 try {
   await mkdir(consumer);
+
   if (suppliedArchive === undefined)
     await run([process.execPath, "pm", "pack", "--filename", archive], root);
   else await copyFile(suppliedArchive, archive);
+
   await writeFile(
     join(consumer, "package.json"),
     JSON.stringify({
@@ -194,9 +211,11 @@ try {
   await run([process.execPath, "install", "--ignore-scripts", "--offline"], consumer);
   const installed = join(consumer, "node_modules", "aeolia");
   const manifestValue: unknown = await Bun.file(join(installed, "package.json")).json();
+
   if (!isRecord(manifestValue)) throw new TypeError("Installed package manifest is not an object");
   const manifest = manifestValue;
   const installedManifestBytes = await readFile(join(installed, "package.json"));
+
   assert.equal(
     manifest.name,
     sourceManifest.name,
@@ -208,25 +227,33 @@ try {
     "Archive package version does not match this checkout",
   );
   const installedIsSymbolicLink = (await lstat(installed)).isSymbolicLink();
+
   assert.equal(installedIsSymbolicLink, false, "Consumer must install the archive, not a link");
   const consumerRealpath = await realpath(consumer);
   const installedRealpath = await realpath(installed);
+
   assert.ok(installedRealpath.startsWith(consumerRealpath + sep));
 
   const installedDist: { path: string; size: number; sha256: string }[] = [];
+
   for await (const path of new Bun.Glob("dist/**/*").scan({ cwd: installed, onlyFiles: true })) {
     const normalizedPath = path.replaceAll("\\", "/");
     const bytes = await readFile(join(installed, path));
+
     installedDist.push({ path: normalizedPath, size: bytes.byteLength, sha256: sha256(bytes) });
   }
+
   installedDist.sort((left, right) =>
     left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
   );
 
   const installedExports = manifest.exports;
+
   if (!isRecord(installedExports))
     throw new TypeError("Installed package exports are not an object");
+
   const exportEntries = Object.entries(installedExports);
+
   assert.ok(exportEntries.length > 0, "The installed archive has no public package exports");
   assert.deepEqual(
     exportEntries.map(([specifier]) => specifier).sort(),
@@ -236,11 +263,15 @@ try {
   const profileRoutes = exportEntries.map(([specifier, rawEntry]) => {
     if (!isPackageExportEntry(rawEntry))
       throw new TypeError("Installed export is missing a required route: " + specifier);
+
     const entry = rawEntry;
     const sourceEntryValue: unknown = sourceManifest.exports?.[specifier];
+
     if (!isPackageExportEntry(sourceEntryValue))
       throw new TypeError("Source package export is missing a required route: " + specifier);
+
     const sourceEntry = sourceEntryValue;
+
     assert.equal(
       entry.types,
       sourceEntry.types,
@@ -257,11 +288,13 @@ try {
       entry.import.replace(/^\.\/dist\//, "./dist/development/"),
       "The development condition did not select its configured profile directory: " + specifier,
     );
+
     for (const path of [entry.types, entry.import, entry.development])
       assert.ok(
         installedDist.some((file) => file.path === path.replace(/^\.\//, "")),
         "The installed export target is missing from the archive: " + path,
       );
+
     return { specifier, types: entry.types, default: entry.import, development: entry.development };
   });
   const stateUpdateDiagnostic = "AEOLIA-DEV-STATE-UPDATE: update() expects next to be a function";
@@ -274,6 +307,7 @@ try {
   const developmentJavaScript = installedDist.filter(
     (file) => file.path.startsWith("dist/development/") && file.path.endsWith(".js"),
   );
+
   assert.ok(offJavaScript.length > 0, "The default profile has no executable JavaScript");
   assert.ok(
     developmentJavaScript.length > 0,
@@ -290,6 +324,7 @@ try {
       (await readFile(join(installed, file.path))).toString("utf8"),
     ),
   );
+
   assert.ok(
     offJavaScriptText.every(
       (text) => !text.includes("__AEOLIA_DEV__") && !text.includes(stateUpdateDiagnostic),
@@ -308,10 +343,12 @@ try {
   const peerDependencies = optionalRecord(manifest.peerDependencies, "peerDependencies");
   const peerMetadata = optionalRecord(manifest.peerDependenciesMeta, "peerDependenciesMeta");
   const peerResolutions: InstalledPeerFact[] = [];
+
   for (const [name, range] of Object.entries(peerDependencies).sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0,
   )) {
     const metadata = peerMetadata[name];
+
     peerResolutions.push(
       await installedPeerFact(
         installed,
@@ -333,17 +370,21 @@ try {
     "yarn.lock",
   ]);
   const consumerLockFiles: { path: string; size: number; sha256: string }[] = [];
+
   for (const name of await readdir(consumer)) {
     if (!lockNames.has(name)) continue;
     const bytes = await readFile(join(consumer, name));
+
     consumerLockFiles.push({ path: name, size: bytes.byteLength, sha256: sha256(bytes) });
   }
+
   assert.ok(consumerLockFiles.length > 0, "Consumer installation did not retain a lockfile");
   consumerLockFiles.sort((left, right) =>
     left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
   );
 
   const archiveBytes = await readFile(archive);
+
   console.log(
     JSON.stringify({
       kind: "aeolia.installed-consumer.receipt",
@@ -380,9 +421,12 @@ try {
 
   const fixtures = await readdir(import.meta.dir);
   const typeFixtures = fixtures.filter((name) => name.endsWith(".types.ts"));
+
   assert.ok(typeFixtures.length > 0, "No consumer type fixtures found");
+
   for (const name of [...typeFixtures, "consumer.mjs", "mapped-error.mjs"])
     await copyFile(join(import.meta.dir, name), join(consumer, name));
+
   await writeFile(
     join(consumer, "tsconfig.json"),
     JSON.stringify({
@@ -431,15 +475,19 @@ try {
       "",
     ].join("\n"),
   );
+
   for (const runtime of [process.execPath, "node"]) {
     const output = await run([runtime, "run.mjs"], consumer);
+
     assert.match(output, /PASS consumer workflow/);
     console.log(`PASS packed consumer workflow: ${runtime === process.execPath ? "Bun" : "Node"}`);
   }
+
   const developmentOutput = await run(
     ["node", "--conditions=development", "run-development.mjs"],
     consumer,
   );
+
   assert.match(developmentOutput, /PASS consumer workflow: development/);
   console.log("PASS packed consumer workflow: Node development condition");
 
@@ -447,6 +495,7 @@ try {
     [process.execPath, "--conditions=development", "run-development.mjs"],
     consumer,
   );
+
   assert.match(bunDevelopmentOutput, /PASS consumer workflow: development/);
   console.log("PASS packed consumer workflow: Bun development condition");
 
@@ -456,17 +505,20 @@ try {
   const guardLines = sourceLines.flatMap((line, index) =>
     line.trim() === invalidInputGuard ? [index] : [],
   );
+
   assert.ok(
     guardLines.length === 1 && guardLines[0] !== undefined,
     "Locate the unique invalid-input guard for the source-map check",
   );
   const guardThrowIndex = guardLines[0] + 1;
+
   assert.equal(
     sourceLines[guardThrowIndex]?.trim(),
     'throw new TypeError("Invalid query declaration.");',
     "The invalid-input guard must throw on the following source line",
   );
   const throwLine = guardThrowIndex + 1;
+
   assert.match(error, /TypeError: Invalid query declaration\./);
   assert.ok(
     error.replaceAll("\\", "/").includes(`/src/contract/api.ts:${throwLine}:`),
@@ -491,11 +543,13 @@ try {
   const diagnosticLines = stateUpdateSourceLines.flatMap((line, index) =>
     line.includes(stateUpdateDiagnostic) ? [index] : [],
   );
+
   assert.ok(
     diagnosticLines.length === 1 && diagnosticLines[0] !== undefined,
     "Locate the unique State.update diagnostic for the source-map check",
   );
   const stateUpdateThrowLine = diagnosticLines[0] + 1;
+
   assert.ok(
     stateUpdateError.includes("TypeError: " + stateUpdateDiagnostic),
     "The installed development profile did not report the State.update diagnostic",
@@ -524,22 +578,28 @@ try {
     ),
   };
   const files = new Map<string, string>([["/consumer.mjs", join(consumer, "consumer.mjs")]]);
+
   for await (const path of new Bun.Glob("dist/**/*").scan({ cwd: installed, onlyFiles: true }))
     files.set("/package/" + path.replaceAll("\\", "/"), join(installed, path));
+
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch(request) {
       const path = new URL(request.url).pathname;
+
       if (path === "/" || path === "/development") {
         const selectedImports = path === "/development" ? imports.development : imports.default;
         const html =
           '<!doctype html><script type="importmap">' +
           JSON.stringify({ imports: selectedImports }) +
           "</script>";
+
         return new Response(html, { headers: { "content-type": "text/html" } });
       }
+
       const file = files.get(path);
+
       return file === undefined
         ? new Response("Not found", { status: 404 })
         : new Response(Bun.file(file), {
@@ -552,28 +612,36 @@ try {
           });
     },
   });
+
   try {
     const browser = await (chromeExecutablePath === undefined
       ? chromium.launch()
       : chromium.launch({ executablePath: chromeExecutablePath }));
+
     try {
       const actualChromeVersion = browser.version();
+
       console.log("Chrome runtime version: " + actualChromeVersion);
+
       if (expectedChromeVersion !== undefined)
         assert.equal(
           actualChromeVersion,
           expectedChromeVersion,
           "Unexpected Chrome runtime version",
         );
+
       const runBrowserConsumer = async (path: string, development: boolean): Promise<void> => {
         const page = await browser.newPage();
         const errors: string[] = [];
+
         page.on("pageerror", (error) => errors.push(error.message));
+
         try {
           await page.goto(new URL(path, server.url.href).href);
           await page.evaluate(async (selectedDevelopment: boolean) => {
             const url = "/consumer.mjs";
             let timer: ReturnType<typeof setTimeout>;
+
             try {
               await Promise.race([
                 import(url).then(({ verifyConsumer }) => verifyConsumer(selectedDevelopment)),
@@ -600,6 +668,7 @@ try {
           await page.close();
         }
       };
+
       await runBrowserConsumer("/", false);
       await runBrowserConsumer("/development", true);
     } finally {

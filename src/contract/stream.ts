@@ -130,45 +130,61 @@ export async function consumeStream<T>(
   session: StreamSession<T>,
 ): Promise<void> {
   const iterator = session.iterator;
+
   if (iterator === undefined) return;
+
   try {
     while (!session.ended) {
       const positioned = session.positioned;
+
       if (positioned !== undefined) {
         noteTransferChange(positioned);
         positioned.pendingPosition = undefined;
         positioned.hasPendingPosition = false;
       }
+
       const next = iterator.next;
+
       if (!isCurrentSession(runtime, session)) return;
       const result = await Reflect.apply(next, iterator, []);
+
       if (!isCurrentSession(runtime, session)) return;
       const lifetime = positioned?.preparation?.lifetime;
+
       if (lifetime !== undefined && !lifetime.currentAt(readerLifetimeNow())) {
         const reason = new AbortError("Positioned Store reader lifetime expired");
+
         endStream(runtime, session, "closed", reason, { abortReason: reason });
         return;
       }
+
       const done = result.done;
+
       if (!isCurrentSession(runtime, session)) return;
       const value = done ? undefined : result.value;
+
       if (!isCurrentSession(runtime, session)) return;
       if (!done) nextGeneration(runtime.generation);
       noteTransferChange(runtime);
       noteTransferChange(session);
       if (positioned !== undefined) noteTransferChange(positioned);
+
       if (done) {
         if (positioned !== undefined) {
           positioned.pendingPosition = undefined;
           positioned.hasPendingPosition = false;
         }
+
         endStream(runtime, session, "closed");
         return;
       }
+
       let event = positioned?.dispatch;
+
       if (positioned !== undefined) {
         const hasPosition = positioned.hasPendingPosition;
         const position = positioned.pendingPosition;
+
         positioned.pendingPosition = undefined;
         positioned.hasPendingPosition = false;
         session.hasPosition = hasPosition;
@@ -182,8 +198,10 @@ export async function consumeStream<T>(
         positioned.dispatch = event;
         positioned.diverged = !hasPosition;
       }
+
       issue(runtime);
       session.emitted = true;
+
       try {
         reactiveInternal.batch(() =>
           recordLanding(runtime, value as T, undefined, session.bound, session),
@@ -192,6 +210,7 @@ export async function consumeStream<T>(
         if (isCurrentSession(runtime, session))
           reportContinuationError(runtime.graph.__runtime, error);
       }
+
       if (!isCurrentSession(runtime, session)) return;
       publishStreamEvent(
         runtime,
@@ -201,12 +220,14 @@ export async function consumeStream<T>(
           : { kind: "value", value: value as T },
       );
       if (!isCurrentSession(runtime, session)) return;
+
       try {
         setStreamStatus(runtime, "live");
       } catch (error) {
         if (isCurrentSession(runtime, session))
           reportContinuationError(runtime.graph.__runtime, error);
       }
+
       if (positioned !== undefined && positioned.dispatch === event) {
         const landingRevision = event?.landingRevision;
         const coherent =
@@ -215,6 +236,7 @@ export async function consumeStream<T>(
           landingRevision !== undefined &&
           positioned.baseRevision === landingRevision &&
           !positioned.diverged;
+
         if (coherent && event !== undefined) {
           positioned.completed = Object.freeze(event) as PositionedStoreCompletedEvent;
           positioned.continuation = {
@@ -223,6 +245,7 @@ export async function consumeStream<T>(
             token: event.identity,
           };
         } else positioned.diverged = true;
+
         positioned.dispatch = undefined;
         noteTransferChange(positioned);
       }
@@ -239,10 +262,12 @@ export function openStream<T>(
   abortSignal: AbortSignal | undefined,
 ): void {
   const state = runtime.graph.__runtime;
+
   assertGraphOpen(state);
   const physical = beginPhysicalWork(state.retirement, "stream");
   let admission: ReturnType<typeof beginTransferAdmission> | undefined;
   let driven = false;
+
   try {
     admission = beginTransferAdmission(
       state,
@@ -263,25 +288,33 @@ export function openStream<T>(
       callerAttached = false;
       physicalCleanup(physical.owner, removeSignalAbort);
     };
+
     if (runtime.binding?.kind === "stream") {
       const abort = (): void => controller.abort(abortSignal?.reason);
+
       if (abortSignal !== undefined) {
         removeSignalAbort = () => abortSignal.removeEventListener("abort", abort);
+
         try {
           const aborted = abortSignal.aborted;
+
           if (!openingCurrent()) {
             assertBindingContextOpen(runtime.binding.context);
             return;
           }
+
           if (aborted) abort();
           else {
             const add = abortSignal.addEventListener;
+
             if (!openingCurrent()) {
               assertBindingContextOpen(runtime.binding.context);
               return;
             }
+
             callerAttached = true;
             Reflect.apply(add, abortSignal, ["abort", abort, { once: true }]);
+
             if (!openingCurrent()) {
               removeAbort();
               assertBindingContextOpen(runtime.binding.context);
@@ -296,6 +329,7 @@ export function openStream<T>(
               reportContinuationError(state, cleanupCause);
             }
           }
+
           throw cause;
         }
       }
@@ -308,12 +342,16 @@ export function openStream<T>(
       );
       callerAttached = abortSignal !== undefined;
     }
+
     if (!openingCurrent()) {
       removeAbort();
+
       if (runtime.binding !== undefined) assertBindingContextOpen(runtime.binding.context);
       else if (state.disposed) assertGraphOpen(state);
+
       return;
     }
+
     const session: StreamSession<T> = {
       physical,
       controller,
@@ -326,6 +364,7 @@ export function openStream<T>(
       removeCallerAbort: removeAbort,
       unobservedSince: runtime.liveReadableCount === 0 ? Date.now() : undefined,
     };
+
     registerTransferWork(runtime, physical);
     registerTransferWork(session, physical);
     noteTransferChange(runtime);
@@ -355,19 +394,24 @@ export function createStreamRuntimeActivation<T>(
 ): () => void {
   if (stream.kind === "positioned-stream")
     throw new TypeError("Positioned streams require an admitted reader session");
+
   const matches = (source: StreamSource<T> | undefined): source is StreamSource<T> =>
     source !== undefined &&
     source.stream === stream &&
     Object.is(source.input, input) &&
     source.member === member &&
     (abortSignal === undefined || source.abortSignal === abortSignal);
+
   if (preparedSource !== undefined && !matches(preparedSource))
     throw new TypeError("Stream activation requires its exact prepared raw source");
+
   const graphState = runtime.graph.__runtime;
   const resetEpoch = graphState.resetEpoch;
   let activated = false;
+
   return (): void => {
     const source = preparedSource ?? runtime.streamSource;
+
     if (
       activated ||
       !matches(source) ||
@@ -380,7 +424,9 @@ export function createStreamRuntimeActivation<T>(
       runtime.binding !== undefined
     )
       return;
+
     activated = true;
+
     try {
       assertGraphOpen(graphState);
       if (runtime.stream !== undefined || runtime.incarnation === undefined) return;
@@ -402,6 +448,7 @@ function ensurePositionedStoreState<T>(
   const definition = stream as PositionedStreamDefinition<any, T, any, any, any>;
   const provider = positionedStreamSourceByDefinition.get(definition);
   const member = session.bound?.binding.handle ?? runtime.streamSource?.member;
+
   if (provider === undefined || member === undefined) return undefined;
   const positioned: PositionedStoreSessionState<T> = {
     runtime,
@@ -416,6 +463,7 @@ function ensurePositionedStoreState<T>(
     diverged: false,
     participants: new Set(),
   };
+
   noteTransferChange(runtime);
   noteTransferChange(session);
   session.positioned = positioned;
@@ -428,36 +476,51 @@ function acceptPositionedInitialBoundary<T>(
   result: unknown,
 ): void {
   const positioned = session.positioned;
+
   if (positioned === undefined) return;
+
   if (!isCurrentSession(runtime, session) || positioned.phase === "closed")
     throw new TypeError("The positioned opening changed before its initial boundary was recorded");
+
   const preparation = positioned.preparation;
+
   if (preparation !== undefined && (preparation.discarded || !preparation.published))
     throw new TypeError("The positioned reader was not published before opening");
+
   if (preparation?.lifetime !== undefined && !preparation.lifetime.currentAt(readerLifetimeNow()))
     throw new TypeError("Positioned Store reader lifetime expired before opening");
+
   if (result === null || typeof result !== "object")
     throw new TypeError("Positioned initial boundary must be an own-data result");
+
   const fields = Reflect.ownKeys(result);
   const availableField = Object.getOwnPropertyDescriptor(result, "available");
+
   if (
     availableField === undefined ||
     !("value" in availableField) ||
     (availableField.value !== true && availableField.value !== false)
   )
     throw new TypeError("Positioned initial boundary requires an own boolean available field");
+
   if (availableField.value === false) {
     if (fields.length !== 1 || fields[0] !== "available")
       throw new TypeError("An unavailable positioned boundary has an invalid shape");
+
     if (positioned.continuation?.kind === "initial")
       throw new TypeError("The admitted initial boundary is no longer available");
+
     return;
   }
+
   const afterField = Object.getOwnPropertyDescriptor(result, "after");
+
   if (afterField === undefined || !("value" in afterField))
     throw new TypeError("An available positioned initial boundary requires an own after field");
+
   if (fields.length !== 2 || !fields.includes("available") || !fields.includes("after"))
     throw new TypeError("An available positioned boundary has an invalid shape");
+
   const after = afterField.value;
   const existing =
     positioned.continuation !== undefined
@@ -474,11 +537,14 @@ function acceptPositionedInitialBoundary<T>(
     positioned.completed !== undefined ||
     positioned.hasPendingPosition ||
     session.hasPosition;
+
   if (hasExisting) {
     if (!Object.is(after, existing))
       throw new TypeError("The positioned opening boundary changed after reader admission");
+
     return;
   }
+
   noteTransferChange(session);
   noteTransferChange(positioned);
   positioned.continuation = { kind: "initial", after, token: Object.freeze({}) };
@@ -494,8 +560,10 @@ function driveStreamSource<T>(
   rawRemoveAbort?: () => void,
 ): void {
   const state = runtime.graph.__runtime;
+
   ensurePositionedStoreState(runtime, session, stream, input);
   let observed = false;
+
   try {
     const controller = session.controller;
     const removeAbort = (): void => {
@@ -509,6 +577,7 @@ function driveStreamSource<T>(
         reportContinuationError(state, cause);
       }
     };
+
     try {
       noteTransferChange(runtime);
       noteTransferChange(session);
@@ -521,12 +590,15 @@ function driveStreamSource<T>(
     } catch (error) {
       if (sameSessionEpoch(runtime, session)) reportContinuationError(state, error);
     }
+
     if (!isCurrentSession(runtime, session)) {
       removeAbort();
       return;
     }
+
     const closeOnAbort = (): void => {
       if (session.ended) return;
+
       try {
         endStream(runtime, session, "closed");
       } catch (error) {
@@ -545,6 +617,7 @@ function driveStreamSource<T>(
       session.removeControllerAbort = removeControllerAbort;
       controller.signal.addEventListener("abort", closeOnAbort, { once: true });
     };
+
     if (session.bound !== undefined) {
       const callerAlreadyAttached = session.removeCallerAbort !== undefined;
       let linked = false;
@@ -554,24 +627,31 @@ function driveStreamSource<T>(
         linked = false;
         abortSignal.removeEventListener("abort", abort);
       };
+
       if (!callerAlreadyAttached) session.removeCallerAbort = unlinkCaller;
+
       try {
         attachController();
+
         if (abortSignal !== undefined && !callerAlreadyAttached) {
           const aborted = abortSignal.aborted;
+
           if (!isCurrentSession(runtime, session)) {
             removeAbort();
             return;
           }
+
           if (aborted) abort();
           else {
             linked = true;
+
             try {
               abortSignal.addEventListener("abort", abort, { once: true });
             } finally {
               // A signal can install its listener after a reentrant retirement already unlinked it.
               if (!isCurrentSession(runtime, session)) {
                 linked = true;
+
                 try {
                   physicalCleanup(session.physical.owner, unlinkCaller);
                 } catch (cause) {
@@ -586,23 +666,29 @@ function driveStreamSource<T>(
         failStream(runtime, session, cause);
         return;
       }
+
       if (!isCurrentSession(runtime, session)) {
         removeAbort();
         return;
       }
     }
+
     if (controller.signal.aborted) {
       closeOnAbort();
       removeAbort();
       return;
     }
+
     let iterable: AsyncIterable<T>;
+
     try {
       const open = stream.open;
+
       if (!isCurrentSession(runtime, session)) {
         removeAbort();
         return;
       }
+
       const sourceOptions: OpenOptions = {
         abortSignal: controller.signal,
         graph: state.graph.id,
@@ -610,12 +696,15 @@ function driveStreamSource<T>(
         reportGap: () => {
           if (!isCurrentSession(runtime, session)) return;
           const positioned = session.positioned;
+
           noteTransferChange(runtime);
           noteTransferChange(session);
+
           if (positioned !== undefined) {
             noteTransferChange(positioned);
             positioned.diverged = true;
           }
+
           if (positioned?.reader?.owned) {
             failStream(
               runtime,
@@ -624,9 +713,11 @@ function driveStreamSource<T>(
             );
             return;
           }
+
           publishStreamEvent(runtime, session, { kind: "gap" });
           if (!isCurrentSession(runtime, session) || !session.emitted) return;
           runtime.invalidated = true;
+
           try {
             reactiveInternal.batch(() => {
               writeAllStatuses(runtime);
@@ -637,41 +728,52 @@ function driveStreamSource<T>(
           }
         },
       };
+
       positionedPositionWriterByOpenOptions.set(sourceOptions, (position) => {
         if (session.positioned?.phase === "closed" || session.ended) return;
         const positioned = session.positioned;
+
         noteTransferChange(session);
+
         if (positioned === undefined) {
           session.position = position;
           session.hasPosition = true;
           return;
         }
+
         noteTransferChange(positioned);
         positioned.pendingPosition = position;
         positioned.hasPendingPosition = true;
       });
+
       if (session.positioned?.provider.initialBoundary !== undefined)
         positionedInitialBoundaryWriterByOpenOptions.set(sourceOptions, (result) => {
           positionedInitialBoundaryWriterByOpenOptions.delete(sourceOptions);
           acceptPositionedInitialBoundary(runtime, session, result);
         });
+
       const positionedReader = session.positioned?.reader;
+
       if (positionedReader !== undefined)
         positionedOpenRequestByOpenOptions.set(sourceOptions, {
           after: positionedReader.after,
           reader: positionedReader.reader,
         });
+
       iterable = Reflect.apply(open, stream, [input, sourceOptions]);
     } catch (cause) {
       removeAbort();
       failStream(runtime, session, cause);
       return;
     }
+
     if (!isCurrentSession(runtime, session)) {
       removeAbort();
       return;
     }
+
     let iterator: AsyncIterator<T>;
+
     try {
       iterator = iterable[Symbol.asyncIterator]();
     } catch (cause) {
@@ -679,6 +781,7 @@ function driveStreamSource<T>(
       failStream(runtime, session, cause);
       return;
     }
+
     if (!isCurrentSession(runtime, session)) {
       try {
         returnStreamIterator(session, iterator, true, undefined, {
@@ -687,23 +790,31 @@ function driveStreamSource<T>(
       } finally {
         removeAbort();
       }
+
       return;
     }
+
     session.iterator = iterator;
+
     if (controller.signal.aborted) {
       closeOnAbort();
       removeAbort();
       return;
     }
+
     const lifetime = session.positioned?.preparation?.lifetime;
+
     if (lifetime !== undefined && !lifetime.currentAt(readerLifetimeNow())) {
       const reason = new AbortError("Positioned Store reader lifetime expired");
+
       endStream(runtime, session, "closed", reason, { abortReason: reason });
       removeAbort();
       return;
     }
+
     attachController();
     const original = consumeStream(runtime, session);
+
     session.physical.original = original;
     observed = true;
     const continuation = original
@@ -721,6 +832,7 @@ function driveStreamSource<T>(
       .catch((cause) => {
         if (sameSessionEpoch(runtime, session)) reportContinuationError(state, cause);
       });
+
     observePhysicalWork(session.physical, continuation, false, original);
   } finally {
     if (!observed) finishPhysicalWork(session.physical);
@@ -729,6 +841,7 @@ function driveStreamSource<T>(
 
 function boundSessionCurrent<T>(bound: BoundStreamSessionRuntime<T>): boolean {
   const { runtime, session } = bound;
+
   return (
     bound.phase === "active" &&
     !session.ended &&
@@ -743,6 +856,7 @@ function boundSessionCurrent<T>(bound: BoundStreamSessionRuntime<T>): boolean {
 
 function assertBoundSession<T>(bound: BoundStreamSessionRuntime<T>): void {
   assertBindingContextOpen(bound.binding.context);
+
   if (!boundSessionCurrent(bound))
     throw new TypeError("The bound stream session is no longer active");
 }
@@ -754,6 +868,7 @@ function installBoundSession<T>(
   deferredPublication = false,
 ): StreamSession<T> {
   const physical = beginPhysicalWork(retirementOwner ?? binding.context.retirement, "stream");
+
   try {
     const session: StreamSession<T> = {
       physical,
@@ -788,12 +903,15 @@ function installBoundSession<T>(
       phase: "active",
       liveReadables: 0,
     };
+
     noteTransferChange(runtime);
     noteTransferChange(session);
+
     if (!deferredPublication) {
       noteTransferChange(binding);
       noteTransferChange(binding.handle);
     }
+
     registerTransferWork(runtime, physical);
     registerTransferWork(session, physical);
     registerTransferWork(bound, physical);
@@ -819,12 +937,17 @@ function boundTerminalValue<T>(bound: BoundStreamSessionRuntime<T>): {
 } {
   assertBindingContextOpen(bound.binding.context);
   const receipt = bound.receipt;
+
   if (bound.phase !== "detached" || receipt === undefined)
     throw new TypeError("The bound stream is completing its native retirement");
+
   const terminal = receipt.terminalCapture;
+
   if (terminal.kind === "fault") throw terminal.cause;
+
   if (terminal.capture.kind === "changed")
     throw new TypeError("The terminal stream capture changed");
+
   return terminal.capture.present
     ? { present: true, value: terminal.capture.value }
     : { present: false };
@@ -841,9 +964,12 @@ function boundFacets<T>(
     if (bound.phase !== "active") return boundTerminalValue(bound);
     assertBoundSession(bound);
     const capture = captureStoreRuntime(runtime);
+
     assertBoundSession(bound);
+
     if (capture.kind === "changed")
       throw new TypeError("The bound stream changed during its native read");
+
     return capture.present ? { present: true, value: capture.value } : { present: false };
   };
   const facet = <V>(role: string, read: () => V): Readable<V> => {
@@ -851,6 +977,7 @@ function boundFacets<T>(
       bound.lifecycle.get();
       return read();
     });
+
     registerTransferReadable(readable, runtime, role);
     reactiveInternal.bindReadable(readable, {
       graphId: runtime.graph.id,
@@ -859,16 +986,20 @@ function boundFacets<T>(
     reactiveInternal.onActualRead(readable, () => {
       if (preparation !== undefined && !preparation.published)
         throw new TypeError("The positioned Store is still dormant");
+
       assertBindingContextOpen(bound.binding.context);
       if (boundSessionCurrent(bound)) touch(runtime);
     });
     reactiveInternal.onLivenessChange(readable, (live) => {
       if ((preparation !== undefined && !preparation.published) || !boundSessionCurrent(bound))
         return;
+
       bound.liveReadables = Math.max(0, bound.liveReadables + (live ? 1 : -1));
+
       if (bound.liveReadables > 0 || bound.session.listeners.size > 0)
         bound.session.unobservedSince = undefined;
       else bound.session.unobservedSince = Date.now();
+
       if (live) touch(runtime);
       updateCollectionCandidate(runtime);
       scheduleSweep(runtime.graph.__runtime);
@@ -877,17 +1008,22 @@ function boundFacets<T>(
   };
   const status = (): "empty" | "opening" | "live" | "stale" | "closed" | "failed" => {
     assertBindingContextOpen(bound.binding.context);
+
     if (bound.phase !== "active") {
       if (bound.receipt === undefined)
         throw new TypeError("The bound stream is completing retirement");
+
       return bound.receipt.status;
     }
+
     assertBoundSession(bound);
     return reactiveInternal.signalValue(runtime.streamStatusCell);
   };
+
   bound.facets = Object.freeze({
     value: facet("stream-value", () => {
       const value = readValue();
+
       return value.present ? value.value : undefined;
     }),
     available: facet("stream-available", () => readValue().present),
@@ -895,11 +1031,14 @@ function boundFacets<T>(
     pending: facet("stream-pending", () => status() === "opening"),
     error: facet("stream-error", () => {
       assertBindingContextOpen(bound.binding.context);
+
       if (bound.phase !== "active") {
         if (bound.receipt === undefined)
           throw new TypeError("The bound stream is completing retirement");
+
         return bound.receipt.status === "failed" ? bound.receipt.reason : undefined;
       }
+
       assertBoundSession(bound);
       return reactiveInternal.signalValue(runtime.errorCell);
     }),
@@ -928,8 +1067,10 @@ function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): S
       nextValueRevision(runtime.valueRevision);
       nextGeneration(runtime.generation);
       const write = beginStoreAddress(runtime);
+
       try {
         const value = next(reactiveInternal.signalValue(runtime.committed));
+
         assertBoundSession(bound);
         directWrite(runtime, value, bound);
       } finally {
@@ -937,23 +1078,28 @@ function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): S
       }
     },
   };
+
   Object.defineProperty(wrapper, storeSubscribe, {
     value: (observer: (value: T) => void) => {
       if (preparation !== undefined && !preparation.published) assertStoreHandlePublished(wrapper);
       const present = computed(
         () => {
           runtime.lifecycle.get();
+
           if (
             runtime.disposed ||
             runtime.graph.__runtime.disposed ||
             bound.binding.context.disposed
           )
             return STORE_ABSENT;
+
           const value = facets.value.get();
+
           return facets.available.get() ? value : STORE_ABSENT;
         },
         { equals: () => false },
       );
+
       return subscribe(present, (value) => {
         if (value !== STORE_ABSENT) observer(value as T);
       });
@@ -964,9 +1110,11 @@ function boundWrapper<T>(runtime: StoreRuntime<T>, session: StreamSession<T>): S
   Object.freeze(wrapper);
   boundStreamByStore.set(wrapper, bound as unknown as BoundStreamSessionRuntime<unknown>);
   registerTransferStoreHandle(wrapper, runtime);
+
   if (preparation !== undefined && !preparation.published)
     registerDormantStoreHandle(wrapper, runtime, () => preparation.published, false);
   else runtimeByStore.set(wrapper, runtime as StoreRuntime<unknown>);
+
   registerTransferSource(bound.binding.handle, {
     graph: runtime.graph,
     kind: "stream",
@@ -989,16 +1137,20 @@ function boundMember<T>(
   const epoch = state.resetEpoch;
   const current = (): void => {
     assertBindingContextOpen(binding.context);
+
     if (state.resetEpoch !== epoch)
       throw new TypeError("Bound stream acquisition crossed a graph reset");
   };
+
   if (
     supplied !== undefined &&
     (supplied === null || typeof supplied !== "object" || Array.isArray(supplied))
   )
     throw new TypeError("Invalid bound stream options");
+
   const read = (key: string): unknown => {
     const value = supplied === undefined ? undefined : Reflect.get(supplied, key);
+
     current();
     return value;
   };
@@ -1008,6 +1160,7 @@ function boundMember<T>(
   const snapshot = read("snapshot");
   const expectEmpty = read("expectEmpty");
   const initialStated = supplied !== undefined && Object.hasOwn(supplied, "initial");
+
   current();
   const options: Record<string, unknown> = {
     ...(abortSignal === undefined ? {} : { abortSignal }),
@@ -1015,47 +1168,63 @@ function boundMember<T>(
     ...(equals === undefined ? {} : { equals }),
     ...(snapshot === undefined ? {} : { snapshot }),
   };
+
   if (!isValueOptions(options, current)) throw new TypeError("Invalid bound stream value options");
   current();
   const values = options as ValueOptions<T>;
   const keyForInput = stream.key;
+
   current();
   const key = storeKey(Reflect.apply(keyForInput, stream, [input]));
+
   current();
   const existing = binding.stores.get(String(key)) as StoreRuntime<T> | undefined;
+
   if (existing?.boundRetirement !== undefined || existing?.transitioning === true)
     throw new TypeError("The bound stream is still completing native retirement");
+
   if (existing !== undefined)
     configureKeyedValue(existing, stream, values, undefined, true, true, current);
   else {
     if (values.equals !== undefined) {
       const declaredEquals = stream.equals;
+
       current();
+
       if (declaredEquals !== undefined) {
         const comparedEquals = stream.equals;
+
         current();
         if (values.equals !== comparedEquals) throw new Fault("contract", [String(key), "equals"]);
       }
     }
+
     if (values.snapshot !== undefined) {
       const declaredSnapshot = stream.snapshot;
+
       current();
+
       if (declaredSnapshot !== undefined) {
         const comparedSnapshot = stream.snapshot;
+
         current();
+
         if (values.snapshot !== comparedSnapshot)
           throw new Fault("contract", [String(key), "snapshot"]);
       }
     }
   }
+
   current();
   const joined = existing?.stream;
+
   if (
     expectEmpty === undefined &&
     joined?.bound !== undefined &&
     boundSessionCurrent(joined.bound)
   ) {
     const admission = beginBindingAddress(binding, String(key));
+
     try {
       configureKeyedValue(existing!, stream, values, joined.bound, false, true, () =>
         assertBoundSession(joined.bound!),
@@ -1066,8 +1235,10 @@ function boundMember<T>(
       endBindingAddress(binding, String(key), admission);
     }
   }
+
   const claim =
     existing !== undefined && importedBaselineCurrent(existing as StoreRuntime<unknown>);
+
   nextGeneration(existing?.generation ?? 0);
   const clearRevision = claim
     ? existing!.valueRevision
@@ -1076,13 +1247,16 @@ function boundMember<T>(
   let session: StreamSession<T> | undefined;
   let runtime: StoreRuntime<T> | undefined;
   let driven = false;
+
   try {
     runtime = getOrCreateStore<T>(state, key, undefined, binding, false);
     onRuntime?.(runtime);
     inheritTransferCoverage(runtime);
     current();
+
     if (claim && !importedBaselineCurrent(runtime as StoreRuntime<unknown>))
       throw new TypeError("The imported stream baseline is no longer current");
+
     noteTransferChange(runtime);
     issue(runtime);
     runtime.importedBaseline = undefined;
@@ -1091,6 +1265,7 @@ function boundMember<T>(
     runtime.dropped = false;
     session = installBoundSession(runtime, binding);
     const bound = session.bound!;
+
     noteTransferChange(runtime);
     noteTransferChange(binding.handle);
     runtime.transitioning = true;
@@ -1105,10 +1280,13 @@ function boundMember<T>(
       if (!claim) runtime!.lastLandingAt = undefined;
       if (!claim) runtime!.lastSettledAt = undefined;
       runtime!.refreshOnActivation = false;
+
       for (const prediction of reactiveInternal.signalValue(runtime!.predictionStack))
         prediction.dead = true;
+
       runtime!.predictionStack.set([]);
       if (!boundSessionCurrent(bound)) return;
+
       if (!claim)
         reactiveInternal.guardedWrite(
           runtime!.committed,
@@ -1116,6 +1294,7 @@ function boundMember<T>(
           () => boundSessionCurrent(bound),
           () => undefined,
         );
+
       if (!boundSessionCurrent(bound)) return;
       if (!claim) runtime!.presence.set(false);
       if (!boundSessionCurrent(bound)) return;
@@ -1126,8 +1305,10 @@ function boundMember<T>(
       assertBoundSession(bound),
     );
     assertBoundSession(bound);
+
     if (initialStated && !runtime.baseAvailable)
       recordLanding(runtime, initial as T, undefined, bound);
+
     assertBoundSession(bound);
     noteTransferChange(runtime);
     runtime.transitioning = false;
@@ -1144,6 +1325,7 @@ function boundMember<T>(
   } catch (cause) {
     if (runtime !== undefined && session !== undefined && !session.ended)
       failStream(runtime, session, cause);
+
     throw cause;
   } finally {
     if (session !== undefined && !driven) finishPhysicalWork(session.physical);
@@ -1175,10 +1357,13 @@ function rawStreamWrapper<T>(
   stream: NativeStreamDefinition<any, T, any, any, any>,
 ): StreamStore<T> {
   const state = runtime.graph.__runtime;
+
   assertGraphOpen(state);
   const status = runtime.streamStatus;
+
   assertGraphOpen(state);
   const name = stream.name;
+
   assertGraphOpen(state);
   const pending = computed(() => status.get() === "opening", {
     label: `stream:${name}:${String(runtime.key)}:pending`,
@@ -1186,6 +1371,7 @@ function rawStreamWrapper<T>(
   const preparation = runtime.readerScope?.session.positioned?.preparation;
   const dormant = preparation !== undefined && !preparation.published;
   const streamStore = Object.create(dormant ? Object.prototype : runtime.store) as StreamStore<T>;
+
   Object.assign(streamStore, {
     ...(dormant
       ? {
@@ -1200,6 +1386,7 @@ function rawStreamWrapper<T>(
     error: runtime.error,
     status,
   });
+
   if (dormant) {
     Object.assign(streamStore, {
       set(value: T): void {
@@ -1212,12 +1399,14 @@ function rawStreamWrapper<T>(
       },
     });
     const subscribeDescriptor = Object.getOwnPropertyDescriptor(runtime.store, storeSubscribe);
+
     if (
       subscribeDescriptor === undefined ||
       !("value" in subscribeDescriptor) ||
       typeof subscribeDescriptor.value !== "function"
     )
       throw new TypeError("The native Store has no subscription implementation");
+
     Object.defineProperty(streamStore, storeSubscribe, {
       value: (observer: (value: T) => void) => {
         assertStoreHandlePublished(streamStore);
@@ -1227,18 +1416,23 @@ function rawStreamWrapper<T>(
       configurable: false,
     });
   }
+
   Object.freeze(streamStore);
   registerTransferStoreHandle(streamStore, runtime);
+
   if (dormant)
     registerDormantStoreHandle(streamStore, runtime, () => preparation!.published, false);
   else runtimeByStore.set(streamStore, runtime as StoreRuntime<unknown>);
+
   const source = runtime.streamSource?.member ?? streamStore;
+
   registerTransferSource(source, { graph: runtime.graph, kind: "stream", definition: stream });
   registerTransferReadable(runtime.value, runtime, "stream-value");
   registerTransferReadable(runtime.store.available, runtime, "stream-available");
   registerTransferReadable(pending, runtime, "stream-pending");
   registerTransferReadable(status, runtime, "stream-status");
   registerTransferReadable(runtime.error, runtime, "stream-error");
+
   if (dormant)
     guardPositionedStoreReads(runtime, streamStore, [
       runtime.value,
@@ -1247,10 +1441,12 @@ function rawStreamWrapper<T>(
       status,
       pending,
     ]);
+
   if (!dormant) {
     observeStoreReadable(runtime, status);
     observeStoreReadable(runtime, pending);
   }
+
   reactiveInternal.bindReadable(pending, {
     graphId: state.graph.id,
     reportFault: (fault) => graphFault(state, fault),
@@ -1269,15 +1465,18 @@ export function streamMember<T>(
 ): StreamStore<T> {
   if (binding !== undefined) assertBindingContextOpen(binding.context);
   else assertGraphOpen(state);
+
   const acquisition = beginPhysicalWork(
     binding?.context.retirement ?? state.retirement,
     "acquisition",
   );
   let admission: ReturnType<typeof beginTransferAdmission> | undefined;
   let admissionRuntime: StoreRuntime<T> | undefined;
+
   try {
     admission = beginTransferAdmission(state, stream, binding?.handle, input);
     const source = originalMember ?? binding?.handle;
+
     if (source !== undefined)
       registerTransferSource(source, {
         graph: state.graph,
@@ -1285,19 +1484,26 @@ export function streamMember<T>(
         definition: stream,
         ...(binding === undefined ? {} : { binding }),
       });
+
     if (binding !== undefined)
       return boundMember(state, stream, input, options, binding, (runtime) => {
         admissionRuntime = runtime;
       });
+
     assertGraphOpen(state);
+
     if (options !== undefined && !isValueOptions(options, () => assertGraphOpen(state)))
       throw new TypeError("Invalid stream options.");
+
     assertGraphOpen(state);
     const keyForInput = stream.key;
+
     assertGraphOpen(state);
     const key = storeKey(Reflect.apply(keyForInput, stream, [input]));
+
     assertGraphOpen(state);
     const runtime = getOrCreateStore<T>(state, key, undefined, undefined, false);
+
     admissionRuntime = runtime;
     inheritTransferCoverage(runtime);
     configureKeyedValue(runtime, stream, options, undefined, false, true, () =>
@@ -1305,10 +1511,12 @@ export function streamMember<T>(
     );
     assertGraphOpen(state);
     const abortSignal = options?.abortSignal;
+
     assertGraphOpen(state);
     admitStore(runtime);
 
     const active = runtime.stream;
+
     if (active === undefined) {
       noteTransferChange(runtime);
       runtime.streamSource = {
@@ -1319,6 +1527,7 @@ export function streamMember<T>(
       };
       openStream(runtime, stream, input, key, abortSignal);
     }
+
     return rawStreamWrapper(runtime, stream);
   } finally {
     try {
@@ -1355,18 +1564,23 @@ function addPendingPositionedStore<T>(
   runtime: StoreRuntime<T>,
 ): void {
   let graphPending = state.pendingPositionedStores;
+
   if (graphPending === undefined) {
     graphPending = new Set<StoreRuntime<unknown>>();
     state.pendingPositionedStores = graphPending;
   }
+
   graphPending.add(runtime as StoreRuntime<unknown>);
+
   if (binding !== undefined) {
     const context = binding.context;
     let contextPending = context.pendingPositionedStores;
+
     if (contextPending === undefined) {
       contextPending = new Set<StoreRuntime<unknown>>();
       context.pendingPositionedStores = contextPending;
     }
+
     contextPending.add(runtime as StoreRuntime<unknown>);
   }
 }
@@ -1383,6 +1597,7 @@ function removePendingPositionedStore<T>(
 function materializePositionedStoreInitial<T>(runtime: StoreRuntime<T>): void {
   if (!runtime.initialSpecified || runtime.baseAvailable) return;
   const revision = nextValueRevision(runtime.valueRevision);
+
   noteTransferChange(runtime);
   runtime.valueRevision = revision;
   runtime.baseAvailable = true;
@@ -1398,12 +1613,16 @@ function seedPreparedPositionedStoreBase<T>(
   construction: PositionedStoreSessionConstruction<T>,
 ): void {
   const base = construction.base;
+
   positioned.diverged = false;
+
   if (!base.present || runtime.baseAvailable) {
     positioned.baseRevision = undefined;
     return;
   }
+
   const revision = nextValueRevision(runtime.valueRevision);
+
   noteTransferChange(runtime);
   runtime.valueRevision = revision;
   runtime.importedBaseline = undefined;
@@ -1430,6 +1649,7 @@ function seedLegacyPositionedStoreBase<T>(
   latest: T,
 ): void {
   const revision = nextValueRevision(runtime.valueRevision);
+
   noteTransferChange(runtime);
   runtime.valueRevision = revision;
   runtime.importedBaseline = undefined;
@@ -1455,6 +1675,7 @@ function seedLegacyPositionedStoreBase<T>(
     latest,
     landingRevision: revision,
   });
+
   positioned.completed = completed;
   positioned.continuation = { kind: "event", after, token: completed.identity };
   positioned.baseRevision = revision;
@@ -1478,17 +1699,21 @@ export function createPositionedStoreSession<T>(
   const construction = setup.kind === "ordinary" ? undefined : setup.construction;
   const detached = construction?.detached === true;
   let provider: PositionedStreamSource<any, T, any, any> | undefined;
+
   try {
     if (binding !== undefined) assertBindingContextOpen(binding.context);
     else assertGraphOpen(state);
+
     if (options !== undefined && !isValueOptions(options))
       throw new TypeError("Invalid positioned Store value options");
+
     if (
       construction !== undefined &&
       !construction.legacy &&
       !Object.is(after, construction.boundary.after)
     )
       throw new TypeError("Positioned Store reader boundary changed before issuance");
+
     provider = positionedStreamSourceByDefinition.get(definition);
     if (provider === undefined) throw new TypeError("Positioned source provider is not registered");
   } catch (error) {
@@ -1497,9 +1722,12 @@ export function createPositionedStoreSession<T>(
         retireOwner(construction.retirement, () => {});
       } catch {}
     }
+
     throw error;
   }
+
   let runtime: StoreRuntime<T>;
+
   try {
     runtime = makeStore<T>(state, key, undefined, binding, detached);
     if (detached) suspendDetachedStoreReadTouches(runtime);
@@ -1510,19 +1738,24 @@ export function createPositionedStoreSession<T>(
         retireOwner(construction.retirement, () => {});
       } catch {}
     }
+
     throw error;
   }
+
   let session: StreamSession<T> | undefined;
   const ownAddress =
     binding === undefined
       ? undefined
       : { binding, key: String(key), operations: new Set<object>(), guard: {} };
+
   try {
     noteTransferChange(runtime);
+
     if (runtime.incarnation === undefined || runtime.dropped) {
       runtime.incarnation = {};
       runtime.dropped = false;
     }
+
     runtime.streamSource = {
       stream: definition,
       input,
@@ -1536,19 +1769,24 @@ export function createPositionedStoreSession<T>(
       definition,
       ...(binding === undefined ? {} : { binding: binding.handle }),
     });
+
     if (detached) addPendingPositionedStore(state, binding, runtime);
     else {
       state.stores.set(runtime.identity, runtime as StoreRuntime<unknown>);
+
       if (binding !== undefined) {
         const readerStores = binding.readerStores ?? new Set<StoreRuntime<unknown>>();
+
         binding.readerStores = readerStores;
         readerStores.add(runtime as StoreRuntime<unknown>);
       }
     }
+
     if (binding !== undefined) {
       session = installBoundSession(runtime, binding, construction?.retirement, detached);
     } else {
       const physical = beginPhysicalWork(construction?.retirement ?? state.retirement, "stream");
+
       session = {
         physical,
         controller: new AbortController(),
@@ -1568,6 +1806,7 @@ export function createPositionedStoreSession<T>(
       runtime.streamToken = session.token;
       if (!detached) state.activeControllers.add(session.controller);
     }
+
     noteTransferChange(runtime);
     runtime.readerScope = {
       session,
@@ -1593,6 +1832,7 @@ export function createPositionedStoreSession<T>(
             after: construction.boundary.after,
             token: Object.freeze({}),
           };
+
     session.positioned = {
       runtime,
       definition,
@@ -1627,8 +1867,10 @@ export function createPositionedStoreSession<T>(
       undefined,
       !detached,
     );
+
     if (construction !== undefined && !construction.legacy)
       materializePositionedStoreInitial(runtime);
+
     if (setup.kind === "ordinary") {
       admitStore(runtime);
       recordLanding(runtime, setup.latest, undefined, session.bound, session);
@@ -1643,12 +1885,14 @@ export function createPositionedStoreSession<T>(
         latest: setup.latest,
         landingRevision: revision,
       });
+
       session.positioned.completed = completed;
       session.positioned.continuation = { kind: "event", after, token: completed.identity };
       session.positioned.baseRevision = revision;
       session.positioned.diverged = false;
     } else if (setup.kind === "legacy") {
       if (!detached) admitStore(runtime);
+
       if (detached)
         seedLegacyPositionedStoreBase(runtime, session, session.positioned, after, setup.latest);
       else {
@@ -1664,6 +1908,7 @@ export function createPositionedStoreSession<T>(
           latest: setup.latest,
           landingRevision: revision,
         });
+
         session.positioned.completed = completed;
         session.positioned.continuation = { kind: "event", after, token: completed.identity };
         session.positioned.baseRevision = revision;
@@ -1673,11 +1918,13 @@ export function createPositionedStoreSession<T>(
       if (!detached) admitStore(runtime);
       seedPreparedPositionedStoreBase(runtime, session.positioned, setup.construction);
     }
+
     return binding === undefined
       ? rawStreamWrapper(runtime, definition)
       : boundWrapper(runtime, session);
   } catch (error) {
     const preparation = session?.positioned?.preparation;
+
     if (session !== undefined && !session.ended) {
       try {
         endStream(runtime, session, "closed");
@@ -1685,6 +1932,7 @@ export function createPositionedStoreSession<T>(
         reportContinuationError(state, cleanupError);
       }
     }
+
     if (detached) {
       removePendingPositionedStore(state, binding, runtime);
       noteTransferChange(runtime);
@@ -1694,9 +1942,11 @@ export function createPositionedStoreSession<T>(
     } else {
       if (binding?.readerStores !== undefined)
         binding.readerStores.delete(runtime as StoreRuntime<unknown>);
+
       if (state.stores.get(runtime.identity) === runtime) state.stores.delete(runtime.identity);
       if (runtime.binding?.context.disposed !== true) changeBoundAddress(runtime);
     }
+
     if (construction !== undefined) {
       try {
         retireOwner(construction.retirement, () => {});
@@ -1704,6 +1954,7 @@ export function createPositionedStoreSession<T>(
         reportContinuationError(state, cleanupError);
       }
     }
+
     throw error;
   }
 }
@@ -1724,6 +1975,7 @@ export function deliverPositionedStoreSession<T>(
   source: StreamStore<T>,
 ): void {
   const preparation = session.positioned?.preparation;
+
   if (
     preparation === undefined ||
     !preparation.published ||
@@ -1731,10 +1983,12 @@ export function deliverPositionedStoreSession<T>(
     preparation.observed
   )
     return;
+
   preparation.observed = true;
   observeStoreReadable(runtime, runtime.value, { isValue: true, armsFreshness: true });
   observeStoreReadable(runtime, runtime.store.available, { metadata: true });
   observeStoreReadable(runtime, runtime.error, { armsFreshness: true });
+
   if (runtime.binding === undefined) {
     observeStoreReadable(runtime, source.status);
     observeStoreReadable(runtime, source.pending);
@@ -1755,7 +2009,9 @@ export function attachPositionedStoreAbort<T>(
     } catch (error) {
       reportContinuationError(runtime.graph.__runtime, error);
     }
+
     if (session.ended) return;
+
     try {
       endStream(runtime, session, "closed", undefined, { abortReason: signal.reason });
     } catch (error) {
@@ -1768,11 +2024,14 @@ export function attachPositionedStoreAbort<T>(
     signal.removeEventListener("abort", abort);
   };
   const aborted = signal.aborted;
+
   if (aborted) {
     abort();
     throw new AbortError("Positioned Store caller signal aborted before reader ownership");
   }
+
   attached = true;
+
   try {
     signal.addEventListener("abort", abort, { once: true });
   } catch (error) {
@@ -1781,8 +2040,10 @@ export function attachPositionedStoreAbort<T>(
     } catch (cleanupError) {
       reportContinuationError(runtime.graph.__runtime, cleanupError);
     }
+
     throw error;
   }
+
   if (
     signal.aborted ||
     session.ended ||
@@ -1792,14 +2053,17 @@ export function attachPositionedStoreAbort<T>(
     runtime.binding?.context.disposed === true
   ) {
     const isAborted = signal.aborted;
+
     try {
       remove();
     } catch (error) {
       reportContinuationError(runtime.graph.__runtime, error);
     }
+
     if (isAborted && !session.ended) abort();
     throw new AbortError("Positioned Store caller cancellation interrupted reader staging");
   }
+
   session.removeCallerAbort = remove;
 }
 
@@ -1812,6 +2076,7 @@ export function activatePositionedStoreSession<T>(
   const reader = positioned?.reader;
   const preparation = positioned?.preparation;
   const continuation = positioned?.continuation;
+
   if (
     positioned === undefined ||
     reader === undefined ||
@@ -1824,7 +2089,9 @@ export function activatePositionedStoreSession<T>(
     (preparation !== undefined && (!preparation.published || preparation.discarded))
   )
     throw new TypeError("Positioned Store reader session is no longer current");
+
   const admittedEvent = positioned.completed;
+
   if (
     positioned.provider.isReaderCurrent(
       positioned.input,
@@ -1834,8 +2101,10 @@ export function activatePositionedStoreSession<T>(
     ) !== true
   )
     throw new TypeError("Positioned Store reader reservation is no longer current");
+
   if (preparation?.lifetime !== undefined && !preparation.lifetime.currentAt(readerLifetimeNow()))
     throw new TypeError("Positioned Store reader lifetime is no longer current");
+
   const stagedContinuation =
     admittedEvent === undefined && preparation !== undefined && continuation !== undefined;
   const legacyEventCurrent =
@@ -1855,6 +2124,7 @@ export function activatePositionedStoreSession<T>(
         participant.anchor === continuation.token &&
         participant.event === undefined,
     );
+
   if (
     positioned.phase !== "dormant" ||
     session.ended ||
@@ -1870,7 +2140,9 @@ export function activatePositionedStoreSession<T>(
     reactiveInternal.signalValue(runtime.predictionStack).some((prediction) => !prediction.dead)
   )
     throw new TypeError("Positioned Store reader changed during activation validation");
+
   const abortSignal = runtime.streamSource?.abortSignal;
+
   if (
     session.ended ||
     runtime.stream !== session ||
@@ -1879,6 +2151,7 @@ export function activatePositionedStoreSession<T>(
     reader.released
   )
     throw new TypeError("Positioned Store session changed before activation");
+
   noteTransferChange(runtime);
   noteTransferChange(session);
   noteTransferChange(positioned);
@@ -1888,7 +2161,9 @@ export function activatePositionedStoreSession<T>(
     positioned.binding?.handle,
     positioned.input,
   );
+
   positioned.phase = "active";
+
   try {
     driveStreamSource(
       runtime,

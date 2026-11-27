@@ -58,6 +58,7 @@ function setup(bound = false) {
     context: createBindingContext(graph),
   });
   const store = bound ? binding.member() : graph.api.stream();
+
   return {
     graph,
     binding,
@@ -67,6 +68,7 @@ function setup(bound = false) {
     pulled: () => nextPull.promise,
     async emit(value: number) {
       const pending = item;
+
       item = Promise.withResolvers<IteratorResult<number>>();
       nextPull = Promise.withResolvers<void>();
       pending.resolve({ done: false, value });
@@ -81,8 +83,10 @@ function setup(bound = false) {
 
 it("collects an unobserved emitting stream from its last listener departure", async () => {
   const source = setup();
+
   try {
     const stop = subscribe(source.store.value, () => undefined);
+
     await source.emit(1);
     jest.advanceTimersByTime(20);
     expect(source.signal().aborted).toBe(false);
@@ -107,12 +111,15 @@ it("collects an unobserved emitting stream from its last listener departure", as
 
 it("starts a new complete retention period after a returning listener departs", async () => {
   const source = setup();
+
   try {
     const stopFirst = subscribe(source.store.value, () => undefined);
+
     await source.emit(1);
     stopFirst();
     jest.advanceTimersByTime(8);
     const stopSecond = subscribe(source.store.status, () => undefined);
+
     jest.advanceTimersByTime(50);
     expect(source.signal().aborted).toBe(false);
     stopSecond();
@@ -128,6 +135,7 @@ it("starts a new complete retention period after a returning listener departs", 
 
 it("expires a never-observed stream despite continuous source activity", async () => {
   const source = setup();
+
   try {
     jest.advanceTimersByTime(4);
     await source.emit(1);
@@ -144,15 +152,19 @@ it("expires a never-observed stream despite continuous source activity", async (
 it("does not let retired facets, metadata waiters or address inspection retain B or renew its idle period", async () => {
   const source = setup(true);
   const stopOld = subscribe(source.store.value, () => undefined);
+
   try {
     await source.emit(1);
     source.graph.cancelPending();
     const ticketA = source.binding.session(source.store);
+
     await ticketA.detached;
     const b = source.binding.member();
+
     await source.pulled();
     const ticketB = source.binding.session(b);
     const detachedB = ticketB.detached;
+
     jest.advanceTimersByTime(9);
     expect(source.signal().aborted).toBe(false);
     expect(source.binding.session(source.store)).toBe(ticketA);
@@ -163,6 +175,7 @@ it("does not let retired facets, metadata waiters or address inspection retain B
     });
     jest.advanceTimersByTime(1);
     const receipt = await detachedB;
+
     expect(source.signal().aborted).toBe(true);
     expect(source.returns()).toBe(2);
     expect(receipt.status).toBe("empty");
@@ -193,12 +206,14 @@ it("collects an imported stream base on its original idle deadline without renew
   const targetBinding = bindStream(targetGraph, targetStream, targetGraph.api.stream, {
     context: createBindingContext(targetGraph),
   });
+
   try {
     source.store.set(7);
     const transfer = snapshot(source.graph, {
       version: 2,
       bindings: [{ binding: source.binding, reference }],
     });
+
     source.graph.dispose();
 
     adopt(targetGraph, transfer, {
@@ -221,6 +236,7 @@ it("collects an imported stream base on its original idle deadline without renew
     });
 
     const fresh = targetBinding.member(undefined);
+
     expect([fresh.available.get(), fresh.value.get(), fresh.pending.get()]).toEqual([
       false,
       undefined,

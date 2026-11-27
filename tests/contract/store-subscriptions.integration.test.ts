@@ -39,6 +39,7 @@ function fixture(idleMs?: number) {
     contract: { namespace: "presence", operations: { stream } },
     idleMs,
   });
+
   return { backend, stream, graph };
 }
 
@@ -52,6 +53,7 @@ function waitForCaptureNotice(
       if (matches(notice)) resolve(notice);
     });
   });
+
   return pending.finally(() => stop?.());
 }
 
@@ -75,6 +77,7 @@ test("store subscription skips absence but delivers a real undefined and retaine
   const raw: Array<number | undefined> = [];
   const stop = subscribe(store, (value) => values.push(value));
   const stopRaw = subscribe(store.value, (value) => raw.push(value));
+
   try {
     expect(values).toStrictEqual([]);
     expect(raw).toStrictEqual([undefined]);
@@ -88,6 +91,7 @@ test("store subscription skips absence but delivers a real undefined and retaine
     expect(values).toStrictEqual([undefined, 1]);
     const late: Array<number | undefined> = [];
     const stopLate = subscribe(store, (value) => late.push(value));
+
     expect(late).toStrictEqual([1]);
     stopLate();
     stop();
@@ -106,6 +110,7 @@ test("explicit initial undefined is present even while the stream is waiting", (
   const store = graph.api.stream("seed", { initial: undefined });
   const values: Array<number | undefined> = [];
   const stop = subscribe(store, (value) => values.push(value));
+
   expect(values).toStrictEqual([undefined]);
   expect(store.pending.get()).toBe(true);
   stop();
@@ -118,6 +123,7 @@ test("closing or failing a stream without an emission does not fabricate a value
     const store = graph.api.stream("empty");
     const values: Array<number | undefined> = [];
     const stop = subscribe(store, (value) => values.push(value));
+
     backend.end("values", reason);
     await flush();
     expect(values).toStrictEqual([]);
@@ -142,10 +148,12 @@ test("query results and direct writes establish presence without placeholder cal
   const stop = subscribe(store, (value) => values.push(value));
   const localValues: Array<number | undefined> = [];
   const stopLocal = subscribe(graph.api.local(), (value) => localValues.push(value));
+
   try {
     expect(localValues).toStrictEqual([undefined]);
     expect(values).toStrictEqual([]);
     const ready = store.ready;
+
     backend.resolve(backend.calls[0]!, undefined);
     await ready;
     expect(values).toStrictEqual([undefined]);
@@ -167,6 +175,7 @@ test("adoption establishes presence for a held empty stream store", () => {
   const store = target.graph.api.stream("adopt", { snapshot: true });
   const values: Array<number | undefined> = [];
   const stop = subscribe(store, (value) => values.push(value));
+
   expect(values).toStrictEqual([]);
   adopt(target.graph, encoded);
   expect(values).toStrictEqual([undefined]);
@@ -188,6 +197,7 @@ test("projections retain seeds and consume repeated source events independently 
   const counts: number[] = [];
   const stopArray = subscribe(accumulation, (value) => arrays.push(value));
   const stopCount = subscribe(reduction, (value) => counts.push(value));
+
   try {
     expect(arrays).toStrictEqual([[]]);
     expect(counts).toEqual([0]);
@@ -214,6 +224,7 @@ test("store subscription respects forced same-reference changes and callback wri
     counts.push(value.count);
     if (value.count === 1) store.set({ count: 2 });
   });
+
   item.count = 1;
   store.set(item);
   expect(counts).toEqual([0, 1, 2]);
@@ -228,6 +239,7 @@ test("an empty held store can become present through a direct undefined write", 
   const store = graph.api.stream("direct");
   const values: Array<number | undefined> = [];
   const stop = subscribe(store, (value) => values.push(value));
+
   expect(values).toStrictEqual([]);
   store.set(undefined);
   expect(values).toStrictEqual([undefined]);
@@ -241,9 +253,11 @@ test("store subscriptions retain live streams and release them after unsubscribe
   jest.useFakeTimers();
   jest.setSystemTime(0);
   const { graph, backend } = fixture(1);
+
   try {
     const store = graph.api.stream("live");
     const stop = subscribe(store, () => undefined);
+
     await flush();
     jest.advanceTimersByTime(5);
     expect(backend.calls[0]!.aborted).toBe(false);
@@ -254,6 +268,7 @@ test("store subscriptions retain live streams and release them after unsubscribe
 
     const seeded = graph.api.stream("throwing", { initial: 3 });
     const failure = new Error("observer failed");
+
     expect(() =>
       subscribe(seeded, () => {
         throw failure;
@@ -293,12 +308,15 @@ test("an optimistic value is observable before the first committed query result"
   const store = graph.api.query(undefined);
   const values: number[] = [];
   const stop = subscribe(store, (value) => values.push(value));
+
   try {
     const changed = graph.api.mutation(42);
+
     expect(values).toStrictEqual([42]);
     backend.resolve(backend.calls[1]!, undefined);
     await changed;
     const ready = store.ready;
+
     backend.resolve(backend.calls[2]!, 42);
     expect(await ready).toBe(42);
     expect(values).toStrictEqual([42]);
@@ -328,6 +346,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
     const emit = (event: Event): void => {
       if (ended) return;
       const waiter = waiters.shift();
+
       if (waiter !== undefined) waiter({ done: false, value: event });
       else queued.push(event);
     };
@@ -336,6 +355,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
         return {
           next: () => {
             const event = queued.shift();
+
             if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
             if (ended) return Promise.resolve({ done: true as const, value: undefined });
             return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
@@ -348,10 +368,12 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
         };
       },
     };
+
     return { iterable, emit };
   };
   const reserve = (input: Input, after: number, seed: unknown): object => {
     const reader = Object.freeze({});
+
     reservations.set(reader, { input, after, seed });
     return reader;
   };
@@ -366,6 +388,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
     source: {
       open: (input, options) => {
         const channel = makeChannel();
+
         openings.push({
           reader: options.reader,
           after: options.after,
@@ -376,6 +399,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
       },
       validateReader: (input, reader, after, checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           checkpoint === undefined &&
           reservation !== undefined &&
@@ -386,6 +410,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -418,6 +443,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
   try {
     const folded = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
+
       stop = subscribe(projection.value, (value) => {
         if (value !== 1) return;
         stop();
@@ -425,14 +451,18 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
       });
     });
     const emit = liveEmitters.get(input.room);
+
     if (emit === undefined) throw new Error("The actual positioned source did not open");
     emit({ position: 5, value: undefined });
     await folded;
 
     const checkpoint = capturePositionedStore(source, [projection] as const);
+
     if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
       throw new Error("The real undefined event did not produce a Store capture");
+
     const after: number = checkpoint.position;
+
     expect(Object.hasOwn(checkpoint, "latest")).toBe(true);
     expect(checkpoint.latest).toBeUndefined();
     expect(checkpoint.values).toStrictEqual([1]);
@@ -441,6 +471,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
     expect(sourceValues).toStrictEqual([undefined]);
 
     const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+
     expect(Object.hasOwn(seed, "latest")).toBe(true);
     reader = reserve(input, after, seed);
     const restoration = preparePositionedStoreRestore(
@@ -456,6 +487,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
       seed,
       reader,
     );
+
     readerTransferred = true;
     releaseRestoration = () => restoration.discard();
 
@@ -465,6 +497,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
     expect(restoration.source.status.get()).toBe("empty");
     expect(restoration.projections[0].value.get()).toBe(1);
     const restoredValues: Array<number | undefined> = [];
+
     stopRestored = subscribe(restoration.source, (value) => restoredValues.push(value));
     expect(restoredValues).toStrictEqual([undefined]);
     expect(openings).toHaveLength(1);
@@ -474,6 +507,7 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
     expect(openings[1]).toMatchObject({ hasAfter: true, after: 5, reader });
 
     const receipt = positionedFoldReceipt(projection);
+
     if (receipt === undefined) throw new Error("The real source fold did not issue a receipt");
     expect(receipt.position).toBe(5);
     expect(isPositionedStoreCheckpointCurrent(checkpoint)).toBe(true);
@@ -493,8 +527,10 @@ test("a dormant restored Store keeps present undefined and direct writes do not 
     stopSource();
     stopRestored?.();
     releaseRestoration?.();
+
     if (reader !== undefined && !readerTransferred && releaseCount(reader) === 0)
       releaseReader(reader);
+
     projection.close();
     sourceGraph.dispose();
     targetGraph.dispose();
@@ -512,6 +548,7 @@ test("capture notices track equal events and prediction retirement without sourc
   const emit = (event: Event): void => {
     if (ended) return;
     const waiter = waiters.shift();
+
     if (waiter !== undefined) waiter({ done: false, value: event });
     else queued.push(event);
   };
@@ -520,6 +557,7 @@ test("capture notices track equal events and prediction retirement without sourc
       return {
         next: () => {
           const event = queued.shift();
+
           if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
           if (ended) return Promise.resolve({ done: true as const, value: undefined });
           return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
@@ -582,20 +620,25 @@ test("capture notices track equal events and prediction retirement without sourc
   try {
     const folded = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
+
       stop = subscribe(projection.value, (value) => {
         if (value !== 5) return;
         stop();
         resolve();
       });
     });
+
     if (emitLive === undefined) throw new Error("The positioned source did not open");
     const liveEmitter = emitLive;
+
     liveEmitter({ position: 5, value: 5 });
     await folded;
 
     const original = capturePositionedStore(source, [projection] as const);
+
     if (!original.present || !original.hasPosition || typeof original.position !== "number")
       throw new Error("The source did not capture its real event");
+
     expect(original.resumable).toBe(true);
     expect(isPositionedStoreCheckpointCurrent(original)).toBe(true);
     expect(source.value.get()).toBe(5);
@@ -603,27 +646,33 @@ test("capture notices track equal events and prediction retirement without sourc
 
     const captureChanges = observePositionedStoreCaptureState(original);
     const captureNotices: PositionedStoreCaptureNotice[] = [];
+
     stopCaptureChanges = subscribe(captureChanges, (notice) => captureNotices.push(notice));
     const initialNotice = captureNotices[0];
+
     if (initialNotice?.kind !== "changed")
       throw new Error("The authentic capture did not produce its synchronous changed seed");
 
     const equalEventChange = waitForCaptureChange(captureChanges, initialNotice.revision);
     const secondFold = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
+
       stop = subscribe(projection.value, (value) => {
         if (value !== 10) return;
         stop();
         resolve();
       });
     });
+
     liveEmitter({ position: 6, value: 5 });
     const equalNotice = await equalEventChange;
+
     await secondFold;
     expect(source.value.get()).toBe(5);
     expect(sourceValues).toStrictEqual([5]);
     expect(projection.value.get()).toBe(10);
     const equalEventCut = capturePositionedStore(source, [projection] as const);
+
     if (!equalEventCut.present) throw new Error("The equal real source Event is missing");
     expect(equalEventCut.latest).toBe(5);
     expect(equalEventCut.position).toBe(6);
@@ -634,23 +683,29 @@ test("capture notices track equal events and prediction retirement without sourc
 
     const predictionChange = waitForCaptureChange(captureChanges, equalNotice.revision);
     const mutationResult = graph.api.mutation(input);
+
     expect(source.value.get()).toBe(5);
     expect(projection.value.get()).toBe(10);
     expect(sourceValues).toStrictEqual([5]);
     const predictionNotice = await predictionChange;
+
     expect(isPositionedStoreCheckpointCurrent(equalEventCut)).toBe(false);
     const predicted = capturePositionedStore(source, [projection] as const);
+
     if (!predicted.present)
       throw new Error("The real source Event is missing from the prediction cut");
+
     expect(predicted.latest).toBe(5);
     expect(predicted.position).toBe(6);
     expect(predicted.values).toStrictEqual([10]);
     expect(predicted.resumable).toBe(false);
 
     const pendingAction = backend.pending("equal-prediction")[0];
+
     if (pendingAction === undefined) throw new Error("The real mutation callback is not pending");
     const predictionFailure = new Error("prediction rejected without a source event");
     const predictionRetired = waitForCaptureChange(captureChanges, predictionNotice.revision);
+
     backend.reject(pendingAction, predictionFailure);
     const [, predictionRetiredNotice] = await Promise.all([
       expect(mutationResult).rejects.toBe(predictionFailure),
@@ -661,6 +716,7 @@ test("capture notices track equal events and prediction retirement without sourc
     expect(projection.value.get()).toBe(10);
     expect(sourceValues).toStrictEqual([5]);
     const retiredWithoutEvent = capturePositionedStore(source, [projection] as const);
+
     if (!retiredWithoutEvent.present) throw new Error("The retained source Event is missing");
     expect(retiredWithoutEvent.latest).toBe(5);
     expect(retiredWithoutEvent.position).toBe(6);
@@ -675,23 +731,28 @@ test("capture notices track equal events and prediction retirement without sourc
     );
     const secondMutation = graph.api.mutation(input);
     const secondPredictionNotice = await secondPredictionChange;
+
     expect(source.value.get()).toBe(5);
     expect(projection.value.get()).toBe(10);
     const secondPendingAction = backend.pending("equal-prediction")[0];
+
     if (secondPendingAction === undefined)
       throw new Error("The second mutation callback is not pending");
 
     const eventChange = waitForCaptureChange(captureChanges, secondPredictionNotice.revision);
     const thirdFold = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
+
       stop = subscribe(projection.value, (value) => {
         if (value !== 12) return;
         stop();
         resolve();
       });
     });
+
     liveEmitter({ position: 7, value: 2 });
     const eventNotice = await eventChange;
+
     await thirdFold;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const settlement = await Promise.race([
@@ -703,12 +764,14 @@ test("capture notices track equal events and prediction retirement without sourc
         timer = setTimeout(() => resolve("pending"), 0);
       }),
     ]);
+
     if (timer !== undefined) clearTimeout(timer);
     expect(settlement).toBe("pending");
     expect(source.value.get()).toBe(5);
     expect(sourceValues).toStrictEqual([5]);
     expect(projection.value.get()).toBe(12);
     const liveOverlay = capturePositionedStore(source, [projection] as const);
+
     if (!liveOverlay.present) throw new Error("The second real source Event is missing");
     expect(liveOverlay.latest).toBe(2);
     expect(liveOverlay.position).toBe(7);
@@ -717,6 +780,7 @@ test("capture notices track equal events and prediction retirement without sourc
 
     const livePredictionRetired = waitForCaptureChange(captureChanges, eventNotice.revision);
     const eventFailure = new Error("event overlay rejected");
+
     backend.reject(secondPendingAction, eventFailure);
     await Promise.all([expect(secondMutation).rejects.toBe(eventFailure), livePredictionRetired]);
 
@@ -724,6 +788,7 @@ test("capture notices track equal events and prediction retirement without sourc
     expect(sourceValues).toStrictEqual([5, 2]);
     expect(projection.value.get()).toBe(12);
     const reconciled = capturePositionedStore(source, [projection] as const);
+
     if (!reconciled.present) throw new Error("The reconciled source Event is missing");
     expect(reconciled.latest).toBe(2);
     expect(reconciled.position).toBe(7);
@@ -742,6 +807,7 @@ test("capture notices track equal events and prediction retirement without sourc
       terminalState,
       (notice) => notice.kind === "invalidated",
     );
+
     projection.close();
     expect(await invalidated).toStrictEqual({ kind: "invalidated" });
     expect(source.status.get()).toBe("live");
@@ -755,8 +821,10 @@ test("capture notices track equal events and prediction retirement without sourc
 
 test("an empty store rejects a non-callable observer at registration", () => {
   const { graph } = fixture();
+
   try {
     const store = graph.api.stream("invalid-observer");
+
     expect(() => subscribe(store, null as never)).toThrow(TypeError);
   } finally {
     graph.dispose();
@@ -797,8 +865,10 @@ test("graph disposal closes live store subscriptions without emitting absent or 
     subscribe(empty, (value) => emptyValues.push(value)),
     subscribe(predicted, (value) => predictedValues.push(value)),
   ];
+
   try {
     const pending = graph.api.mutation("predicted");
+
     void pending.catch(() => undefined);
     expect(presentValues).toStrictEqual([1]);
     expect(emptyValues).toStrictEqual([]);
@@ -824,9 +894,11 @@ test("a refused context disposal leaves its subscribed store live for retry", as
   const context = createBindingContext(graph);
   const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
   const store = binding.member(undefined);
+
   await store.ready;
   const values: number[] = [];
   const stop = subscribe(store, (value) => values.push(value));
+
   try {
     expect(() => withoutWrites(() => context.dispose())).toThrow("write-forbidden");
     expect(context.active.get()).toBe(true);
@@ -854,12 +926,14 @@ for (const withContext of [false, true]) {
     const values: number[] = [];
     const stop = subscribe(store, (value) => values.push(value));
     let refusal: unknown;
+
     try {
       try {
         withoutWrites(() => graph.dispose());
       } catch (cause) {
         refusal = cause;
       }
+
       expect(refusal).toBeDefined();
       expect(String(refusal)).toContain("write-forbidden");
       expect(values).toStrictEqual([1]);

@@ -47,45 +47,62 @@ function captureArray<T>(
 ): T[] {
   let iterator: object | undefined;
   let completed = false;
+
   try {
     const factory = Reflect.get(source, Symbol.iterator);
+
     assertCurrent();
     const acquired: unknown = Reflect.apply(factory, source, []);
+
     if ((typeof acquired === "object" && acquired !== null) || typeof acquired === "function")
       iterator = acquired;
+
     assertCurrent();
     if (iterator === undefined) throw new TypeError("Iterator is not an object");
     const next = Reflect.get(iterator, "next");
+
     assertCurrent();
     const values: T[] = [];
+
     for (;;) {
       const result: unknown = Reflect.apply(next, iterator, []);
+
       assertCurrent();
+
       if ((typeof result !== "object" || result === null) && typeof result !== "function")
         throw new TypeError("Iterator result is not an object");
+
       const done = Reflect.get(result as object, "done");
+
       assertCurrent();
+
       if (done) {
         completed = true;
         return values;
       }
+
       const value = Reflect.get(result as object, "value") as T;
+
       assertCurrent();
       values[values.length] = value;
     }
   } catch (error) {
     let revoked = false;
+
     try {
       assertCurrent();
     } catch {
       revoked = true;
     }
+
     if (revoked && iterator !== undefined && !completed) {
       try {
         physicalCleanup(context.retirement, () => {
           const close = Reflect.get(iterator!, "return");
+
           if (close != null) {
             const result: unknown = Reflect.apply(close, iterator, []);
+
             if ((typeof result !== "object" || result === null) && typeof result !== "function")
               throw new TypeError("Iterator return is not an object");
           }
@@ -94,6 +111,7 @@ function captureArray<T>(
         // The cleanup owner retains this failure; the original error still wins here.
       }
     }
+
     throw error;
   }
 }
@@ -268,12 +286,16 @@ export function profileEffect<M extends AnyMutation, Q extends AnyQuery>(
     typeof resolver !== "object"
   )
     throw new TypeError("Effect requires its exact original mutation position and query");
+
   const affected = mutation.affects[effectIndex]!;
   const prepare = resolver.prepare;
   const settle = resolver.settle;
+
   if (typeof prepare !== "function" || typeof settle !== "function")
     throw new TypeError("Effect requires preparation and settlement resolvers");
+
   const handle = Object.freeze({}) as ProfileEffect<M>;
+
   profileEffectByHandle.set(handle, {
     mutation,
     index: effectIndex,
@@ -301,6 +323,7 @@ export function predictionFor<M extends AnyMutation, Q extends AnyQuery, V>(
 ): TargetPrediction<M> {
   const prediction = captureBoundProducer(mutation, target, producer);
   const handle = Object.freeze({}) as TargetPrediction<M>;
+
   targetPredictionByHandle.set(handle, prediction);
   return handle;
 }
@@ -312,34 +335,46 @@ export function bindMutationOperation<M extends AnyMutation, R>(
   configuration: MutationBindingConfiguration<M, R>,
 ): MutationBinding<M, R> {
   const state = graphRuntimeByGraph.get(graph);
+
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
+
   if (configuration === null || typeof configuration !== "object" || Array.isArray(configuration))
     throw new TypeError("Invalid mutation binding configuration");
+
   const contextHandle = configuration.context;
+
   assertGraphOpen(state);
   const context = bindingContextByHandle.get(contextHandle);
+
   if (
     context === undefined ||
     context.state !== state ||
     !state.mutationDefinitions.has(definition)
   )
     throw new TypeError("Mutation binding requires its exact graph, context and declaration");
+
   assertBindingContextOpen(context);
   const physical = beginPhysicalWork(context.retirement, "acquisition");
   const registrationEpoch = state.resetEpoch;
   const assertRegistration = (): void => {
     assertBindingContextOpen(context);
+
     if (state.resetEpoch !== registrationEpoch)
       throw new AbortError("Mutation binding registration was superseded.");
   };
+
   try {
     const profile = configuration.profile;
+
     assertRegistration();
     const run = configuration.run;
+
     assertRegistration();
     const suppliedEffects = configuration.effects;
+
     assertRegistration();
+
     if (
       profile === null ||
       (typeof profile !== "object" && typeof profile !== "function") ||
@@ -347,35 +382,51 @@ export function bindMutationOperation<M extends AnyMutation, R>(
       !Array.isArray(suppliedEffects)
     )
       throw new TypeError("Invalid mutation binding configuration");
+
     const supplied = captureArray(suppliedEffects, context, assertRegistration);
+
     assertRegistration();
     const effects = supplied.map((effect, index) => {
       const checked = profileEffectByHandle.get(effect);
+
       if (checked === undefined || checked.mutation !== definition || checked.index !== index)
         throw new TypeError("Mutation effects must cover exact original positions in order");
+
       const affected = definition.affects;
+
       assertRegistration();
       const position = affected[index];
+
       assertRegistration();
       const query = position?.query;
+
       assertRegistration();
+
       if (checked.query !== query)
         throw new TypeError("Mutation effects must cover exact original positions in order");
+
       const currentEffects = definition.affects;
+
       assertRegistration();
       const currentPosition = currentEffects[index];
+
       assertRegistration();
+
       if (checked.affected !== currentPosition)
         throw new TypeError("Mutation effects must cover exact original positions in order");
+
       return checked;
     });
     const affected = definition.affects;
+
     assertRegistration();
     const count = affected.length;
+
     assertRegistration();
     if (effects.length !== count) throw new TypeError("Mutation effect plan is incomplete");
     assertRegistration();
     let profiles = context.mutations.get(definition);
+
     if (profiles?.has(profile)) throw new TypeError("Mutation binding is already registered");
     const binding: MutationBindingRuntime = {
       context,
@@ -395,11 +446,14 @@ export function bindMutationOperation<M extends AnyMutation, R>(
       );
       let attempt: ReturnType<typeof beginBoundMutation> | undefined;
       const cancellation = new AbortError("The bound mutation phase was superseded or canceled.");
+
       try {
         const currentAttempt = beginBoundMutation(binding);
+
         attempt = currentAttempt;
         const assertAttempt = (): void => {
           assertBindingContextOpen(context);
+
           if (
             state.resetEpoch !== currentAttempt.epoch ||
             currentAttempt.stage === "finished" ||
@@ -408,39 +462,51 @@ export function bindMutationOperation<M extends AnyMutation, R>(
             throw cancellation;
         };
         const call = normalizeMutationArguments(args[0], args[1], args.length > 1, assertAttempt);
+
         assertAttempt();
+
         if (
           call.options !== undefined &&
           (call.options === null || typeof call.options !== "object" || Array.isArray(call.options))
         )
           throw new TypeError("Invalid bound mutation options");
+
         const signal: unknown =
           call.options === undefined ? undefined : Reflect.get(call.options, "abortSignal");
+
         assertAttempt();
         const overrides: unknown =
           call.options === undefined ? undefined : Reflect.get(call.options, "optimistic");
+
         assertAttempt();
+
         if (
           (signal !== undefined && !isAbortSignal(signal, assertAttempt)) ||
           (overrides !== undefined && !Array.isArray(overrides))
         )
           throw new TypeError("Invalid bound mutation options");
+
         const predictions =
           overrides === undefined ? [] : captureArray(overrides, context, assertAttempt);
+
         assertAttempt();
+
         if (admission !== undefined) {
           finishTransferAdmission(admission);
           admission = undefined;
         }
+
         return runBoundMutation(currentAttempt, call.input, signal, predictions) as Promise<R>;
       } catch (error) {
         if (attempt === undefined) throw error;
+
         if (error === cancellation) {
           attempt.outputStarted = true;
           finishBoundMutation(attempt);
           attempt.output.reject(error);
           return attempt.output.promise as Promise<R>;
         }
+
         finishBoundMutation(attempt);
         throw error;
       } finally {
@@ -455,12 +521,15 @@ export function bindMutationOperation<M extends AnyMutation, R>(
       member,
     }) as MutationBinding<M, R>;
     const transferSource = { graph: state.graph, kind: "mutation" as const, definition, binding };
+
     registerTransferSource(member, transferSource);
     registerTransferSource(handle, transferSource);
+
     if (profiles === undefined) {
       profiles = new Map();
       context.mutations.set(definition, profiles);
     }
+
     profiles.set(profile, binding);
     return handle;
   } finally {

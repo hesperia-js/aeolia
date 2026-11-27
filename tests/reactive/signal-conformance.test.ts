@@ -15,6 +15,7 @@ function thrownBy(run: () => unknown): unknown {
   } catch (error) {
     return error;
   }
+
   return undefined;
 }
 
@@ -69,6 +70,7 @@ describe("canonical Signals surface", () => {
 
       const state = new ChildState(1);
       const computed = new ChildComputed(() => state.get() * 2);
+
       state.increment();
 
       expect(state).toBeInstanceOf(ChildState);
@@ -162,6 +164,7 @@ describe("canonical Signals surface", () => {
       const watcher = new Signal.subtle.Watcher(() => {
         notifications += 1;
       });
+
       watcher.watch(state);
 
       expect(() => state.set(2)).toThrow(failure);
@@ -207,19 +210,24 @@ describe("canonical Signals surface", () => {
       let published = false;
       const derived = new Signal.Computed(() => {
         evaluations += 1;
+
         if (sourceState === undefined) {
           sourceState = new Signal.State(6);
           stateConstruction = captureReactiveConstruction(sourceState);
         }
+
         return sourceState.get() * 2;
       });
 
       try {
         expect(derived.get()).toBe(12);
         expect(evaluations).toBe(1);
+
         if (sourceState === undefined || stateConstruction === undefined)
           throw new Error("The Computed did not retain its constructed State");
+
         const derivedConstruction = captureReactiveConstruction(derived);
+
         capture = prepareRequiredTransferCapture({
           graphs: [graph],
           roots: [
@@ -231,6 +239,7 @@ describe("canonical Signals surface", () => {
         expect(capture.image.roots).toHaveLength(2);
         expect(evaluations).toBe(1);
         const commit = capture.seal();
+
         if (commit === undefined) throw new Error("The captured reactive closure did not seal");
         commit.publish();
         published = true;
@@ -239,11 +248,13 @@ describe("canonical Signals surface", () => {
         expect(evaluations).toBe(1);
       } finally {
         if (!published) capture?.discard();
+
         if (capture !== undefined)
           await capture.retired.then(
             () => undefined,
             () => undefined,
           );
+
         graph.dispose();
       }
     });
@@ -430,6 +441,7 @@ describe("canonical Signals surface", () => {
       const value = new Signal.Computed(() => {
         runs += 1;
         const current = source.get();
+
         if (current === 0) source.set(1);
         return source.get();
       });
@@ -456,6 +468,7 @@ describe("canonical Signals surface", () => {
       const value = new Signal.Computed(() => thenable);
 
       const error = thrownBy(() => value.get());
+
       expect(error).toBeInstanceOf(Fault);
       expect((error as Fault).kind).toBe("async-compute");
       expect(thenReads).toBe(1);
@@ -516,6 +529,7 @@ describe("canonical Signals surface", () => {
       );
 
       const watcher = new Signal.subtle.Watcher(() => undefined);
+
       watcher.watch(value);
       expect(Signal.subtle.hasSinks(value)).toBe(true);
       expect(Signal.subtle.hasSinks(first)).toBe(true);
@@ -652,6 +666,7 @@ describe("canonical Signals surface", () => {
         },
       });
       const watcher = new Signal.subtle.Watcher(() => undefined);
+
       watcher.watch(state);
 
       expect(() => watcher.unwatch(state)).toThrow(failure);
@@ -682,6 +697,7 @@ describe("canonical Signals surface", () => {
 
       expect(value.get()).toBe(1);
       const error = thrownBy(() => watcher.watch(value));
+
       expect(error).toBeInstanceOf(AggregateError);
       expect((error as AggregateError).errors).toEqual(
         expect.arrayContaining([computedFailure, stateFailure]),
@@ -779,10 +795,12 @@ describe("canonical Signals surface", () => {
         secondCalls += 1;
         throw secondFailure;
       });
+
       first.watch(state);
       second.watch(state);
 
       const error = thrownBy(() => state.set(1));
+
       expect(firstCalls).toBe(1);
       expect(secondCalls).toBe(1);
       expect(error).toBeInstanceOf(AggregateError);
@@ -797,6 +815,7 @@ describe("canonical Signals surface", () => {
       const readWatcher = new Signal.subtle.Watcher(() => {
         state.get();
       });
+
       readWatcher.watch(state);
       expect(() => state.set(1)).toThrow();
       readWatcher.unwatch(state);
@@ -804,6 +823,7 @@ describe("canonical Signals surface", () => {
       const writeWatcher = new Signal.subtle.Watcher(() => {
         state.set(2);
       });
+
       writeWatcher.watch(state);
       expect(() => state.set(3)).toThrow();
       writeWatcher.unwatch(state);
@@ -816,6 +836,7 @@ describe("canonical Signals surface", () => {
       const readWatcher = new Signal.subtle.Watcher(() => {
         Signal.subtle.untrack(() => state.get());
       });
+
       readWatcher.watch(state);
       expect(() => state.set(1)).toThrow();
       readWatcher.unwatch(state);
@@ -823,6 +844,7 @@ describe("canonical Signals surface", () => {
       const writeWatcher = new Signal.subtle.Watcher(() => {
         Signal.subtle.untrack(() => state.set(2));
       });
+
       writeWatcher.watch(state);
       expect(() => state.set(3)).toThrow();
       writeWatcher.unwatch(state);
@@ -848,11 +870,13 @@ describe("canonical Signals surface", () => {
   describe("cycles", () => {
     it("detects a cycle without hanging and leaves the graph usable", () => {
       let self!: Signal.Computed<number>;
+
       self = new Signal.Computed(() => self.get());
       expect(() => self.get()).toThrow();
 
       let first!: Signal.Computed<number>;
       let second!: Signal.Computed<number>;
+
       first = new Signal.Computed(() => second.get());
       second = new Signal.Computed(() => first.get());
 
@@ -860,6 +884,7 @@ describe("canonical Signals surface", () => {
 
       const state = new Signal.State(1);
       const recovered = new Signal.Computed(() => state.get() * 2);
+
       expect(recovered.get()).toBe(2);
       state.set(2);
       expect(recovered.get()).toBe(4);

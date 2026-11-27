@@ -60,6 +60,7 @@ function fixture(
     ...(value === undefined ? {} : { value }),
   });
   const store = binding.member(undefined, options);
+
   return { backend, diagnostics, graph, context, binding, store };
 }
 
@@ -79,6 +80,7 @@ it("keeps an independent observed base separate from request progress and comple
   const graph = createGraph({
     contract: defineContract({ namespace: "independent-observation", operations: { query } }),
   });
+
   try {
     const store = graph.api.query();
     const lease = observeStore(graph, store);
@@ -86,6 +88,7 @@ it("keeps an independent observed base separate from request progress and comple
     const events: string[] = [];
     const stop = observation.subscribe((event) => events.push(event.kind));
     const before = observation.capture();
+
     expect(lease.publish(4)).toBe(true);
     expect(store.value.get()).toBe(4);
     expect(store.pending.get()).toBe(true);
@@ -105,22 +108,28 @@ it("keeps an independent observed base separate from request progress and comple
 it("retains lease metadata until deferred graph cleanup resumes", async () => {
   const f = fixture();
   let disposalCause: unknown;
+
   try {
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[0]!, 1);
     await ready;
     const lease = observeStore(f.graph, f.store);
+
     expect(lease.active.get()).toBe(true);
+
     try {
       withoutWrites(() => f.graph.dispose());
     } catch (cause) {
       disposalCause = cause;
     }
+
     expect(disposalCause).toBeInstanceOf(Fault);
     expect(lease.publish(2)).toBe(false);
     expect(f.context.active.get()).toBe(true);
     expect(lease.active.get()).toBe(true);
     const retirement = f.graph.retire();
+
     await expect(retirement).rejects.toBe(disposalCause);
     expect(f.context.active.get()).toBe(false);
     expect(lease.active.get()).toBe(false);
@@ -131,10 +140,12 @@ it("retains lease metadata until deferred graph cleanup resumes", async () => {
 
 it("publishes present undefined while a cold request remains fetching and still owns its landing", async () => {
   const f = fixture();
+
   try {
     const second = f.binding.member();
     const lease = observeStore(f.graph, f.store);
     const ready = second.ready;
+
     expect(lease.publish(undefined)).toBe(true);
     expect(f.store.available.get()).toBe(true);
     expect(peekStore(f.store)).toMatchObject({ kind: "stable", present: true, value: undefined });
@@ -169,8 +180,10 @@ for (const recall of ["query", "stream"] as const) {
       contract: { namespace: "failed-recall", operations: { query, stream } },
       idleMs: 10,
     });
+
     try {
       const store = graph.api.query(undefined, { initial: 1 });
+
       expect(await store.ready).toBe(1);
       jest.advanceTimersByTime(11);
       expect(peekStore(store)).toMatchObject({ kind: "stable", present: false });
@@ -184,6 +197,7 @@ for (const recall of ["query", "stream"] as const) {
       graph.at(store.key).set(3);
       expect(await store.ready).toBe(3);
       const admitted = observeStore(graph, store);
+
       expect(admitted.publish(4)).toBe(true);
       expect(peekStore(store)).toMatchObject({ kind: "stable", present: true, value: 4 });
       jest.advanceTimersByTime(11);
@@ -207,10 +221,12 @@ for (const conflict of ["equals", "snapshot"] as const) {
       contract: { namespace: "configuration-admission", operations: { query } },
       idleMs: 10,
     });
+
     try {
       const originalEquals = (left: number, right: number) => left === right;
       const store = graph.api.query(undefined, { equals: originalEquals, snapshot: true });
       const ready = store.ready;
+
       backend.resolve(backend.calls[0]!, 9);
       await ready;
       await graph.reset();
@@ -219,6 +235,7 @@ for (const conflict of ["equals", "snapshot"] as const) {
         conflict === "equals"
           ? { initial: 2, equals: () => false }
           : { initial: 2, snapshot: false };
+
       expect(() => graph.api.query(undefined, options)).toThrow(Fault);
       expect(peekStore(store)).toMatchObject({ kind: "stable", present: false });
       expect(() => observeStore(graph, store)).toThrow(TypeError);
@@ -231,9 +248,11 @@ for (const conflict of ["equals", "snapshot"] as const) {
 
 it("keeps bound targets inactive after a rejected recall and admits real pending/failed work", async () => {
   const f = fixture(undefined, { initial: 1 });
+
   try {
     expect(await f.store.ready).toBe(1);
     const initialTicket = f.binding.target(f.store)!;
+
     jest.advanceTimersByTime(11);
     expect(f.binding.target(f.store)).toBeUndefined();
     expect(() => f.binding.member(undefined, { initial: 2 })).toThrow(Fault);
@@ -241,18 +260,22 @@ it("keeps bound targets inactive after a rejected recall and admits real pending
     expect(() => observeStore(f.graph, f.store)).toThrow(TypeError);
     expect(f.backend.calls).toHaveLength(0);
     const admitted = f.binding.member();
+
     expect(initialTicket.forBinding(f.binding)).toBeUndefined();
     expect(f.binding.target(f.store)).toBeDefined();
     const lease = observeStore(f.graph, admitted);
+
     expect(lease.active.get()).toBe(true);
     expect(f.backend.calls).toHaveLength(1);
     const currentTicket = f.binding.target(admitted)!;
+
     expect(() => f.binding.member(undefined, { initial: 2 })).toThrow(Fault);
     expect(currentTicket.forBinding(f.binding)).toBe(currentTicket);
     expect(lease.active.get()).toBe(true);
     expect(f.backend.calls[0]!.aborted).toBe(false);
     const ready = admitted.ready;
     const failure = new Error("genuine request failed");
+
     f.backend.reject(f.backend.calls[0]!, failure);
     await expect(ready).rejects.toBe(failure);
     expect(f.binding.target(admitted)).toBeDefined();
@@ -277,6 +300,7 @@ it("a rejected outer recall preserves the genuine reentrant successor at the sam
         reenter = false;
         admit();
       }
+
       return "one";
     },
     fetch: backend.respond<void, number>("query"),
@@ -285,6 +309,7 @@ it("a rejected outer recall preserves the genuine reentrant successor at the sam
     contract: { namespace: "reentrant-admission", operations: { query } },
     idleMs: 10,
   });
+
   try {
     const binding = bindOperation(graph, query, {
       context: createBindingContext(graph),
@@ -292,6 +317,7 @@ it("a rejected outer recall preserves the genuine reentrant successor at the sam
       fetch: query.fetch,
     });
     const old = binding.member(undefined, { initial: 1 });
+
     await old.ready;
     jest.advanceTimersByTime(11);
     admit = () => {
@@ -302,10 +328,12 @@ it("a rejected outer recall preserves the genuine reentrant successor at the sam
     expect(successor).toBeDefined();
     expect(binding.target(old)).toBeDefined();
     const lease = observeStore(graph, successor!);
+
     expect(lease.active.get()).toBe(true);
     expect(backend.calls).toHaveLength(1);
     expect(backend.calls[0]!.aborted).toBe(false);
     const ready = successor!.ready;
+
     backend.resolve(backend.calls[0]!, 9);
     expect(await ready).toBe(9);
     expect(lease.active.get()).toBe(true);
@@ -316,11 +344,14 @@ it("a rejected outer recall preserves the genuine reentrant successor at the sam
 
 it("preserves issue identity through request success and publisher replacement until valid observation", async () => {
   const f = fixture();
+
   try {
     const lease = observeStore(f.graph, f.store);
     const issue = Object.freeze({ kind: "invalid", fields: ["count"] });
+
     expect(lease.reject(issue)).toBe(true);
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[0]!, 1);
     await ready;
     expect(lease.issue.get()).toBe(issue);
@@ -328,6 +359,7 @@ it("preserves issue identity through request success and publisher replacement u
     expect(lease.active.get()).toBe(false);
     expect(lease.issue.get()).toBe(issue);
     const successor = observeStore(f.graph, f.binding.member());
+
     expect(successor.issue.get()).toBe(issue);
     expect(lease.publish(99)).toBe(false);
     expect(lease.reject(Object.freeze({ old: true }))).toBe(false);
@@ -343,14 +375,17 @@ it("preserves issue identity through request success and publisher replacement u
 
 it("keeps failed request error and freshness authority when the observed base changes", async () => {
   const f = fixture();
+
   try {
     const lease = observeStore(f.graph, f.store);
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[0]!, 1);
     await ready;
     const request = f.store.revalidate();
     const failedReady = f.store.ready;
     const failure = new Error("request failed");
+
     f.backend.reject(f.backend.calls[1]!, failure);
     await expect(failedReady).rejects.toBe(failure);
     await request;
@@ -366,22 +401,27 @@ it("keeps failed request error and freshness authority when the observed base ch
 
 it("revokes old issue and callbacks before reset subscribers can acquire the new incarnation", async () => {
   const f = fixture();
+
   try {
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[0]!, 1);
     await ready;
     const old = observeStore(f.graph, f.store);
+
     old.reject(Object.freeze({ invalid: true }));
     const issues: unknown[] = [];
     const stop = subscribe(old.issue, (issue) => {
       issues.push(issue);
     });
     const reset = f.graph.reset();
+
     expect(old.active.get()).toBe(false);
     expect(old.issue.get()).toBeUndefined();
     expect(old.publish(100)).toBe(false);
     const fresh = observeStore(f.graph, f.store);
     const nextIssue = Object.freeze({ next: true });
+
     fresh.reject(nextIssue);
     expect(old.issue.get()).toBeUndefined();
     expect(issues).toStrictEqual([{ invalid: true }, undefined]);
@@ -406,14 +446,18 @@ it("refuses stale storage after authored equality revokes the publisher", async 
       return false;
     },
   });
+
   try {
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[0]!, 1);
     await ready;
     lease = observeStore(f.graph, f.store);
     const issue = Object.freeze({ retained: true });
+
     lease.reject(issue);
     const before = peekStore(f.store);
+
     armed = true;
     expect(lease.publish(2)).toBe(false);
     armed = false;
@@ -427,8 +471,10 @@ it("refuses stale storage after authored equality revokes the publisher", async 
 
 it("reports a completed publication when its observer subsequently disposes the publisher", async () => {
   const f = fixture();
+
   try {
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[0]!, 1);
     await ready;
     const lease = observeStore(f.graph, f.store);
@@ -437,6 +483,7 @@ it("reports a completed publication when its observer subsequently disposes the 
       seen.push(value);
       if (value === 2) lease.dispose();
     });
+
     expect(lease.publish(2)).toBe(true);
     expect(seen).toContain(2);
     expect(lease.active.get()).toBe(false);
@@ -449,14 +496,17 @@ it("reports a completed publication when its observer subsequently disposes the 
 
 it("preserves undefined diagnostic causes and rejects accessor options before invoking them", () => {
   const f = fixture();
+
   try {
     const lease = observeStore(f.graph, f.store);
     const issue = Object.freeze({ invalid: true });
+
     lease.reject(issue, { cause: undefined });
     expect(f.diagnostics).toStrictEqual([undefined]);
     lease.report("processing fault");
     expect(f.diagnostics).toStrictEqual([undefined, "processing fault"]);
     let reads = 0;
+
     expect(() =>
       lease.publish(2, {
         get transfer() {
@@ -478,6 +528,7 @@ it("preserves undefined diagnostic causes and rejects accessor options before in
         },
       },
     );
+
     expect(lease.publish(3, revokedOptions)).toBe(false);
     expect(observeStore(f.graph, f.store).issue.get()).toBe(issue);
   } finally {
@@ -488,11 +539,13 @@ it("preserves undefined diagnostic causes and rejects accessor options before in
 it("cannot acquire through fabricated query wrappers, another graph or a disposed context", () => {
   const f = fixture();
   const other = fixture();
+
   try {
     expect(() => observeStore(other.graph, f.store)).toThrow(TypeError);
     expect(() => observeStore(f.graph, Object.create(f.store))).toThrow(TypeError);
     expect(f.backend.calls).toHaveLength(1);
     const lease = observeStore(f.graph, f.store);
+
     lease.reject(Object.freeze({ retained: true }));
     f.context.dispose();
     expect(lease.active.get()).toBe(false);
@@ -500,6 +553,7 @@ it("cannot acquire through fabricated query wrappers, another graph or a dispose
     expect(lease.publish(8)).toBe(false);
     expect(() => observeStore(f.graph, f.store)).toThrow(Fault);
     const otherLease = observeStore(other.graph, other.store);
+
     other.graph.dispose();
     expect(otherLease.active.get()).toBe(false);
     expect(otherLease.issue.get()).toBeUndefined();
@@ -526,6 +580,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
   let capturePublished = false;
   let adoptionPublished = false;
   let adoption: ReturnType<typeof prepareRequiredTransferAdoption> | undefined;
+
   try {
     for (const [f, value] of [
       [source, 2],
@@ -533,6 +588,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
       [missing, 6],
     ] as const) {
       const ready = f.store.ready;
+
       f.backend.resolve(f.backend.calls[0]!, value);
       await ready;
     }
@@ -541,6 +597,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
     const sourceDerived = computed(
       () => sourceLease.active.get() && sourceLease.issue.get() === undefined,
     );
+
     expect(sourceDerived.get()).toBe(true);
     capture = prepareRequiredTransferCapture({
       graphs: [source.graph],
@@ -548,6 +605,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
       codec,
     });
     const captureCommit = capture.seal();
+
     if (captureCommit === undefined) throw new Error("The observation capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -555,6 +613,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
     await capture.retired;
 
     const targetLease = observeStore(target.graph, target.store);
+
     expect(targetLease.active.get()).toBe(true);
     expect(targetLease.issue.get()).toBeUndefined();
     claim = preparePassiveTransferClaim(target.graph, target.binding, undefined);
@@ -564,8 +623,10 @@ it("maps cached observation metadata only to an existing receiver publisher", as
     const targetConstruction = captureReactiveConstruction(targetDerived);
     const image = capture.image;
     const nativeSource = image.stores[0];
+
     if (nativeSource === undefined)
       throw new Error("The observation image omitted its native source");
+
     adoption = prepareRequiredTransferAdoption(image, {
       graphs: [target.graph],
       sources: [{ slot: nativeSource.slot, claim }],
@@ -576,6 +637,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
       mappedStateWrites: [],
     });
     const adoptionCommit = adoption.seal();
+
     if (adoptionCommit === undefined) throw new Error("The observation adoption did not seal");
     adoptionCommit.publish();
     adoptionPublished = true;
@@ -585,6 +647,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
     await adoption.retired;
 
     const browserIssue = Object.freeze({ kind: "browser" });
+
     expect(targetLease.reject(browserIssue)).toBe(true);
     expect(targetDerived.get()).toBe(false);
     expect(sourceLease.issue.get()).toBeUndefined();
@@ -592,6 +655,7 @@ it("maps cached observation metadata only to an existing receiver publisher", as
     missingClaim = preparePassiveTransferClaim(missing.graph, missing.binding, undefined);
     const missingDerived = computed(() => missingClaim!.store.value.get() !== undefined);
     const missingConstruction = captureReactiveConstruction(missingDerived);
+
     expect(() =>
       prepareRequiredTransferAdoption(image, {
         graphs: [missing.graph],
@@ -607,32 +671,38 @@ it("maps cached observation metadata only to an existing receiver publisher", as
     await missingClaim.retired;
     missingClaim = undefined;
     const recoveredPublisher = observeStore(missing.graph, missing.store);
+
     expect(recoveredPublisher.active.get()).toBe(true);
   } finally {
     if (!adoptionPublished) adoption?.discard();
     if (!capturePublished) capture?.discard();
     if (claim !== undefined && !adoptionPublished) claim.discard();
     if (missingClaim !== undefined) missingClaim.discard();
+
     if (adoption !== undefined)
       await adoption.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (claim !== undefined)
       await claim.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (missingClaim !== undefined)
       await missingClaim.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (capture !== undefined)
       await capture.retired.then(
         () => undefined,
         () => undefined,
       );
+
     source.graph.dispose();
     target.graph.dispose();
     missing.graph.dispose();

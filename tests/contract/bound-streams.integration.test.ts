@@ -38,6 +38,7 @@ import { testBackend } from "../../src/testing.ts";
 type Input = { readonly room: string };
 const providerClockNow = Date.now;
 let ownsFakeTimers = false;
+
 beforeEach(() => {
   jest.useFakeTimers();
   ownsFakeTimers = true;
@@ -60,6 +61,7 @@ async function expectPending(promise: Promise<unknown>): Promise<void> {
   jest.useRealTimers();
   ownsFakeTimers = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+
   try {
     const result = await Promise.race([
       promise.then(
@@ -70,6 +72,7 @@ async function expectPending(promise: Promise<unknown>): Promise<void> {
         timer = setTimeout(() => resolve("pending"), 0);
       }),
     ]);
+
     expect(result).toBe("pending");
   } finally {
     if (timer !== undefined) clearTimeout(timer);
@@ -103,6 +106,7 @@ function fixture() {
   });
   const context = createBindingContext(graph);
   const binding = bindStream(graph, stream, graph.api.stream, { context });
+
   return { backend, stream, twin, graph, context, binding, signals, keyCalls: () => keyCalls };
 }
 
@@ -118,12 +122,15 @@ describe("genuine context-bound stream sessions", () => {
       const stopFaults = onFault(f.graph, (fault) => faults.push(fault));
       const stop = subscribe(present, (value) => values.push(value));
       const stopEmpty = subscribe(empty, (value) => emptyValues.push(value));
+
       try {
         expect(values).toStrictEqual([1]);
         expect(emptyValues).toStrictEqual([]);
         expect(faults).toStrictEqual([]);
+
         if (owner === "context") f.context.dispose();
         else f.graph.dispose();
+
         expect(values).toStrictEqual([1]);
         expect(emptyValues).toStrictEqual([]);
         expect(faults).toStrictEqual([]);
@@ -143,6 +150,7 @@ describe("genuine context-bound stream sessions", () => {
     const foreign = createGraph({
       contract: defineContract({ namespace: "foreign", operations: { stream: f.stream } }),
     });
+
     try {
       expect(f.keyCalls()).toBe(0);
       expect(f.backend.calls).toHaveLength(0);
@@ -153,13 +161,16 @@ describe("genuine context-bound stream sessions", () => {
         bindStream(f.graph, f.stream, foreign.api.stream, { context: f.context }),
       ).toThrow(TypeError);
       const imitation = (input: Input) => f.graph.api.stream(input);
+
       expect(() => bindStream(f.graph, f.stream, imitation, { context: f.context })).toThrow(
         TypeError,
       );
       const a = f.binding.member({ room: "Room/é" }, { initial: 1 });
       const joined = f.binding.member({ room: "Room/é" });
+
       expect(f.binding.session(a)).toBe(f.binding.session(joined));
       const openedSignal = f.signals[0];
+
       if (openedSignal === undefined) throw new Error("Expected the bound source to open");
       expect(f.binding.session(a).abortSignal).toBe(openedSignal);
       expect(f.backend.calls).toHaveLength(1);
@@ -169,12 +180,14 @@ describe("genuine context-bound stream sessions", () => {
       const b = other.member({ room: "Room/é" }, { initial: 2 });
       const twin = bindStream(f.graph, f.twin, f.graph.api.twin, { context: f.context });
       const c = twin.member({ room: "Room/é" }, { initial: 6 });
+
       expect(c.identity).not.toBe(a.identity);
       expect(() => bindStream(f.graph, f.twin, f.graph.api.stream, { context: f.context })).toThrow(
         TypeError,
       );
       const raw = f.graph.api.stream({ room: "Room/é" }, { initial: 3 });
       const expectedKey = storeKey("Room/é");
+
       expect([a.key, b.key, raw.key]).toEqual([expectedKey, expectedKey, expectedKey]);
       expect(a.identity).not.toBe(b.identity);
       expect(a.identity).not.toBe(raw.identity);
@@ -201,14 +214,17 @@ describe("genuine context-bound stream sessions", () => {
     async (value) => {
       const f = fixture();
       let stop: (() => void) | undefined;
+
       try {
         const a = f.binding.member({ room: "one" });
         const ticketA = f.binding.session(a);
         const observed: Array<number | undefined> = [];
+
         stop = subscribe(a, (item) => observed.push(item));
         f.backend.emit("events", value);
         f.backend.end("events");
         const receipt = await ticketA.detached;
+
         expect(receipt.session).toBe(ticketA.identity);
         expect(receipt.status).toBe("closed");
         expect(receipt.terminalCapture).toMatchObject({
@@ -223,6 +239,7 @@ describe("genuine context-bound stream sessions", () => {
         expect(() => peekStore(a)).toThrow(TypeError);
         const b = f.binding.member({ room: "one" });
         const ticketB = f.binding.session(b);
+
         expect(b.identity).toBe(a.identity);
         expect(ticketB.identity).not.toBe(ticketA.identity);
         expect(f.binding.session(a)).toBe(ticketA);
@@ -232,6 +249,7 @@ describe("genuine context-bound stream sessions", () => {
           true,
         ]);
         let updater = false;
+
         expect(() =>
           a.update(() => {
             updater = true;
@@ -244,6 +262,7 @@ describe("genuine context-bound stream sessions", () => {
         const stopB = subscribe(b, (item) => {
           if (item === 7) landed.resolve();
         });
+
         f.backend.emit("events", 7);
         await landed.promise;
         expect(b.value.get()).toBe(7);
@@ -259,10 +278,13 @@ describe("genuine context-bound stream sessions", () => {
 
   it("reports true absence for a source that ended without a value", async () => {
     const f = fixture();
+
     try {
       const source = f.binding.member({ room: "one" });
+
       f.backend.end("events");
       const receipt = await f.binding.session(source).detached;
+
       expect(receipt.terminalCapture).toMatchObject({
         kind: "captured",
         capture: { kind: "stable", present: false },
@@ -294,23 +316,28 @@ describe("genuine context-bound stream sessions", () => {
       const graph = createGraph({
         contract: defineContract({ namespace: "synchronous-bound", operations: { stream } }),
       });
+
       try {
         const binding = bindStream(graph, stream, graph.api.stream, {
           context: createBindingContext(graph),
         });
         const caller = new AbortController();
         const callerReason = new Error("caller cancelled before acquisition");
+
         if (phase === "pre-abort") caller.abort(callerReason);
         const source = binding.member(undefined, { abortSignal: caller.signal });
         const ticket = binding.session(source);
         const receipt = await ticket.detached;
+
         expect(receipt.session).toBe(ticket.identity);
         expect(receipt.status).toBe(phase === "pre-abort" ? "closed" : "failed");
+
         if (phase === "pre-abort") {
           expect(ticket.abortSignal.aborted).toBe(true);
           expect(ticket.abortSignal.reason).toBe(callerReason);
           expect(receipt.reason).toBeUndefined();
         }
+
         if (phase !== "pre-abort") expect(receipt.reason).toBeUndefined();
         expect(receipt.terminalCapture).toMatchObject({
           kind: "captured",
@@ -326,18 +353,22 @@ describe("genuine context-bound stream sessions", () => {
 
   it("forwards a later caller abort reason to the actual source signal while preserving native detachment facts", async () => {
     const f = fixture();
+
     try {
       const caller = new AbortController();
       const source = f.binding.member({ room: "one" }, { abortSignal: caller.signal });
       const ticket = f.binding.session(source);
       const openedSignal = f.signals[0];
+
       if (openedSignal === undefined) throw new Error("Expected the bound source to open");
       expect(ticket.abortSignal).toBe(openedSignal);
       expect(ticket.abortSignal.aborted).toBe(false);
       const reason = new Error("caller cancelled an open source");
+
       caller.abort(reason);
       f.graph.cancelPending(new Error("later graph cancellation"));
       const receipt = await ticket.detached;
+
       expect(ticket.abortSignal.aborted).toBe(true);
       expect(ticket.abortSignal.reason).toBe(reason);
       expect(f.backend.calls).toHaveLength(1);
@@ -377,19 +408,23 @@ describe("genuine context-bound stream sessions", () => {
       });
       const context = createBindingContext(graph);
       const binding = bindStream(graph, stream, graph.api.stream, { context });
+
       revoke = () => {
         if (mode === "reset") resets = graph.reset();
         if (mode === "context") context.dispose();
         if (mode === "graph") graph.dispose();
       };
+
       try {
         const source = binding.member();
         const ticket = binding.session(source);
         const receipt = await ticket.detached;
+
         await resets;
         expect(opened).toBe(1);
         expect(receipt.session).toBe(ticket.identity);
         expect(receipt.status).toBe("closed");
+
         if (mode === "reset") {
           expect(source.available.get()).toBe(false);
           expect(source.status.get()).toBe("closed");
@@ -424,26 +459,32 @@ describe("genuine context-bound stream sessions", () => {
       open: (_input: void): AsyncIterable<number> => {
         opens += 1;
         const own = opens;
+
         return {
           [Symbol.asyncIterator]() {
             let nextCalls = 0;
+
             return {
               next: () => {
                 nextCalls += 1;
+
                 if (own === 1)
                   return nextCalls === 1
                     ? firstNext.promise
                     : Promise.resolve({ done: true as const, value: undefined });
+
                 return secondNext.promise;
               },
               return: () => {
                 returnCalls += 1;
                 returned[own - 1]!.resolve();
+
                 try {
                   acquire();
                 } catch (cause) {
                   reentry = cause;
                 }
+
                 return physical[own - 1]!.promise;
               },
             };
@@ -455,17 +496,20 @@ describe("genuine context-bound stream sessions", () => {
       contract: defineContract({ namespace: "slow-return", operations: { stream } }),
     });
     const context = createBindingContext(graph);
+
     try {
       const binding = bindStream(graph, stream, graph.api.stream, {
         context,
       });
       const a = binding.member(undefined, { initial: 1 });
+
       acquire = () => {
         binding.member();
       };
       graph.cancelPending();
       await returned[0]!.promise;
       const receipt = await binding.session(a).detached;
+
       expect(reentry).toBeInstanceOf(TypeError);
       expect(opens).toBe(1);
       expect(receipt.terminalCapture).toMatchObject({
@@ -473,9 +517,11 @@ describe("genuine context-bound stream sessions", () => {
         capture: { present: true, value: 1 },
       });
       const b = binding.member();
+
       expect(opens).toBe(2);
       expect([a.value.get(), b.value.get(), b.available.get()]).toEqual([1, undefined, false]);
       const delivery = firstNext.promise.then(() => undefined);
+
       firstNext.resolve({ done: false, value: 77 });
       await delivery;
       expect(b.value.get()).toBeUndefined();
@@ -484,6 +530,7 @@ describe("genuine context-bound stream sessions", () => {
       expect(a.value.get()).toBe(1);
 
       const retirement = context.retire();
+
       expect(context.retire()).toBe(retirement);
       await expectPending(retirement);
       expect(returnCalls).toBe(2);
@@ -520,22 +567,26 @@ describe("genuine context-bound stream sessions", () => {
     });
     let stopA: (() => void) | undefined;
     let stopRaw: (() => void) | undefined;
+
     try {
       const binding = bindStream(graph, boundDefinition, graph.api.boundDefinition, {
         context: createBindingContext(graph),
       });
       const a = binding.member();
       const raw = graph.api.rawDefinition();
+
       expect(raw.available.get()).toBe(false);
       stopA = subscribe(a, () => undefined);
       stopRaw = subscribe(raw, () => undefined);
       const resetting = graph.reset();
+
       await binding.session(a).detached;
       await resetting;
       expect(backend.calls.filter((call) => call.name === "bound")).toHaveLength(1);
       expect(backend.calls.filter((call) => call.name === "raw")).toHaveLength(2);
       expect([a.status.get(), a.pending.get()]).toEqual(["closed", false]);
       const b = binding.member();
+
       expect(binding.session(b).identity).not.toBe(binding.session(a).identity);
       expect(backend.calls.filter((call) => call.name === "bound")).toHaveLength(2);
     } finally {
@@ -547,16 +598,19 @@ describe("genuine context-bound stream sessions", () => {
 
   it("disposes only its actual context and exposes a genuine capture fault after scope revocation", async () => {
     const f = fixture();
+
     try {
       const other = bindStream(f.graph, f.stream, f.graph.api.stream, {
         context: createBindingContext(f.graph),
       });
       const a = f.binding.member({ room: "one" });
       const ticket = f.binding.session(a);
+
       other.member({ room: "one" });
       f.graph.api.stream({ room: "one" });
       f.context.dispose();
       const receipt = await ticket.detached;
+
       expect(receipt.terminalCapture).toMatchObject({ kind: "fault", cause: { kind: "disposed" } });
       expect(f.signals.map((signal) => signal.aborted)).toEqual([true, false, false]);
       expect(() => f.binding.member({ room: "one" })).toThrow(Fault);
@@ -574,6 +628,7 @@ it.each(["raw graph", "bound context", "bound graph"] as const)(
     const cause = new Error("listener unlink failed");
     const nativeRemove = caller.signal.removeEventListener.bind(caller.signal);
     let removals = 0;
+
     Object.defineProperty(caller.signal, "removeEventListener", {
       value(...args: Parameters<AbortSignal["removeEventListener"]>) {
         removals += 1;
@@ -612,10 +667,12 @@ it.each(["raw graph", "bound context", "bound graph"] as const)(
       owner === "raw graph"
         ? graph.api.stream
         : bindStream(graph, stream, graph.api.stream, { context }).member;
+
     try {
       member(undefined, { abortSignal: caller.signal });
       await reading.promise;
       const retired = (owner === "bound context" ? context : graph).retire();
+
       await expectPending(retired);
       expect(removals).toBe(1);
       expect(returns).toBe(1);
@@ -648,6 +705,7 @@ it("unlinks a real caller signal whose registration completes after reentrant re
   const originalRemove = caller.signal.removeEventListener.bind(caller.signal);
   const listeners = new Set<EventListenerOrEventListenerObject>();
   let resetting: Promise<void> | undefined;
+
   Object.defineProperty(caller.signal, "addEventListener", {
     value(
       type: string,
@@ -669,6 +727,7 @@ it("unlinks a real caller signal whose registration completes after reentrant re
       originalRemove(type, listener, options);
     },
   });
+
   try {
     const binding = bindStream(graph, stream, graph.api.stream, {
       context: createBindingContext(graph),
@@ -676,12 +735,14 @@ it("unlinks a real caller signal whose registration completes after reentrant re
     const a = binding.member(undefined, { abortSignal: caller.signal });
     const ticket = binding.session(a);
     const receipt = await ticket.detached;
+
     await resetting;
     expect(receipt.session).toBe(ticket.identity);
     expect(receipt.status).toBe("closed");
     expect(listeners.size).toBe(0);
     expect(backend.calls).toHaveLength(0);
     const b = binding.member();
+
     caller.abort();
     expect(binding.session(b).abortSignal.aborted).toBe(false);
     expect(backend.calls).toHaveLength(1);
@@ -695,10 +756,12 @@ it.each(["failure", "reset", "idle"] as const)(
   async (mode) => {
     const f = fixture();
     let stop: (() => void) | undefined;
+
     try {
       const a = f.binding.member({ room: "one" });
       const ticket = f.binding.session(a);
       const landed = Promise.withResolvers<void>();
+
       stop = subscribe(a, (value) => {
         if (value === 12) landed.resolve();
       });
@@ -708,24 +771,29 @@ it.each(["failure", "reset", "idle"] as const)(
       stop = undefined;
       const reason = new Error("source failure");
       let resetting: Promise<void> | undefined;
+
       if (mode === "failure") f.backend.end("events", reason);
       if (mode === "reset") resetting = f.graph.reset();
       if (mode === "idle") jest.advanceTimersByTime(100);
       const receipt = await ticket.detached;
+
       await resetting;
       expect(receipt.status).toBe(
         mode === "failure" ? "failed" : mode === "idle" ? "empty" : "closed",
       );
+
       if (mode === "failure") {
         expect(receipt.reason).toBe(reason);
         expect(a.error.get()).toBe(reason);
       }
+
       expect(receipt.terminalCapture).toMatchObject({
         kind: "captured",
         capture: { kind: "stable", present: true, value: 12 },
       });
       expect(a.value.get()).toBe(12);
       const b = f.binding.member({ room: "one" });
+
       expect(b.available.get()).toBe(false);
       expect(b.value.get()).toBeUndefined();
       expect(b.error.get()).toBeUndefined();
@@ -742,11 +810,13 @@ const transferReference = { module: "rooms", operation: "events" };
 function sourceWithImportedBaseline(value: number) {
   const source = fixture();
   const store = source.binding.member({ room: "one" });
+
   store.set(value);
   const transfer = snapshot(source.graph, {
     version: 2,
     bindings: [{ binding: source.binding, reference: transferReference }],
   });
+
   return { source, transfer };
 }
 
@@ -763,6 +833,7 @@ it("leaves an imported baseline claimable after a member precheck fails, then cl
   const source = sourceWithImportedBaseline(11);
   const target = fixture();
   let stop: (() => void) | undefined;
+
   try {
     adoptBaseline(target, source.transfer);
     const precheckFailure = new Error("caller option could not be read");
@@ -771,17 +842,20 @@ it("leaves an imported baseline claimable after a member precheck fails, then cl
         throw precheckFailure;
       },
     };
+
     expect(() => target.binding.member({ room: "one" }, badOptions)).toThrow(precheckFailure);
     expect(target.backend.calls).toHaveLength(0);
 
     const first = target.binding.member({ room: "one" });
     const firstSession = target.binding.session(first);
+
     expect([first.available.get(), first.value.get(), first.pending.get()]).toEqual([
       true,
       11,
       true,
     ]);
     const delivered = Promise.withResolvers<void>();
+
     stop = subscribe(first, (value) => {
       if (value === 22) delivered.resolve();
     });
@@ -792,6 +866,7 @@ it("leaves an imported baseline claimable after a member precheck fails, then cl
     await firstSession.detached;
 
     const second = target.binding.member({ room: "one" });
+
     expect(target.binding.session(second).identity).not.toBe(firstSession.identity);
     expect([second.available.get(), second.value.get(), second.pending.get()]).toEqual([
       false,
@@ -825,6 +900,7 @@ it("does not restore a claimed baseline after the first genuine open fails", asy
   });
   const context = createBindingContext(graph);
   const binding = bindStream(graph, stream, graph.api.stream, { context });
+
   try {
     adopt(graph, source.transfer, {
       bindings: [{ binding, reference: transferReference }],
@@ -832,11 +908,13 @@ it("does not restore a claimed baseline after the first genuine open fails", asy
     const first = binding.member({ room: "one" });
     const firstSession = binding.session(first);
     const receipt = await firstSession.detached;
+
     expect(receipt.status).toBe("failed");
     expect([first.available.get(), first.value.get()]).toEqual([true, 31]);
     expect(opens).toBe(1);
 
     const second = binding.member({ room: "one" });
+
     expect(binding.session(second).identity).not.toBe(firstSession.identity);
     expect([second.available.get(), second.value.get(), second.pending.get()]).toEqual([
       false,
@@ -855,8 +933,10 @@ it.each(["reset", "context"] as const)(
   async (mode) => {
     const source = sourceWithImportedBaseline(47);
     const target = fixture();
+
     try {
       adoptBaseline(target, source.transfer);
+
       if (mode === "reset") await target.graph.reset();
       else target.context.dispose();
 
@@ -865,6 +945,7 @@ it.each(["reset", "context"] as const)(
         expect(target.backend.calls).toHaveLength(0);
       } else {
         const fresh = target.binding.member({ room: "one" });
+
         expect([fresh.available.get(), fresh.value.get(), fresh.pending.get()]).toEqual([
           false,
           undefined,
@@ -882,6 +963,7 @@ it.each(["reset", "context"] as const)(
 it("refuses an exhausted later stream session before clearing the retained imported base", async () => {
   const source = sourceWithImportedBaseline(53);
   const target = fixture();
+
   try {
     const incoming = {
       ...source.transfer,
@@ -896,10 +978,12 @@ it("refuses an exhausted later stream session before clearing the retained impor
     const store = target.binding.member({ room: "one" });
     const session = target.binding.session(store);
     const capture = peekStore(store);
+
     target.backend.end("events");
     const receipt = await session.detached;
     const key = storeKey("one");
     const before = inspectBoundAddress(target.binding, key);
+
     if (before.kind !== "stable") throw new Error("Expected a stable retained address");
     const retained = snapshot(target.graph, {
       version: 2,
@@ -911,8 +995,10 @@ it("refuses an exhausted later stream session before clearing the retained impor
     expect(target.backend.calls).toHaveLength(1);
     expect(target.binding.session(store).identity).toBe(session.identity);
     const imported = report.adopted[0];
+
     if (imported === undefined || imported.address.kind !== "stream-binding")
       throw new Error("Expected the actual stream adoption stamp");
+
     expect(session.storeIdentity).toBe(imported.identity);
     expect(receipt.terminalCapture).toEqual({ kind: "captured", capture });
     expect(store.value.get()).toBe(53);
@@ -962,6 +1048,7 @@ it("keeps same-key restored readers isolated through dormant and active caller a
     const emit = (event: Event): void => {
       if (ended) return;
       const waiter = waiters.shift();
+
       if (waiter !== undefined) waiter({ done: false, value: event });
       else queued.push(event);
     };
@@ -970,6 +1057,7 @@ it("keeps same-key restored readers isolated through dormant and active caller a
         return {
           next: () => {
             const event = queued.shift();
+
             if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
             if (ended) return Promise.resolve({ done: true as const, value: undefined });
             return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
@@ -984,11 +1072,13 @@ it("keeps same-key restored readers isolated through dormant and active caller a
         };
       },
     };
+
     return { iterable, emit };
   };
 
   const reserve = (input: Input, after: number, seed: unknown): object => {
     const reader = Object.freeze({});
+
     reservations.set(reader, { input, after, seed });
     return reader;
   };
@@ -1012,13 +1102,16 @@ it("keeps same-key restored readers isolated through dormant and active caller a
           finishReturn: () => returnGate.resolve({ done: true, value: undefined }),
           returnCalls: 0,
         };
+
         openings.push(opening);
         const channel = makeChannel(opening, returnGate.promise, () => returnStarted.resolve());
+
         if (options.reader === undefined) emitLive = channel.emit;
         return channel.iterable;
       },
       validateReader: (input, reader, after, checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           checkpoint === undefined &&
           reservation !== undefined &&
@@ -1029,6 +1122,7 @@ it("keeps same-key restored readers isolated through dormant and active caller a
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1064,35 +1158,43 @@ it("keeps same-key restored readers isolated through dormant and active caller a
   try {
     const folded = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
+
       stop = subscribe(sourceProjection.value, (value) => {
         if (value !== 2) return;
         stop();
         resolve();
       });
     });
+
     if (emitLive === undefined) throw new Error("The bound source did not open");
     emitLive({ position: 5, value: 2 });
     await folded;
 
     const checkpoint = capturePositionedStore(source, [sourceProjection] as const);
+
     if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
       throw new Error("The bound source did not capture a positioned landing");
+
     const after: number = checkpoint.position;
+
     expect(checkpoint.sourceIdentity).toBe(source.identity);
     expect(checkpoint.sessionIdentity).toBe(sourceSession.identity);
     expect(checkpoint.latest).toBe(2);
     expect(checkpoint.values).toStrictEqual([2]);
 
     const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
+
     readerA = reserve(input, after, seed);
     readerB = reserve(input, after, seed);
     const first = preparePositionedStoreRestore(binding, input, [policy] as const, seed, readerA, {
       abortSignal: abortA.signal,
     });
+
     readerATransferred = true;
     const second = preparePositionedStoreRestore(binding, input, [policy] as const, seed, readerB, {
       abortSignal: abortB.signal,
     });
+
     readerBTransferred = true;
 
     expect(openings).toHaveLength(1);
@@ -1101,6 +1203,7 @@ it("keeps same-key restored readers isolated through dormant and active caller a
     expect(second.source.identity).not.toBe(source.identity);
     const firstSession = binding.session(first.source);
     const secondSession = binding.session(second.source);
+
     expect(firstSession.storeIdentity).toBe(first.source.identity);
     expect(secondSession.storeIdentity).toBe(second.source.identity);
     expect(firstSession.identity).not.toBe(secondSession.identity);
@@ -1110,13 +1213,16 @@ it("keeps same-key restored readers isolated through dormant and active caller a
     expect(second.source.value.get()).toBe(2);
 
     const ordinaryJoin = binding.member(input);
+
     expect(ordinaryJoin.identity).toBe(source.identity);
     expect(binding.session(ordinaryJoin).identity).toBe(sourceSession.identity);
     expect(openings).toHaveLength(1);
 
     const dormantReason = new Error("dormant reader aborted");
+
     abortA.abort(dormantReason);
     const firstDetachment = await firstSession.detached;
+
     expect(firstDetachment.status).toBe("closed");
     expect(firstSession.abortSignal.aborted).toBe(true);
     expect(firstSession.abortSignal.reason).toBe(dormantReason);
@@ -1133,8 +1239,10 @@ it("keeps same-key restored readers isolated through dormant and active caller a
     expect(openings[1]!.abortSignal).toBe(secondSession.abortSignal);
 
     const activeReason = new Error("active reader aborted");
+
     abortB.abort(activeReason);
     const secondDetachment = await secondSession.detached;
+
     expect(secondDetachment.status).toBe("closed");
     expect(openings[1]!.abortSignal.aborted).toBe(true);
     expect(openings[1]!.abortSignal.reason).toBe(activeReason);
@@ -1142,6 +1250,7 @@ it("keeps same-key restored readers isolated through dormant and active caller a
     expect(releaseCount(readerB)).toBe(1);
 
     const retiring = context.retire();
+
     expect(context.retire()).toBe(retiring);
     await openings[0]!.returnStarted;
     openings[0]!.finishReturn();
@@ -1154,10 +1263,13 @@ it("keeps same-key restored readers isolated through dormant and active caller a
     expect(releaseCount(readerB)).toBe(1);
   } finally {
     for (const opening of openings) opening.finishReturn();
+
     if (readerA !== undefined && !readerATransferred && releaseCount(readerA) === 0)
       releaseReader(readerA);
+
     if (readerB !== undefined && !readerBTransferred && releaseCount(readerB) === 0)
       releaseReader(readerB);
+
     context.dispose();
     graph.dispose();
   }
@@ -1233,19 +1345,25 @@ it("binds positioned reader lifetime to native abort and physical restoration re
           returnCalls: () => returnCount,
           finishReturn: () => finishReturn(),
         };
+
         openings.push(opening);
         const emit = (event: Event): void => {
           const waiter = waiters.shift();
+
           if (waiter === undefined)
             throw new Error("The positioned stream has no pending next call");
+
           waiter({ done: false, value: event });
         };
+
         if (options.reader === undefined) emitLive = emit;
         else readers.set(options.reader, emit);
+
         return iterable;
       },
       readerLifetime: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         if (
           reservation === undefined ||
           reservation.input !== _input ||
@@ -1253,10 +1371,12 @@ it("binds positioned reader lifetime to native abort and physical restoration re
           reservation.seed !== seed
         )
           throw new TypeError("The positioned lifetime did not match its exact reservation");
+
         return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
       },
       validateReader: (input, reader, after, _checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1266,6 +1386,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1278,11 +1399,13 @@ it("binds positioned reader lifetime to native abort and physical restoration re
         releases.set(reader, (releases.get(reader) ?? 0) + 1);
       },
     };
+
     return {
       source,
       openings,
       reserve(input: Input, after: number, seed: unknown) {
         const reader = Object.freeze({});
+
         reservations.set(reader, {
           input,
           after,
@@ -1298,6 +1421,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       },
       emitReader(reader: object, event: Event) {
         const emit = readers.get(reader);
+
         if (emit === undefined) throw new Error("The reserved positioned reader did not open");
         emit(event);
       },
@@ -1343,24 +1467,29 @@ it("binds positioned reader lifetime to native abort and physical restoration re
   let activeReader: object | undefined;
   let activePublished = false;
   let capturePublished = false;
+
   try {
     const sourcePolicy = {
       kind: "reduce" as const,
       initial: 0,
       step: (sum: number, event: number) => sum + event,
     };
+
     sourceProjection = project(sourceStore, sourcePolicy);
     const sourceLanding = new Promise<void>((resolve) => {
       let stop: () => void = () => undefined;
+
       stop = subscribe(sourceProjection!.value, (value) => {
         if (value !== 3) return;
         stop();
         resolve();
       });
     });
+
     sourceProvider.emitLive({ position: 5, value: 3 });
     await sourceLanding;
     const checkpoint = capturePositionedStore(sourceStore, [sourceProjection] as const);
+
     expect(checkpoint.present).toBe(true);
     expect(checkpoint.hasPosition).toBe(true);
     expect(checkpoint.position).toBe(5);
@@ -1389,14 +1518,17 @@ it("binds positioned reader lifetime to native abort and physical restoration re
           (value as { readonly $ref?: unknown }).$ref === seedId
         ) {
           const decoded = decodedSeeds.get(seedId);
+
           if (decoded === undefined) throw new Error("The positioned seed reference is missing");
           return decoded;
         }
+
         return value;
       },
       decodeFailure: (failure) => new Error(String(failure)),
     };
     const sourceRoot = computed(() => sourceProjection!.value.get());
+
     expect(sourceRoot.get()).toBe(3);
     capture = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
@@ -1405,12 +1537,15 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       codec,
     });
     const image = capture.image;
+
     expect(image.version).toBe(2);
     const positionedRows = image.positioned;
+
     if (positionedRows === undefined) throw new Error("The bound positioned group row was omitted");
     expect(positionedRows[0]).toMatchObject({ slot: "p0", store: "s0", seed: { $ref: "p0-seed" } });
     expect(decodedSeeds.get("p0-seed")).toBe(seed);
     const captureCommit = capture.seal();
+
     if (captureCommit === undefined) throw new Error("The bound positioned capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -1418,6 +1553,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     await capture.retired;
 
     const pendingDefinition = makeDefinition(pendingProvider);
+
     pendingGraph = createGraph({
       contract: defineContract({ namespace, operations: { events: pendingDefinition } }),
     });
@@ -1426,6 +1562,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       context: pendingContext,
     });
     const pendingReaderLocal = pendingProvider.reserve(sourceInput, 5, seed);
+
     pendingReader = pendingReaderLocal;
     pendingClaim = preparePassiveTransferClaim(
       pendingGraph,
@@ -1440,6 +1577,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     );
     expect(pendingProvider.openings).toHaveLength(0);
     const pendingValue = computed(() => pendingClaim!.restoration.projections[0].value.get());
+
     pendingAdoption = prepareRequiredTransferAdoption(image, {
       graphs: [pendingGraph],
       sources: [{ slot: "s0", claim: pendingClaim }],
@@ -1455,6 +1593,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       mappedStateWrites: [],
     });
     const staleReason = new Error("reader lifetime expired before publication");
+
     pendingProvider.abort(pendingReaderLocal, staleReason);
     expect(pendingAdoption.seal()).toBeUndefined();
     pendingAdoption.discard();
@@ -1464,6 +1603,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     expect(pendingProvider.releaseCount(pendingReaderLocal)).toBe(1);
 
     const activeDefinition = makeDefinition(activeProvider);
+
     activeGraph = createGraph({
       contract: defineContract({ namespace, operations: { events: activeDefinition } }),
     });
@@ -1472,6 +1612,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       context: activeContext,
     });
     const activeReaderLocal = activeProvider.reserve(sourceInput, 5, seed);
+
     activeReader = activeReaderLocal;
     activeClaim = preparePassiveTransferClaim(activeGraph, activeBinding, sourceInput, undefined, {
       policies: [sourcePolicy] as const,
@@ -1481,6 +1622,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     expect(activeClaim.retired).not.toBe(activeClaim.restoration.retired);
     expect(activeProvider.openings).toHaveLength(0);
     const activeValue = computed(() => activeClaim!.restoration.projections[0].value.get());
+
     activeAdoption = prepareRequiredTransferAdoption(image, {
       graphs: [activeGraph],
       sources: [{ slot: "s0", claim: activeClaim }],
@@ -1496,8 +1638,10 @@ it("binds positioned reader lifetime to native abort and physical restoration re
       mappedStateWrites: [],
     });
     const activeCommit = activeAdoption.seal();
+
     if (activeCommit === undefined)
       throw new Error("The active bound reader adoption did not seal");
+
     activeCommit.publish();
     activePublished = true;
     activeCommit.notifications.deliver();
@@ -1505,12 +1649,15 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     expect(activeProvider.openings).toHaveLength(0);
 
     const resourceRetired = activeClaim.restoration.retired;
+
     expect(activeClaim.restoration.activate()).toBe(activeClaim.store);
     expect(activeProvider.openings).toHaveLength(1);
     const opening = activeProvider.openings[0]!;
+
     expect(opening.reader).toBe(activeReaderLocal);
     expect(opening.abortSignal.aborted).toBe(false);
     const abortReason = new Error("provider reservation invalidated");
+
     activeProvider.abort(activeReaderLocal, abortReason);
     await opening.returnStarted;
     expect(opening.abortSignal.aborted).toBe(true);
@@ -1527,43 +1674,51 @@ it("binds positioned reader lifetime to native abort and physical restoration re
     if (!capturePublished) capture?.discard();
     pendingAdoption?.discard();
     pendingClaim?.discard();
+
     if (!activePublished) {
       activeAdoption?.discard();
       activeClaim?.discard();
     } else activeClaim?.restoration.discard();
+
     for (const opening of activeProvider.openings) opening.finishReturn();
     sourceGraph.dispose();
     pendingContext?.dispose();
     pendingGraph?.dispose();
     activeContext?.dispose();
     activeGraph?.dispose();
+
     if (
       pendingReader !== undefined &&
       pendingClaim === undefined &&
       pendingProvider.releaseCount(pendingReader) === 0
     )
       pendingProvider.source.releaseReader(sourceInput, pendingReader);
+
     if (
       activeReader !== undefined &&
       activeClaim === undefined &&
       activeProvider.releaseCount(activeReader) === 0
     )
       activeProvider.source.releaseReader(sourceInput, activeReader);
+
     if (capture !== undefined)
       await capture.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (pendingAdoption !== undefined)
       await pendingAdoption.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (activeAdoption !== undefined)
       await activeAdoption.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (pendingClaim !== undefined) {
       await pendingClaim.retired.then(
         () => undefined,
@@ -1574,6 +1729,7 @@ it("binds positioned reader lifetime to native abort and physical restoration re
         () => undefined,
       );
     }
+
     if (activeClaim !== undefined) {
       await activeClaim.retired.then(
         () => undefined,
@@ -1605,8 +1761,10 @@ it("revoking a bound context closes its positioned projections and releases dorm
         const waiters: Array<
           (result: IteratorResult<{ position: number; value: number }>) => void
         > = [];
+
         liveEmit = (event) => {
           const waiter = waiters.shift();
+
           if (waiter === undefined) queued.push(event);
           else waiter({ done: false, value: event });
         };
@@ -1615,8 +1773,10 @@ it("revoking a bound context closes its positioned projections and releases dorm
             return {
               next() {
                 const event = queued.shift();
+
                 if (event !== undefined)
                   return Promise.resolve({ done: false as const, value: event });
+
                 return new Promise<IteratorResult<{ position: number; value: number }>>((resolve) =>
                   waiters.push(resolve),
                 );
@@ -1630,6 +1790,7 @@ it("revoking a bound context closes its positioned projections and releases dorm
       },
       validateReader: (input, reader, after, checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1640,6 +1801,7 @@ it("revoking a bound context closes its positioned projections and releases dorm
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1666,25 +1828,30 @@ it("revoking a bound context closes its positioned projections and releases dorm
   });
   const reserve = (after: number, checkpoint: object, seed: unknown): object => {
     const reader = Object.freeze({});
+
     reservations.set(reader, { input, after, checkpoint, seed });
     return reader;
   };
   let reader: object | undefined;
   let restore: PositionedRestoration<number> | undefined;
+
   try {
     const folded = new Promise<void>((resolve) => {
       let stop = () => {};
+
       stop = subscribe(projection.value, (value) => {
         if (value !== 4) return;
         stop();
         resolve();
       });
     });
+
     if (liveEmit === undefined) throw new Error("The bound positioned source did not open");
     liveEmit({ position: 2, value: 4 });
     await folded;
     await flush();
     const checkpoint = capturePositionedProjection<number, number>(projection);
+
     reader = reserve(2, checkpoint, 4);
     restore = preparePositionedRestore(binding, input, checkpoint, reader, { value: 4 });
     expect(opens).toBe(1);

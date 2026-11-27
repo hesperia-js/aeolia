@@ -9,8 +9,10 @@ const workflow = Bun.YAML.parse(
 const run = workflow.jobs.checks?.steps.find(
   (step) => step.name === "Check repository branch name",
 )?.run;
+
 assert.ok(run);
 const match = /^bun -e '\s*([\s\S]*?)\s*'\s*$/.exec(run);
+
 assert.ok(match?.[1]);
 const branchScript = match[1];
 const { version } = await Bun.file(new URL("../../package.json", import.meta.url)).json();

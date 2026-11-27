@@ -52,9 +52,11 @@ describe("Aeolia value subscriptions", () => {
     });
     const view = computed(() => {
       const value = first.get();
+
       later.get();
       return value;
     });
+
     expect(view.get()).toBe(1);
     trigger.set(true);
     expect(view.get()).toBe(3);
@@ -83,16 +85,19 @@ describe("Aeolia value subscriptions", () => {
     });
     const child = computed(() => (branch.get() ? right.get() : left.get()));
     const stop = watch(child, () => {});
+
     try {
       branch.set(true);
       const outer = computed(() => {
         if (options.earlierSide) side.get();
         trace.push("enter child");
         const result = child.get();
+
         trace.push("return from child");
         if (options.explicitTail) side.get();
         return result;
       });
+
       activeOuter = outer;
       expect(outer.get()).toBe(2);
       expect(trace).toEqual(
@@ -101,6 +106,7 @@ describe("Aeolia value subscriptions", () => {
           : ["enter child", "return from child"],
       );
       const sources = Signal.subtle.introspectSources(outer);
+
       expect(sources).toHaveLength(2);
       expect(sources[0]).toBe(options.earlierSide ? side : child);
       expect(sources[1]).toBe(options.earlierSide ? child : side);
@@ -122,6 +128,7 @@ describe("Aeolia value subscriptions", () => {
     const child = computed(() => (switchGraph.get() ? localStore : foreignStore).value.get());
     const outer = computed(() => {
       localStore.value.get();
+
       try {
         child.get();
       } catch (error) {
@@ -129,11 +136,14 @@ describe("Aeolia value subscriptions", () => {
         side.get();
         switchGraph.set(true);
       }
+
       return child.get();
     });
+
     try {
       expect(outer.get()).toBe(1);
       const sources = Signal.subtle.introspectSources(outer);
+
       expect(sources).toHaveLength(3);
       expect(sources[0]).toBe(localStore.value);
       expect(sources[1]).toBe(side);
@@ -147,6 +157,7 @@ describe("Aeolia value subscriptions", () => {
     let runs = 0;
     const view: Readable<number> = computed(() => {
       runs += 1;
+
       try {
         return view.get();
       } catch (error) {
@@ -154,10 +165,12 @@ describe("Aeolia value subscriptions", () => {
         return 7;
       }
     });
+
     expect(view.get()).toBe(7);
     expect(view.get()).toBe(7);
     expect(runs).toBe(1);
     const unhandled: Readable<number> = computed(() => unhandled.get());
+
     expect(() => unhandled.get()).toThrow(expect.objectContaining({ kind: "cycle" }));
   });
 
@@ -171,6 +184,7 @@ describe("Aeolia value subscriptions", () => {
     const view = computed(() => {
       runs += 1;
       const own = localStore.value.get();
+
       try {
         return (own ?? 0) + (foreignStore.value.get() ?? 0);
       } catch (error) {
@@ -183,9 +197,11 @@ describe("Aeolia value subscriptions", () => {
       return foreignStore.value.get();
     });
     let stop: (() => void) | undefined;
+
     try {
       expect(() => unhandled.get()).toThrow(expect.objectContaining({ kind: "cross-graph" }));
       const values: Array<number | undefined> = [];
+
       stop = subscribe(view, (value) => values.push(value));
       foreignStore.set(23);
       expect(runs).toBe(1);
@@ -209,11 +225,13 @@ describe("Aeolia value subscriptions", () => {
           if (!(error instanceof Fault) || error.kind !== "cycle") throw error;
           caught += 1;
         }
+
         return Object.is(previous, next);
       },
     });
     const values: number[] = [];
     const stop = subscribe(view, (value) => values.push(value));
+
     try {
       source.set(2);
       expect(values).toEqual([1, 2]);
@@ -241,6 +259,7 @@ describe("Aeolia value subscriptions", () => {
       });
       const values: number[] = [];
       const stop = subscribe(view, (value) => values.push(value));
+
       try {
         enabled.set(true);
         expect(values).toEqual([7, 9]);
@@ -275,6 +294,7 @@ describe("Aeolia value subscriptions", () => {
   it("queues writes from callbacks and refreshes warmed derived reads", () => {
     const source = signal(0);
     const doubled = computed(() => source.get() * 2);
+
     expect(doubled.get()).toBe(0);
     const values: Array<readonly [number, number]> = [];
     const stopDerivedWatch = watch(doubled, () => undefined);
@@ -283,6 +303,7 @@ describe("Aeolia value subscriptions", () => {
     const stop = subscribe(source, (value) => {
       callbackDepth += 1;
       maximumDepth = Math.max(maximumDepth, callbackDepth);
+
       try {
         if (value === 1) source.set(2);
         values.push([value, doubled.get()]);
@@ -306,8 +327,10 @@ describe("Aeolia value subscriptions", () => {
     const source = signal(0, { label: "subscription-loop" });
     let calls = 0;
     let stop = (): void => undefined;
+
     stop = subscribe(source, (value) => {
       calls += 1;
+
       if (value === 1) {
         stop();
         source.set(2);
@@ -320,6 +343,7 @@ describe("Aeolia value subscriptions", () => {
 
     const loop = signal(0);
     let loopCalls = 0;
+
     expect(() =>
       subscribe(loop, (value) => {
         loopCalls += 1;
@@ -357,6 +381,7 @@ describe("Aeolia value subscriptions", () => {
   it("rolls back a failed initial setup and maintains liveness counts", () => {
     const lifecycle: string[] = [];
     let source!: WritableSignal<number>;
+
     source = signal(0, {
       [Signal.subtle.watched]() {
         lifecycle.push("watched");
@@ -367,6 +392,7 @@ describe("Aeolia value subscriptions", () => {
       },
     });
     const failure = new Error("initial observer");
+
     expect(() =>
       subscribe(source, () => {
         throw failure;
@@ -376,6 +402,7 @@ describe("Aeolia value subscriptions", () => {
 
     const values: number[] = [];
     const stop = subscribe(source, (value) => values.push(value));
+
     expect(lifecycle).toStrictEqual(["watched", "unwatched", "watched"]);
     expect(values).toStrictEqual([1]);
     stop();
@@ -417,6 +444,7 @@ describe("Aeolia value subscriptions", () => {
         lifecycle.push("watched");
       },
     });
+
     expect(() => subscribe(source, null as never)).toThrow(TypeError);
     expect(lifecycle).toStrictEqual([]);
   });

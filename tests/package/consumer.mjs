@@ -66,6 +66,7 @@ function check(condition, message) {
 
 async function expectPending(promise, message) {
   let timer;
+
   try {
     const result = await Promise.race([
       promise.then(
@@ -76,6 +77,7 @@ async function expectPending(promise, message) {
         timer = setTimeout(() => resolve("pending"), 0);
       }),
     ]);
+
     check(result === "pending", message);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
@@ -87,6 +89,7 @@ async function verifyRootGraphConsumer() {
   const doubled = computed(() => count.get() * 2);
   const signalValues = [];
   const stopSignal = subscribeSignal(doubled, (value) => signalValues.push(value));
+
   try {
     count.set(3);
     check(JSON.stringify(signalValues) === "[4,6]", "Cross-entry signal propagation failed");
@@ -108,9 +111,11 @@ async function verifyRootGraphConsumer() {
   const graph = createGraph({
     contract: defineContract({ namespace: "packed-consumer", operations: { item, save } }),
   });
+
   check(graph.active === true, "Packed graph did not report its active logical state");
   const pending = (name) => {
     const calls = backend.pending(name);
+
     check(calls.length === 1, `Expected one pending ${name} call, got ${calls.length}`);
     return calls[0];
   };
@@ -119,11 +124,13 @@ async function verifyRootGraphConsumer() {
   const stop = subscribe(store, (value) => observed.push(value));
   let call;
   let retirementCallResolved = false;
+
   try {
     backend.resolve(pending("item.get"), "initial");
     check((await store.ready) === "initial", "Packed query did not resolve");
 
     const mutation = graph.api.save({ id: "one" });
+
     backend.resolve(pending("item.save"), "saved");
     check((await mutation) === "saved", "Packed mutation did not resolve");
     check(store.status.get() === "revalidating", "Mutation did not refresh the observed query");
@@ -131,6 +138,7 @@ async function verifyRootGraphConsumer() {
     check((await store.ready) === "updated", "Refreshed data did not reach the query handle");
 
     const resetting = graph.reset();
+
     check(store.value.get() === undefined, "Reset retained the previous identity's data");
     check(graph.resetVersion.get() === 1, "Reset version did not advance");
     backend.resolve(pending("item.get"), "new identity");
@@ -142,6 +150,7 @@ async function verifyRootGraphConsumer() {
     );
 
     const refreshing = store.revalidate();
+
     call = pending("item.get");
     const disposedRead = store.ready.then(
       () => {
@@ -151,9 +160,11 @@ async function verifyRootGraphConsumer() {
         check(error instanceof Fault && error.kind === "disposed", "Expected a disposal fault"),
     );
     const retirement = graph.retire();
+
     check(graph.active === false, "Packed graph stayed active after logical retirement");
     check(graph.retire() === retirement, "Retirement did not return the same promise");
     let retired = false;
+
     void retirement.then(
       () => {
         retired = true;
@@ -188,20 +199,24 @@ function waitForPositionedCaptureNotice(readable, matches) {
   });
   const unsubscribe = subscribe(readable, (notice) => {
     if (settled) return;
+
     if (matches(notice)) {
       settled = true;
       stop();
       resolveNotice(notice);
       return;
     }
+
     if (notice.kind !== "changed") {
       settled = true;
       stop();
       const error = new Error("Unexpected positioned capture-state terminal: " + notice.kind);
+
       if (notice.kind === "failed") error.cause = notice.cause;
       rejectNotice(error);
     }
   });
+
   stop = unsubscribe;
   if (settled) stop();
   promise.catch(() => {});
@@ -267,8 +282,10 @@ async function verifyPositionedRequiredTransferConsumer() {
   let stopStickyTerminal = () => {};
   let changeWait;
   let terminalWait;
+
   try {
     const sourceA = graphA.api.events(inputA);
+
     projectionA = project(sourceA, sourcePolicy);
     check(providerA.opens.length === 1, "The source Store did not open exactly once");
     check(
@@ -291,6 +308,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     );
 
     const checkpoint = capturePositionedStore(sourceA, [projectionA]);
+
     check(
       checkpoint.present === false &&
         checkpoint.hasPosition === false &&
@@ -324,13 +342,16 @@ async function verifyPositionedRequiredTransferConsumer() {
           value.$ref === seedId
         ) {
           const decoded = decodedSeeds.get(seedId);
+
           check(decoded !== undefined, "The positioned seed reference is missing");
           return decoded;
         }
+
         return value;
       },
       decodeFailure: (failure) => new Error(String(failure)),
     };
+
     capture = prepareRequiredTransferCapture({
       graphs: [graphA],
       roots: [{ source: sourceRoot, construction: captureReactiveConstruction(sourceRoot) }],
@@ -343,11 +364,13 @@ async function verifyPositionedRequiredTransferConsumer() {
       "The snapshot:false base was copied into the Store row",
     );
     const positionedRows = capture.image.positioned;
+
     check(
       Array.isArray(positionedRows) && positionedRows.length === 1,
       "The positioned group row was omitted",
     );
     const group = positionedRows[0];
+
     check(
       JSON.stringify(group.seed) === JSON.stringify({ $ref: seedId }),
       "The group seed did not use its stable codec reference",
@@ -382,6 +405,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     );
 
     const captureCommit = capture.seal();
+
     if (captureCommit === undefined) throw new Error("The genuine initial capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -409,6 +433,7 @@ async function verifyPositionedRequiredTransferConsumer() {
       targetRuns += 1;
       return claim.restoration.projections[0].value.get();
     });
+
     adoption = prepareRequiredTransferAdoption(capture.image, {
       graphs: [graphB],
       sources: [{ slot: "s0", claim }],
@@ -424,6 +449,7 @@ async function verifyPositionedRequiredTransferConsumer() {
       mappedStateWrites: [],
     });
     const commit = adoption.seal();
+
     check(commit !== undefined, "The initial-boundary adoption did not seal");
     commit.publish();
     published = true;
@@ -459,6 +485,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     const initialCheckpoint = capturePositionedStore(claim.store, [
       claim.restoration.projections[0],
     ]);
+
     check(
       !initialCheckpoint.present &&
         !initialCheckpoint.hasPosition &&
@@ -469,8 +496,10 @@ async function verifyPositionedRequiredTransferConsumer() {
     );
     const captureState = rootObservePositionedStoreCaptureState(initialCheckpoint);
     const captureNotices = [];
+
     stopCaptureState = subscribe(captureState, (notice) => captureNotices.push(notice));
     const initialCaptureNotice = captureNotices[0];
+
     check(
       captureNotices.length === 1 &&
         initialCaptureNotice?.kind === "changed" &&
@@ -487,8 +516,10 @@ async function verifyPositionedRequiredTransferConsumer() {
       claim.restoration.projections[0],
       (value) => value === 12,
     );
+
     providerB.emitReader(reader, { position: 6, value: 2 });
     const [suffixNotice] = await Promise.all([changeWait.promise, folded]);
+
     check(
       suffixNotice.kind === "changed" &&
         suffixNotice.revision !== null &&
@@ -506,6 +537,7 @@ async function verifyPositionedRequiredTransferConsumer() {
       "The first suffix did not create the source landing",
     );
     const receipt = positionedFoldReceipt(claim.restoration.projections[0]);
+
     check(
       receipt !== undefined && receipt.position === 6,
       "The suffix did not create a native fold receipt",
@@ -518,6 +550,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     const suffixCheckpoint = capturePositionedStore(claim.store, [
       claim.restoration.projections[0],
     ]);
+
     check(
       suffixCheckpoint.present &&
         suffixCheckpoint.latest === 2 &&
@@ -530,6 +563,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     );
 
     const captureNoticesAtStop = captureNotices.length;
+
     stopCaptureState();
     stopCaptureState = () => {};
     changeWait.stop();
@@ -540,6 +574,7 @@ async function verifyPositionedRequiredTransferConsumer() {
 
     const terminalState = observePositionedStoreCaptureState(suffixCheckpoint);
     const terminalNotices = [];
+
     stopTerminalCaptureState = subscribe(terminalState, (notice) => terminalNotices.push(notice));
     check(
       terminalNotices.length === 1 && terminalNotices[0]?.kind === "changed",
@@ -551,6 +586,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     );
     claim.restoration.discard();
     const [terminalNotice] = await Promise.all([terminalWait.promise, claim.restoration.retired]);
+
     check(
       terminalNotice.kind === "closed" &&
         terminalNotices.length === 2 &&
@@ -565,6 +601,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     stopTerminalCaptureState();
     stopTerminalCaptureState = () => {};
     const stickyNotices = [];
+
     stopStickyTerminal = subscribe(terminalState, (notice) => stickyNotices.push(notice));
     check(
       stickyNotices.length === 1 && stickyNotices[0] === terminalNotice,
@@ -579,10 +616,12 @@ async function verifyPositionedRequiredTransferConsumer() {
     stopTerminalCaptureState();
     terminalWait?.stop();
     stopStickyTerminal();
+
     if (!published) {
       adoption?.discard();
       claim?.discard();
     } else claim?.restoration.discard();
+
     if (!capturePublished) capture?.discard();
     projectionA?.close();
     graphA.dispose();
@@ -591,6 +630,7 @@ async function verifyPositionedRequiredTransferConsumer() {
     if (adoption !== undefined) await adoption.retired.catch(() => {});
     if (claim !== undefined) await claim.retired.catch(() => {});
     if (claim !== undefined) await claim.restoration.retired.catch(() => {});
+
     if (reader !== undefined && claim === undefined && providerB.releaseCount(reader) === 0)
       providerB.releaseReader(inputB, reader);
   }
@@ -621,10 +661,12 @@ function verifyPublicEntryIdentity() {
 
 function verifyStateUpdateConsumer(development) {
   const updateSource = Function.prototype.toString.call(Signal.State.prototype.update);
+
   check(
     !updateSource.includes("__AEOLIA_DEV__"),
     "The private development marker reached State.update",
   );
+
   if (development) {
     check(
       updateSource.includes(stateUpdateDiagnostic),
@@ -648,8 +690,10 @@ function verifyStateUpdateConsumer(development) {
     } catch (error) {
       return error;
     }
+
     return undefined;
   })();
+
   check(foreignReceiverError instanceof TypeError, "State.update accepted a foreign receiver");
   check(
     !foreignReceiverError.message.startsWith(stateUpdateDiagnostic),
@@ -663,8 +707,10 @@ function verifyStateUpdateConsumer(development) {
     } catch (error) {
       return error;
     }
+
     return undefined;
   })();
+
   check(computedReceiverError instanceof TypeError, "State.update accepted a Computed receiver");
   check(
     !computedReceiverError.message.startsWith(stateUpdateDiagnostic),
@@ -673,6 +719,7 @@ function verifyStateUpdateConsumer(development) {
 
   const state = new Signal.State(1);
   let updaterCalls = 0;
+
   state.update((current) => {
     updaterCalls += 1;
     check(current === 1, "State.update received the wrong current value");
@@ -681,10 +728,12 @@ function verifyStateUpdateConsumer(development) {
   check(updaterCalls === 1 && state.get() === 2, "A valid updater did not run exactly once");
 
   const updaterFailure = new Error("installed updater failure");
+
   for (const thrownCause of [updaterFailure, undefined]) {
     let throwingUpdaterCalls = 0;
     let updaterThrew = false;
     let caughtUpdaterFailure;
+
     try {
       state.update(() => {
         throwingUpdaterCalls += 1;
@@ -694,6 +743,7 @@ function verifyStateUpdateConsumer(development) {
       updaterThrew = true;
       caughtUpdaterFailure = error;
     }
+
     check(updaterThrew, "State.update did not surface the updater exception");
     check(throwingUpdaterCalls === 1, "A throwing updater did not run exactly once");
     check(
@@ -704,13 +754,16 @@ function verifyStateUpdateConsumer(development) {
   }
 
   let invalidUpdaterError;
+
   try {
     state.update(null);
   } catch (error) {
     invalidUpdaterError = error;
   }
+
   check(invalidUpdaterError instanceof TypeError, "An invalid updater did not throw TypeError");
   check(state.get() === 2, "An invalid updater changed the State value");
+
   if (development)
     check(
       invalidUpdaterError.message === stateUpdateDiagnostic,
@@ -724,6 +777,7 @@ function verifyStateUpdateConsumer(development) {
 
   let readonlyUpdaterCalls = 0;
   let readonlyError;
+
   try {
     withoutWrites(() =>
       state.update((current) => {
@@ -734,6 +788,7 @@ function verifyStateUpdateConsumer(development) {
   } catch (error) {
     readonlyError = error;
   }
+
   check(
     readonlyError instanceof Fault && readonlyError.kind === "write-forbidden",
     "A read-only scope did not reject State.update first",
@@ -744,11 +799,13 @@ function verifyStateUpdateConsumer(development) {
   );
 
   let readonlyInvalidError;
+
   try {
     withoutWrites(() => state.update(null));
   } catch (error) {
     readonlyInvalidError = error;
   }
+
   check(
     readonlyInvalidError instanceof Fault && readonlyInvalidError.kind === "write-forbidden",
     "The development updater diagnostic replaced read-only write refusal",
@@ -767,6 +824,7 @@ function verifyStateUpdateConsumer(development) {
   };
   const functionState = new Signal.State(currentFunction);
   let functionStateUpdaterCalls = 0;
+
   functionState.update((current) => {
     functionStateUpdaterCalls += 1;
     check(current === currentFunction, "State.update changed a function-valued T");
@@ -805,6 +863,7 @@ export async function verifyConsumer(development = false) {
   const doubled = computed(() => count.get() * 2);
   const signalValues = [];
   const stopSignal = subscribeSignal(doubled, (value) => signalValues.push(value));
+
   try {
     count.set(3);
     check(JSON.stringify(signalValues) === "[4,6]", "Cross-entry signal propagation failed");
@@ -830,9 +889,11 @@ export async function verifyConsumer(development = false) {
       unobservedFaults.push(error);
     },
   });
+
   verifyPublicGraphIdentity(graph);
   const pending = (name) => {
     const calls = backend.pending(name);
+
     check(calls.length === 1, `Expected one pending ${name} call, got ${calls.length}`);
     return calls[0];
   };
@@ -843,11 +904,13 @@ export async function verifyConsumer(development = false) {
   const stopReactive = subscribeSignal(store.value, (value) => reactiveObserved.push(value));
   let retirementCall;
   let retirementCallResolved = false;
+
   try {
     backend.resolve(pending("item.get"), "initial");
     check((await store.ready) === "initial", "Packed query did not resolve");
 
     const mutation = graph.api.save({ id: "one" });
+
     backend.resolve(pending("item.save"), "saved");
     check((await mutation) === "saved", "Packed mutation did not resolve");
     check(store.status.get() === "revalidating", "Mutation did not refresh the observed query");
@@ -855,6 +918,7 @@ export async function verifyConsumer(development = false) {
     check((await store.ready) === "updated", "Refreshed data did not reach the query handle");
 
     const resetting = graph.reset();
+
     check(store.value.get() === undefined, "Reset retained the previous identity's data");
     check(graph.resetVersion.get() === 1, "Reset version did not advance");
     backend.resolve(pending("item.get"), "new identity");
@@ -876,6 +940,7 @@ export async function verifyConsumer(development = false) {
 
     const refreshing = store.revalidate();
     const call = pending("item.get");
+
     retirementCall = call;
     const disposedRead = store.ready.then(
       () => {
@@ -884,6 +949,7 @@ export async function verifyConsumer(development = false) {
       (error) =>
         check(error instanceof Fault && error.kind === "disposed", "Expected a disposal fault"),
     );
+
     check(unobservedFaults.length === 0, "Unexpected diagnostic before graph disposal");
     const observedBeforeDispose = [...observed];
     const reactiveBeforeDispose = [...reactiveObserved];
@@ -892,11 +958,13 @@ export async function verifyConsumer(development = false) {
       observedBeforeDispose.every((value, index) => Object.is(observed[index], value)) &&
       reactiveObserved.length === reactiveBeforeDispose.length &&
       reactiveBeforeDispose.every((value, index) => Object.is(reactiveObserved[index], value));
+
     graph.dispose();
     const disposalFaults = [...unobservedFaults];
     const disposalReportsUnchanged = () =>
       unobservedFaults.length === disposalFaults.length &&
       disposalFaults.every((fault, index) => unobservedFaults[index] === fault);
+
     check(observationsUnchanged(), "Graph disposal changed the observed Store values");
     check(call.aborted, "Disposal did not abort the backend request");
     const retirement = graph.retire();
@@ -904,6 +972,7 @@ export async function verifyConsumer(development = false) {
       () => ({ status: "fulfilled" }),
       (reason) => ({ status: "rejected", reason }),
     );
+
     check(graph.retire() === retirement, "Graph retirement did not return its cached promise");
     check(disposalReportsUnchanged(), "Joining retirement repeated a disposal diagnostic");
     await disposedRead;
@@ -912,6 +981,7 @@ export async function verifyConsumer(development = false) {
     retirementCallResolved = true;
     await refreshing;
     const outcome = await retirementOutcome;
+
     check(disposalReportsUnchanged(), "Retirement added a disposal diagnostic");
     const isDisposedFault = (fault) =>
       fault instanceof Fault &&
@@ -929,9 +999,11 @@ export async function verifyConsumer(development = false) {
           Object.prototype.hasOwnProperty.call(fault.errors, index) &&
           isDisposalReport(fault.errors[index], ancestors),
       ).every(Boolean);
+
       ancestors.delete(fault);
       return valid;
     };
+
     check(
       disposalFaults.length > 0 && disposalFaults.every((fault) => isDisposalReport(fault)),
       "Disposal reported unexpected faults",
@@ -946,6 +1018,7 @@ export async function verifyConsumer(development = false) {
         : outcome.reason instanceof AggregateError && Array.isArray(outcome.reason.errors)
           ? outcome.reason.errors
           : [];
+
     check(
       causes.length === disposalFaults.length &&
         disposalFaults.every(
@@ -959,6 +1032,7 @@ export async function verifyConsumer(development = false) {
   } finally {
     if (retirementCall !== undefined && !retirementCallResolved)
       backend.resolve(retirementCall, "late response");
+
     stop();
     stopReactive();
     graph.dispose();
@@ -969,12 +1043,14 @@ function positionedChannel() {
   const queued = [];
   const waiters = [];
   let ended = false;
+
   return {
     source: {
       [Symbol.asyncIterator]() {
         return {
           next() {
             const event = queued.shift();
+
             if (event !== undefined) return Promise.resolve({ done: false, value: event });
             if (ended) return Promise.resolve({ done: true, value: undefined });
             return new Promise((resolve) => waiters.push(resolve));
@@ -989,6 +1065,7 @@ function positionedChannel() {
     },
     emit(event) {
       const waiter = waiters.shift();
+
       if (waiter === undefined) queued.push(event);
       else waiter({ done: false, value: event });
     },
@@ -1010,12 +1087,15 @@ class ConsumerPositionedSource {
       this.initialBoundary = (input, options) => {
         this.initialBoundaries.push({ input, options });
         const boundary = Object.hasOwn(options, "after") ? options.after : after;
+
         return { available: true, after: boundary };
       };
     }
+
     if (readerLifetime) {
       this.readerLifetime = (input, reader, after, seed) => {
         const reservation = this.#reservations.get(reader);
+
         check(
           reservation !== undefined &&
             reservation.input === input &&
@@ -1034,6 +1114,7 @@ class ConsumerPositionedSource {
 
   reserve(input, after, checkpoint, seed) {
     const reader = Object.freeze({});
+
     this.#reservations.set(reader, {
       input,
       after,
@@ -1047,12 +1128,14 @@ class ConsumerPositionedSource {
 
   emitLive(input, event) {
     const emit = this.#liveEmitters.get(input.id);
+
     check(emit !== undefined, "The positioned live provider opening is missing");
     emit(event);
   }
 
   emitReader(reader, event) {
     const emit = this.#readerEmitters.get(reader);
+
     check(emit !== undefined, "The positioned reserved reader opening is missing");
     emit(event);
   }
@@ -1061,14 +1144,18 @@ class ConsumerPositionedSource {
     const channel = positionedChannel();
     const hasAfter = Object.hasOwn(options, "after");
     const hasReader = Object.hasOwn(options, "reader");
+
     this.opens.push({ input, hasAfter, after: options.after, hasReader, options });
+
     if (options.reader !== undefined) this.#readerEmitters.set(options.reader, channel.emit);
     else this.#liveEmitters.set(input.id, channel.emit);
+
     return channel.source;
   }
 
   validateReader(input, reader, after, checkpoint, seed) {
     const reservation = this.#reservations.get(reader);
+
     return (
       reservation !== undefined &&
       reservation.input === input &&
@@ -1080,6 +1167,7 @@ class ConsumerPositionedSource {
 
   isReaderCurrent(input, reader, after, seed) {
     const reservation = this.#reservations.get(reader);
+
     return (
       reservation !== undefined &&
       reservation.input === input &&
@@ -1114,6 +1202,7 @@ function waitForPositionedValue(projection, predicate) {
     stop();
     resolveValue(value);
   });
+
   stop = unsubscribe;
   if (matched) stop();
   return result;
@@ -1139,15 +1228,18 @@ async function verifyPositionedConsumer() {
       initial: { total: 0 },
       step: (accumulator, event) => ({ total: accumulator.total + event }),
     });
+
     try {
       check(
         providerA.opens.length === 1 && !providerA.opens[0].hasAfter,
         "A live positioned open included a restore boundary",
       );
       const firstFold = waitForPositionedValue(source, (value) => value.total === 2);
+
       providerA.emitLive(inputA, { position: 5, value: 2 });
       await firstFold;
       const checkpoint = capturePositionedProjection(source);
+
       check(
         checkpoint.hasPosition && checkpoint.position === 5 && checkpoint.resumable,
         "A did not capture its successful positioned fold",
@@ -1175,6 +1267,7 @@ async function verifyPositionedConsumer() {
   const seed = persisted.value;
   const reader = providerB.reserve(inputB, persisted.after, undefined, seed);
   let restore;
+
   try {
     restore = preparePositionedSeedRestore(
       graphB.api.events,
@@ -1193,6 +1286,7 @@ async function verifyPositionedConsumer() {
       "B did not install the decoded accumulator seed",
     );
     const resumedFold = waitForPositionedValue(restore.projection, (value) => value.total === 5);
+
     restore.activate();
     check(
       providerB.opens.length === 1 &&
@@ -1204,6 +1298,7 @@ async function verifyPositionedConsumer() {
     providerB.emitReader(reader, { position: 6, value: 3 });
     await resumedFold;
     const receipt = positionedFoldReceipt(restore.projection);
+
     check(
       receipt !== undefined && receipt.position === 6,
       "B did not issue a successful-fold receipt",
@@ -1233,6 +1328,7 @@ function waitForPositionedStoreValue(source, predicate) {
     stop();
     resolveValue(value);
   });
+
   stop = unsubscribe;
   if (matched) stop();
   return result;
@@ -1263,6 +1359,7 @@ async function verifyPositionedStoreConsumer() {
   let restoration;
   const releaseCleanup = Promise.withResolvers();
   let releaseThenReads = 0;
+
   Object.defineProperty(releaseCleanup.promise, "then", {
     get() {
       releaseThenReads++;
@@ -1270,6 +1367,7 @@ async function verifyPositionedStoreConsumer() {
     },
   });
   let stopSourceB = () => {};
+
   try {
     sourceA = graphA.api.events(inputA);
     stopSourceA = subscribe(sourceA, (value) => sourceValuesA.push(value));
@@ -1297,12 +1395,14 @@ async function verifyPositionedStoreConsumer() {
     const firstSourceValue = waitForPositionedStoreValue(sourceA, (value) => value === 2);
     const firstTotal = waitForPositionedValue(totalA, (value) => value === 2);
     const firstCount = waitForPositionedValue(countA, (value) => value === 1);
+
     providerA.emitLive(inputA, { position: 2, value: 2 });
     await Promise.all([firstSourceValue, firstTotal, firstCount]);
 
     const secondSourceValue = waitForPositionedStoreValue(sourceA, (value) => value === 5);
     const secondTotal = waitForPositionedValue(totalA, (value) => value === 7);
     const secondCount = waitForPositionedValue(countA, (value) => value === 2);
+
     providerA.emitLive(inputA, { position: 5, value: 5 });
     await Promise.all([secondSourceValue, secondTotal, secondCount]);
 
@@ -1311,6 +1411,7 @@ async function verifyPositionedStoreConsumer() {
       (value) => value === undefined,
     );
     const thirdCount = waitForPositionedValue(countA, (value) => value === 3);
+
     providerA.emitLive(inputA, { position: 7, value: undefined });
     await Promise.all([undefinedSourceValue, thirdCount]);
 
@@ -1325,6 +1426,7 @@ async function verifyPositionedStoreConsumer() {
     );
 
     const checkpoint = capturePositionedStore(sourceA, [totalA, countA]);
+
     check(
       checkpoint.present &&
         Object.hasOwn(checkpoint, "latest") &&
@@ -1357,6 +1459,7 @@ async function verifyPositionedStoreConsumer() {
       values: checkpoint.values,
     });
     const decoded = JSON.parse(encoded);
+
     check(
       Number.isSafeInteger(decoded.after),
       "The provider codec did not recognize the captured position",
@@ -1366,6 +1469,7 @@ async function verifyPositionedStoreConsumer() {
       latest: decoded.latest.kind === "undefined" ? undefined : decoded.latest.value,
       values: decoded.values,
     };
+
     check(
       Object.hasOwn(seed, "latest") && seed.latest === undefined,
       "The provider codec did not preserve a present undefined latest event",
@@ -1380,6 +1484,7 @@ async function verifyPositionedStoreConsumer() {
     let originalAcquisition;
     let acquiredReader;
     const effectiveSignal = new AbortController().signal;
+
     providerB.acquireReader = function (request) {
       check(
         this === providerB &&
@@ -1399,6 +1504,7 @@ async function verifyPositionedStoreConsumer() {
       return originalAcquisition;
     };
     const originalReleaseReader = providerB.releaseReader;
+
     providerB.releaseReader = function (input, reader) {
       originalReleaseReader.call(this, input, reader);
       return releaseCleanup.promise;
@@ -1408,6 +1514,7 @@ async function verifyPositionedStoreConsumer() {
       key: (input) => input.id,
       source: providerB,
     });
+
     graphB = createGraph({
       contract: defineContract({
         namespace: "positioned-store-consumer-b",
@@ -1415,6 +1522,7 @@ async function verifyPositionedStoreConsumer() {
       }),
     });
     const inputB = { id: "one" };
+
     check(
       acquisitionCalls === 0 && providerB.opens.length === 0,
       "Constructing the installed positioned declaration invoked acquisition or open",
@@ -1424,12 +1532,14 @@ async function verifyPositionedStoreConsumer() {
       checkpoint: seed,
       signal: effectiveSignal,
     });
+
     check(
       acquisition === originalAcquisition && acquisitionCalls === 1,
       "The installed source replaced the original acquisition Promise or called it twice",
     );
     const envelope = await acquisition;
     const readerB = Object.getOwnPropertyDescriptor(envelope, "reader")?.value;
+
     check(
       readerB === acquiredReader && providerB.opens.length === 0,
       "The installed acquisition lost its own-data Reader or opened before restoration",
@@ -1462,6 +1572,7 @@ async function verifyPositionedStoreConsumer() {
         return Math.floor(left) === Math.floor(right);
       },
     };
+
     restoration = preparePositionedStoreRestore(
       graphB.api.events,
       inputB,
@@ -1471,6 +1582,7 @@ async function verifyPositionedStoreConsumer() {
       targetOptionsB,
     );
     const sourceB = restoration.source;
+
     check(
       providerB.opens.length === 0 &&
         sourceB.status.get() === "empty" &&
@@ -1485,6 +1597,7 @@ async function verifyPositionedStoreConsumer() {
     );
 
     const sourceValuesB = [];
+
     stopSourceB = subscribe(sourceB, (value) => sourceValuesB.push(value));
     check(
       sourceValuesB.length === 1 &&
@@ -1504,6 +1617,7 @@ async function verifyPositionedStoreConsumer() {
         return total + (event ?? 0);
       },
     });
+
     check(
       lateProjection.value.get() === 100 && lateSteps === 0 && providerB.opens.length === 0,
       "A later shared projection replayed the Store's restored prefix",
@@ -1522,6 +1636,7 @@ async function verifyPositionedStoreConsumer() {
 
     const suffixSourceValue = waitForPositionedStoreValue(sourceB, (value) => value === 4);
     const suffixCount = waitForPositionedValue(restoration.projections[1], (value) => value === 4);
+
     providerB.emitReader(readerB, { position: 8, value: 4 });
     await Promise.all([suffixSourceValue, suffixCount]);
     check(
@@ -1541,6 +1656,7 @@ async function verifyPositionedStoreConsumer() {
     );
 
     const equalityCallsBeforeWrite = equalityCallsB;
+
     sourceB.set(4.25);
     check(
       equalityCallsB > equalityCallsBeforeWrite &&
@@ -1559,6 +1675,7 @@ async function verifyPositionedStoreConsumer() {
     );
     const resourceRetirement = restoration.retired;
     const targetRetirement = graphB.retire();
+
     await expectPending(
       resourceRetirement,
       "Installed reader resource retired before its original release cleanup",
@@ -1580,6 +1697,7 @@ async function verifyPositionedStoreConsumer() {
     releaseCleanup.resolve();
     const sourceRetirement = graphA.retire();
     const targetRetirement = graphB?.retire();
+
     await Promise.all([
       sourceRetirement,
       ...(targetRetirement === undefined ? [] : [targetRetirement]),
@@ -1605,6 +1723,7 @@ async function verifyAcquisitionConsumer() {
       profile: {},
       fetch: query.fetch,
     });
+
     await verifyWarmFetchAcquisition(backend, "raw", 0, () => graph.api.query({ id: "raw" }));
     await verifyWarmFetchAcquisition(backend, "bound", 2, () => binding.member({ id: "bound" }));
   } finally {
@@ -1621,6 +1740,7 @@ async function verifyWarmFetchAcquisition(backend, label, previousCalls, acquire
 
   const first = acquire();
   const initialCalls = backend.pending(name);
+
   check(totalCalls() === previousCalls + 1, `The ${label} query did not call its callback`);
   check(initialCalls.length === 1, `The ${label} query did not start one request`);
   backend.resolve(initialCalls[0], initialValue);
@@ -1628,6 +1748,7 @@ async function verifyWarmFetchAcquisition(backend, label, previousCalls, acquire
 
   const refreshing = acquire();
   const pending = backend.pending(name);
+
   check(totalCalls() === previousCalls + 2, `Warm ${label} acquisition skipped its callback`);
   check(pending.length === 1, `Warm ${label} acquisition did not start one request`);
   check(refreshing.value.get() === initialValue, `Warm ${label} acquisition cleared its landing`);
@@ -1637,6 +1758,7 @@ async function verifyWarmFetchAcquisition(backend, label, previousCalls, acquire
   );
 
   const joined = acquire();
+
   check(totalCalls() === previousCalls + 2, `The ${label} query did not join current work`);
   check(
     joined.value.get() === initialValue &&
@@ -1681,6 +1803,7 @@ async function verifyRequiredTransferConsumer() {
           witness.store === sourceStore,
           "Required source witness lost the exact caller Store wrapper",
         );
+
       return value;
     },
     encodeFailure: (cause) => String(cause),
@@ -1690,6 +1813,7 @@ async function verifyRequiredTransferConsumer() {
           witness.store === claim.store,
           "Required target witness lost the exact passive claim wrapper",
         );
+
       return value;
     },
     decodeFailure: (failure) => new Error(String(failure)),
@@ -1705,14 +1829,17 @@ async function verifyRequiredTransferConsumer() {
   let mutationResolved = false;
   let capturePublished = false;
   let adoptionPublished = false;
+
   try {
     sourceStore = sourceGraph.api.query("one", { revalidateAfterMs: 60000.5 });
     const sourceReady = sourceStore.ready;
+
     backend.resolve(backend.pending("required.query")[0], "source value");
     await sourceReady;
     const sourceValue = computed(() =>
       sourceStore.status.get() === "ready" ? sourceStore.value.get() + "!" : "",
     );
+
     check(sourceValue.get() === "source value!", "Required source cache was not initialized");
     capture = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
@@ -1723,6 +1850,7 @@ async function verifyRequiredTransferConsumer() {
     const rootSlot = image.roots[0];
     const nativeSource = image.stores[0];
     const sourceCaller = image.callers[0];
+
     check(
       rootSlot !== undefined && nativeSource !== undefined && sourceCaller !== undefined,
       "Required image omitted its source or caller slots",
@@ -1742,12 +1870,14 @@ async function verifyRequiredTransferConsumer() {
         node.facet === "query-status" &&
         node.caller === sourceCaller.slot,
     );
+
     check(
       sourceStatusNode !== undefined && sourceStatusNode.store === nativeSource.slot,
       "Required status facet lost its exact caller slot",
     );
     const physicalWitness = capture.sources.find((witness) => witness.slot === nativeSource.slot);
     const callerWitness = capture.sources.find((witness) => witness.slot === sourceCaller.slot);
+
     check(
       physicalWitness?.store === sourceStore,
       "Physical source witness lost the actual acquisition wrapper",
@@ -1759,6 +1889,7 @@ async function verifyRequiredTransferConsumer() {
       "Caller witness lost its exact status wrapper or physical source",
     );
     const captureCommit = capture.seal();
+
     check(captureCommit !== undefined, "Required capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -1772,6 +1903,7 @@ async function verifyRequiredTransferConsumer() {
       claim.store.status.get() === "ready" ? claim.store.value.get() + "!" : "",
     );
     const targetConstruction = captureReactiveConstruction(targetValue);
+
     adoption = prepareRequiredTransferAdoption(image, {
       graphs: [targetGraph],
       sources: [
@@ -1783,6 +1915,7 @@ async function verifyRequiredTransferConsumer() {
       mappedStateWrites: [],
     });
     const adoptionCommit = adoption.seal();
+
     check(adoptionCommit !== undefined, "Required adoption did not seal");
     adoptionCommit.publish();
     adoptionPublished = true;
@@ -1796,11 +1929,13 @@ async function verifyRequiredTransferConsumer() {
     const targetStore = targetGraph.api.query("one");
     const scope = createTransferScope(targetGraph, targetGraph.api.query, targetStore);
     const carrier = Object.freeze({ request: "consumer" });
+
     operationPlan = prepareTransferOperation(
       [scope],
       [{ role: "raw", source: targetGraph.api.mutate, input: carrier }],
     );
     const operationCommit = operationPlan.seal();
+
     check(operationCommit !== undefined, "Transfer operation did not seal");
     operationCommit.publish();
     operationCommit.notifications.deliver();
@@ -1822,6 +1957,7 @@ async function verifyRequiredTransferConsumer() {
       },
     ]);
     const successorCommit = successorPlan.seal();
+
     check(
       successorCommit !== undefined && successorPlan.scopes.length === 1,
       "Transfer successor did not seal",
@@ -1832,6 +1968,7 @@ async function verifyRequiredTransferConsumer() {
 
     const retirement = prepareTransferOperationRetirement(operationPlan.operation);
     const retirementCommit = retirement.seal();
+
     check(retirementCommit !== undefined, "Transfer retirement did not seal");
     retirementCommit.publish();
     retirementCommit.notifications.deliver();
@@ -1844,6 +1981,7 @@ async function verifyRequiredTransferConsumer() {
         () => undefined,
       );
     }
+
     if (!adoptionPublished) adoption?.discard();
     if (!capturePublished) capture?.discard();
     if (adoption !== undefined) await adoption.retired.catch(() => {});
@@ -1863,13 +2001,16 @@ async function verifyTransferConsumer() {
   let targetQuery;
   let targetStream;
   let targetSession;
+
   try {
     const sourceRaw = source.graph.api.raw();
+
     check(
       sourceRaw.value.get().origin === "source",
       "Transfer source raw value was not initialized",
     );
     const sourceQuery = source.queryBinding.member({ key: "shared" });
+
     await sourceQuery.ready;
     sourceStream = source.streamBinding.member({ key: "shared" });
     sourceSession = source.streamBinding.session(sourceStream);
@@ -1878,6 +2019,7 @@ async function verifyTransferConsumer() {
       (value) => value === undefined,
       sourceSession,
     );
+
     source.queue.push(undefined);
     await sourceUndefined;
     check(
@@ -1899,6 +2041,7 @@ async function verifyTransferConsumer() {
       ],
     });
     const transported = JSON.parse(JSON.stringify(wireSnapshot));
+
     target = createTransferRuntime("target", { deferQuery: true, gateSource: true });
     const report = adopt(target.graph, transported, {
       bindings: [
@@ -1912,6 +2055,7 @@ async function verifyTransferConsumer() {
         },
       ],
     });
+
     check(report.version === 2, "V2 adoption returned the wrong report version");
     check(report.skipped.length === 0, "V2 adoption skipped a valid transfer row");
     check(report.adopted.length === 3, "V2 adoption did not keep raw, query, and stream siblings");
@@ -1932,9 +2076,11 @@ async function verifyTransferConsumer() {
     const streamRow = report.adopted.find(
       (entry) => entry.address.kind === "stream-binding" && entry.address.key === "shared",
     );
+
     check(rawRow && queryRow && streamRow, "V2 report lost a full logical address");
 
     const rawCapture = peekStore(target.graph.api.raw());
+
     check(
       rawCapture.kind === "stable" &&
         rawCapture.present &&
@@ -1945,6 +2091,7 @@ async function verifyTransferConsumer() {
 
     targetQuery = target.queryBinding.member({ key: "shared" });
     const queryCapture = peekStore(targetQuery);
+
     check(
       queryCapture.kind === "stable" &&
         queryCapture.present &&
@@ -1961,6 +2108,7 @@ async function verifyTransferConsumer() {
     targetStream = target.streamBinding.member({ key: "shared" });
     targetSession = target.streamBinding.session(targetStream);
     const streamCapture = peekStore(targetStream);
+
     check(
       targetStream.pending.get() &&
         targetStream.available.get() &&
@@ -1993,10 +2141,12 @@ async function verifyTransferConsumer() {
       (value) => value?.kind === "event",
       targetSession,
     );
+
     target.queue.push(event);
     check((await receivedEvent) === event, "The adopted stream did not accept its next real event");
     target.queue.end();
     const receipt = await targetSession.detached;
+
     check(
       receipt.terminalCapture.kind === "captured" &&
         receipt.terminalCapture.capture.kind === "stable" &&
@@ -2008,11 +2158,14 @@ async function verifyTransferConsumer() {
     source.queue.end();
     source.graph.dispose();
     if (sourceSession) await sourceSession.detached;
+
     if (target) {
       target.sourceGate.resolve();
       target.queue.end();
+
       if (target.metrics.queryFetches > 0)
         target.queryGate.resolve({ kind: "query", origin: "target" });
+
       target.graph.dispose();
       if (targetSession) await targetSession.detached;
     }
@@ -2057,6 +2210,7 @@ function createTransferRuntime(origin, { deferQuery = false, gateSource = false 
     },
     open: () => {
       metrics.streamOpens += 1;
+
       if (gateSource)
         return {
           async *[Symbol.asyncIterator]() {
@@ -2066,6 +2220,7 @@ function createTransferRuntime(origin, { deferQuery = false, gateSource = false 
             yield* queue;
           },
         };
+
       return queue;
     },
     snapshot: true,
@@ -2081,6 +2236,7 @@ function createTransferRuntime(origin, { deferQuery = false, gateSource = false 
     value: { snapshot: true },
   });
   const streamBinding = bindStream(graph, stream, graph.api.stream, { context });
+
   return {
     graph,
     query,
@@ -2101,6 +2257,7 @@ function createDeferred() {
   const promise = new Promise((accept) => {
     resolve = accept;
   });
+
   return { promise, resolve };
 }
 
@@ -2112,9 +2269,11 @@ function createAsyncQueue() {
     ended = true;
     while (waiters.length > 0) waiters.shift()({ value: undefined, done: true });
   };
+
   return {
     push(value) {
       const waiter = waiters.shift();
+
       if (waiter) waiter({ value, done: false });
       else if (!ended) values.push(value);
     },
@@ -2150,6 +2309,7 @@ function waitForValue(store, predicate, session) {
     stop();
     resolveValue(value);
   });
+
   stop = unsubscribe;
   if (matched) stop();
   session.detached.then(() => {
@@ -2185,6 +2345,7 @@ async function verifyBoundConsumer() {
   let originalReadResolved = false;
   let stopProgress = () => {};
   let contextRetirement;
+
   try {
     const context = createBindingContext(graph);
     const siblingContext = createBindingContext(graph);
@@ -2219,15 +2380,18 @@ async function verifyBoundConsumer() {
     });
     const override = predictionFor(mutation, numbers.target(number), () => 9);
     const running = save.member({ id: "one" }, { optimistic: [override] });
+
     check(
       number.value.get() === 9 && label.value.get() === "label:1",
       "Physical prediction override crossed profiles",
     );
     const pending = backend.pending("bound.save");
+
     check(pending.length === 1, "Bound mutation did not dispatch exactly once");
     backend.resolve(pending[0], "saved");
     check((await running).receipt === "saved", "Bound completion lost its exact result");
     const refreshes = backend.pending("bound.read");
+
     check(refreshes.length === 2, "Bound effect did not refresh both existing profiles");
     for (const call of refreshes) backend.resolve(call, 12);
     await Promise.all([number.ready, label.ready]);
@@ -2239,11 +2403,13 @@ async function verifyBoundConsumer() {
     const observation = rootObserveQueryProgress(number);
     const progressEvents = [];
     let retirementFromProgress;
+
     stopProgress = observation.subscribe((event) => {
       progressEvents.push(event);
       if (event.kind !== "report" || retirementFromProgress !== undefined) return;
 
       let capture;
+
       try {
         capture = { kind: "captured", snapshot: observation.capture() };
       } catch (error) {
@@ -2251,12 +2417,14 @@ async function verifyBoundConsumer() {
       }
 
       let result;
+
       try {
         contextRetirement = context.retire();
         result = { kind: "returned", promise: contextRetirement };
       } catch (error) {
         result = { kind: "threw", error };
       }
+
       retirementFromProgress = { event, capture, result };
     });
 
@@ -2266,6 +2434,7 @@ async function verifyBoundConsumer() {
       (error) => ({ kind: "rejected", error }),
     );
     const activeReads = backend.pending("bound.read");
+
     originalRead = activeReads[0];
     check(activeReads.length === 1, "Progress retirement did not start exactly one original read");
     check(typeof reportNumberProgress === "function", "Bound query did not expose its reporter");
@@ -2275,6 +2444,7 @@ async function verifyBoundConsumer() {
       (error) => ({ kind: "rejected", error }),
     );
     const firstProgress = { source: "installed-bound-query", sequence: 1 };
+
     reportNumberProgress(firstProgress);
 
     check(
@@ -2302,6 +2472,7 @@ async function verifyBoundConsumer() {
     );
 
     const readyOutcome = await disposedReady;
+
     check(
       readyOutcome.kind === "rejected" &&
         readyOutcome.error instanceof Fault &&
@@ -2309,6 +2480,7 @@ async function verifyBoundConsumer() {
       "A bound query ready read did not retain its disposed Fault after context retirement",
     );
     const acceptedReportCount = progressEvents.filter((event) => event.kind === "report").length;
+
     check(
       acceptedReportCount === 1,
       "The original bound request delivered an unexpected progress report",
@@ -2327,6 +2499,7 @@ async function verifyBoundConsumer() {
     backend.resolve(originalRead, 13);
     originalReadResolved = true;
     const [originalRevalidation] = await Promise.all([revalidationOutcome, contextRetirement]);
+
     check(
       originalRevalidation.kind === "resolved",
       "The original bound revalidation did not resolve after its backend work settled",
@@ -2342,6 +2515,7 @@ async function verifyBoundConsumer() {
       backend.resolve(originalRead, 13);
       originalReadResolved = true;
     }
+
     stopProgress();
     graph.dispose();
     if (contextRetirement !== undefined) await contextRetirement.catch(() => {});
@@ -2362,21 +2536,25 @@ async function verifyBoundStreamConsumer() {
   const graph = createGraph({
     contract: defineContract({ namespace: "packed-stream", operations: { stream } }),
   });
+
   try {
     const binding = bindStream(graph, stream, graph.api.stream, {
       context: createBindingContext(graph),
     });
     const empty = rootInspectBoundAddress(binding, storeKey("one"));
+
     check(
       empty.kind === "stable" && empty.state === "empty",
       "Packed address did not inspect empty",
     );
     const a = binding.member("one", { expectEmpty: empty.condition });
     const ticket = binding.session(a);
+
     backend.emit("packed.events", undefined);
     backend.end("packed.events");
     const receipt = await ticket.detached;
     const terminal = receipt.terminalCapture;
+
     check(
       terminal.kind === "captured" &&
         terminal.capture.kind === "stable" &&
@@ -2385,6 +2563,7 @@ async function verifyBoundStreamConsumer() {
       "Packed stream lost present undefined at native retirement",
     );
     const b = binding.member("one");
+
     check(
       a.identity === b.identity && ticket.identity !== binding.session(b).identity,
       "Packed stream did not separate native sessions on the physical entry",
@@ -2399,11 +2578,13 @@ async function verifyBoundStreamConsumer() {
       "Packed address stamp survived acquisition",
     );
     let rejected = false;
+
     try {
       a.set(99);
     } catch (cause) {
       rejected = cause instanceof TypeError;
     }
+
     check(rejected && !b.available.get(), "Retired packed wrapper wrote into its successor");
   } finally {
     graph.dispose();
