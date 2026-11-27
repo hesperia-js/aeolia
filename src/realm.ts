@@ -1749,8 +1749,9 @@ function closedRequiredCopy<T>(input: T): T {
         "Native handles and class instances cannot enter required transfer encoding",
       );
 
-    const output = array ? new Array(value.length) : Object.create(null);
+    const output = array ? [] : Object.create(null);
 
+    if (array) output.length = value.length;
     copies.set(value, output);
     pending.push({ input: value, output });
     return output;

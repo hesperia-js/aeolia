@@ -183,6 +183,7 @@ describe("context-bound mutation effects", () => {
               };
             },
             return(this: unknown) {
+              // oxlint-disable-next-line typescript/no-this-alias -- The fixture records the actual native receiver.
               closeReceiver = this;
               closes += 1;
               return { done: true, value: undefined };
@@ -193,6 +194,7 @@ describe("context-bound mutation effects", () => {
             get() {
               if (phase === "iterator getter") retire();
               return function (this: unknown) {
+                // oxlint-disable-next-line typescript/no-this-alias -- The fixture records the actual native receiver.
                 factoryReceiver = this;
                 factories += 1;
                 if (phase === "factory") retire();
@@ -314,6 +316,7 @@ describe("context-bound mutation effects", () => {
       let closes = 0;
       const iterator = {
         next(this: unknown): never {
+          // oxlint-disable-next-line typescript/no-this-alias -- The fixture records the actual native receiver.
           nextReceiver = this;
           throw failure;
         },
@@ -325,6 +328,7 @@ describe("context-bound mutation effects", () => {
 
       Object.defineProperty(values, Symbol.iterator, {
         value(this: unknown) {
+          // oxlint-disable-next-line typescript/no-this-alias -- The fixture records the actual native receiver.
           factoryReceiver = this;
           return iterator;
         },
@@ -435,6 +439,7 @@ describe("context-bound mutation effects", () => {
     let retirement: Promise<void> | undefined;
     const then = new Proxy(
       function (this: unknown, resolve: (value: readonly PreparedEffect[]) => void) {
+        // oxlint-disable-next-line typescript/no-this-alias -- The fixture records the actual native receiver.
         receiver = this;
         resolve([]);
       },
@@ -449,6 +454,7 @@ describe("context-bound mutation effects", () => {
         },
       },
     );
+    // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
     const thenable = { then } as unknown as PromiseLike<readonly PreparedEffect[]>;
 
     try {
@@ -644,6 +650,7 @@ describe("context-bound mutation effects", () => {
             .existing(phase.selectedInput)
             .map((target) => phase.original(target.forBinding(f.native)!));
           const thenable: PromiseLike<readonly PreparedEffect[]> = {
+            // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
             then(resolve, reject) {
               order.push("then");
               return Promise.resolve(instructions).then(resolve, reject);
@@ -710,6 +717,7 @@ describe("context-bound mutation effects", () => {
       let prepareCalls = 0;
       let thenCalls = 0;
       const revokedThenable = {
+        // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
         then(resolve: (value: readonly PreparedEffect[]) => unknown) {
           thenCalls += 1;
           return Promise.resolve(resolve([]));
@@ -1243,6 +1251,7 @@ describe("context-bound mutation effects", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
     const providerResult = Object.defineProperty({}, "then", {
       get() {
         if (!providerRead) {
@@ -1317,6 +1326,7 @@ describe("context-bound mutation effects", () => {
     let callbackResult: unknown;
     let providerResolved = false;
 
+    // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
     Object.defineProperty(provider.promise, "then", {
       configurable: true,
       value: function (

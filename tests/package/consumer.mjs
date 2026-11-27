@@ -1360,6 +1360,7 @@ async function verifyPositionedStoreConsumer() {
   const releaseCleanup = Promise.withResolvers();
   let releaseThenReads = 0;
 
+  // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
   Object.defineProperty(releaseCleanup.promise, "then", {
     get() {
       releaseThenReads++;

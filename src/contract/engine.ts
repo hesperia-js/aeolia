@@ -4078,7 +4078,7 @@ export function prepareNativePassiveTransferClaims(
         throw new TypeError("Passive claims disagree on native source kind");
 
       sourceRows.set(record.runtime, {
-        ...(priorSource ?? {}),
+        ...priorSource,
         ...(record.sourceAfter === undefined ? {} : { source: record.sourceAfter }),
         ...(record.streamSourceAfter === undefined
           ? {}

@@ -287,7 +287,10 @@ export function drainResetCleanups<C extends Contract>(state: GraphRuntimeState<
   for (const scope of state.resetCleanupScopes) {
     if (scope.active) continue;
 
-    for (const cleanup of [...scope.pending]) {
+    // Cleanup can reenter reset or retirement while this scope drains.
+    const cleanups = [...scope.pending];
+
+    for (const cleanup of cleanups) {
       try {
         cleanup();
       } catch (error) {
@@ -672,6 +675,7 @@ export function resetGraph<C extends Contract>(state: GraphRuntimeState<C>): Pro
       finishPhysicalWork(physical);
     } catch (error) {
       observeUnreturned();
+      // oxlint-disable-next-line eslint/no-unsafe-finally -- A cleanup failure prevents returning the reset promise.
       throw error;
     }
   }

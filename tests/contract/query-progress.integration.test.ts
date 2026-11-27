@@ -1111,6 +1111,7 @@ describe("query progress", () => {
         key: (input) => input,
         fetch: (_input, options) => {
           report = options.reportProgress;
+          // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
           return Object.defineProperty(work.promise, "then", {
             configurable: true,
             value: function (
@@ -2799,6 +2800,7 @@ describe("query progress", () => {
     });
 
     try {
+      // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
       const shadowed = Object.defineProperty(Promise.resolve(), "then", { value: undefined });
       const observationCause = new Error("authority Promise observation failed");
       const observationFault = Object.defineProperty(Promise.resolve(), "constructor", {
