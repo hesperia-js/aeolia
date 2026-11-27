@@ -338,9 +338,11 @@ describe("canonical Signals graph behavior", () => {
       const sourceState = new Signal.State(1);
       const sourceDerived = new Signal.Computed(() => sourceState.get() * 2);
       const sourceServerState = new Signal.State("server");
+
       expect(sourceDerived.get()).toBe(2);
       const sourceDerivedConstruction = captureReactiveConstruction(sourceDerived);
       const sourceServerConstruction = captureReactiveConstruction(sourceServerState);
+
       capture = prepareRequiredTransferCapture({
         graphs: [sourceGraph],
         roots: [
@@ -350,6 +352,7 @@ describe("canonical Signals graph behavior", () => {
         codec,
       });
       const captureCommit = capture.seal();
+
       if (captureCommit === undefined) throw new Error("The required capture did not seal");
       captureCommit.publish();
       capturePublished = true;
@@ -366,15 +369,19 @@ describe("canonical Signals graph behavior", () => {
       const targetStateConstruction = captureReactiveConstruction(targetState);
       const targetDerivedConstruction = captureReactiveConstruction(targetDerived);
       const targetServerConstruction = captureReactiveConstruction(targetServerState);
+
       targetState.set(5);
 
       const image = capture.image;
       const derivedSlot = image.roots[0]!;
       const derivedRow = image.nodes.find((node) => node.slot === derivedSlot);
+
       if (derivedRow === undefined) throw new Error("The required computed node is missing");
       const sourceStateSlot = derivedRow.sources[0];
+
       if (sourceStateSlot === undefined) throw new Error("The computed dependency is missing");
       const serverStateSlot = image.roots[1]!;
+
       expect(() =>
         prepareRequiredTransferAdoption(image, {
           graphs: [targetGraph],
@@ -400,11 +407,13 @@ describe("canonical Signals graph behavior", () => {
       expect(targetDerivedRuns).toBe(1);
     } finally {
       if (!capturePublished) capture?.discard();
+
       if (capture !== undefined)
         await capture.retired.then(
           () => undefined,
           () => undefined,
         );
+
       sourceGraph.dispose();
       targetGraph.dispose();
     }
@@ -432,6 +441,7 @@ describe("canonical Signals graph behavior", () => {
       const sourceState = new Signal.State(1);
       const sourceDerived = new Signal.Computed(() => sourceState.get() * 2);
       const sourceServerState = new Signal.State("server");
+
       expect(sourceDerived.get()).toBe(2);
       capture = prepareRequiredTransferCapture({
         graphs: [sourceGraph],
@@ -445,6 +455,7 @@ describe("canonical Signals graph behavior", () => {
         codec,
       });
       const captureCommit = capture.seal();
+
       if (captureCommit === undefined) throw new Error("The required capture did not seal");
       captureCommit.publish();
       capturePublished = true;
@@ -461,6 +472,7 @@ describe("canonical Signals graph behavior", () => {
       const targetStateConstruction = captureReactiveConstruction(targetState);
       const targetDerivedConstruction = captureReactiveConstruction(targetDerived);
       const targetServerConstruction = captureReactiveConstruction(targetServerState);
+
       expect(targetDerived.get()).toBe(2);
       targetState.set(5);
       expect(targetDerived.get()).toBe(10);
@@ -469,8 +481,10 @@ describe("canonical Signals graph behavior", () => {
       const image = capture.image;
       const derivedSlot = image.roots[0]!;
       const derivedRow = image.nodes.find((node) => node.slot === derivedSlot);
+
       if (derivedRow === undefined) throw new Error("The required computed node is missing");
       const sourceStateSlot = derivedRow.sources[0];
+
       if (sourceStateSlot === undefined) throw new Error("The computed dependency is missing");
       adoption = prepareRequiredTransferAdoption(image, {
         graphs: [targetGraph],
@@ -488,8 +502,10 @@ describe("canonical Signals graph behavior", () => {
         mappedStateWrites: [],
       });
       const adoptionCommit = adoption.seal();
+
       if (adoptionCommit === undefined)
         throw new Error("The compatible warm adoption did not seal");
+
       adoptionCommit.publish();
       adoptionPublished = true;
       expect(targetState.get()).toBe(5);
@@ -501,16 +517,19 @@ describe("canonical Signals graph behavior", () => {
     } finally {
       if (!adoptionPublished) adoption?.discard();
       if (!capturePublished) capture?.discard();
+
       if (adoption !== undefined)
         await adoption.retired.then(
           () => undefined,
           () => undefined,
         );
+
       if (capture !== undefined)
         await capture.retired.then(
           () => undefined,
           () => undefined,
         );
+
       sourceGraph.dispose();
       targetGraph.dispose();
     }

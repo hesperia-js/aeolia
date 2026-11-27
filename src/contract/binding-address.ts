@@ -114,6 +114,7 @@ function readerAddressSnapshots(
 function readerAddressSnapshotCurrent(snapshot: ReaderAddressSnapshot): boolean {
   const { runtime } = snapshot;
   const predictions = reactiveInternal.signalValue(runtime.predictionStack);
+
   return (
     runtime.incarnation === snapshot.incarnation &&
     runtime.valueRevision === snapshot.revision &&
@@ -157,6 +158,7 @@ const emptyConditions = new WeakMap<object, { readonly facts: AddressFacts; used
 /** @internal Import authority belongs to the actual base, without retaining its lifetime. */
 export function importedBaselineCurrent(runtime: StoreRuntime<unknown>): boolean {
   const seed = runtime.importedBaseline;
+
   return (
     seed !== undefined &&
     runtime.binding?.kind === "stream" &&
@@ -190,6 +192,7 @@ export function boundAddressOccupied(binding: StoreBindingRuntime, key: string):
         (reader.stream !== undefined && !reader.stream.ended) ||
         reader.boundRetirement?.phase === "retiring"),
   );
+
   return (
     readerOccupied ||
     (binding.addresses.get(key)?.operations.size ?? 0) > 0 ||
@@ -214,6 +217,7 @@ function factsCurrent(facts: AddressFacts): boolean {
     (reader) => String(reader.key) === facts.key,
   );
   const readerSnapshotsCurrent = facts.readerSnapshots.every(readerAddressSnapshotCurrent);
+
   return (
     !state.disposed &&
     !binding.context.disposed &&
@@ -258,22 +262,30 @@ export function inspectBoundAddress(
   },
 ): BoundAddressInspection {
   const binding = queryBindingByHandle.get(handle) ?? streamBindingByHandle.get(handle);
+
   if (binding === undefined) throw new TypeError("Address inspection requires a genuine binding");
   assertBindingContextOpen(binding.context);
   const checkedKey = storeKey(key);
+
   if (
     options !== undefined &&
     (options === null || typeof options !== "object" || Array.isArray(options))
   )
     throw new TypeError("Invalid bound address inspection options");
+
   const expected: unknown = options === undefined ? undefined : Reflect.get(options, "expected");
+
   assertBindingContextOpen(binding.context);
+
   if (expected !== undefined) {
     const previous = stamps.get(expected as object);
+
     if (previous === undefined || previous.binding !== binding || previous.key !== checkedKey)
       throw new TypeError("Address stamp does not belong to this binding and key");
+
     if (!factsCurrent(previous)) return Object.freeze({ kind: "changed" });
   }
+
   // The first native transition installs a row that stays until reset or retirement.
   const address = binding.addresses.get(checkedKey);
   const runtime = binding.stores.get(checkedKey);
@@ -299,18 +311,23 @@ export function inspectBoundAddress(
     operations: address?.operations.size ?? 0,
     empty: false,
   };
+
   if (!factsCurrent(facts)) return Object.freeze({ kind: "changed" });
   const capture = runtime === undefined ? undefined : captureStoreRuntime(runtime);
+
   if (capture?.kind === "changed" || !factsCurrent(facts))
     return Object.freeze({ kind: "changed" });
+
   const readerCaptures = facts.readerSnapshots.map((snapshot) =>
     captureStoreRuntime(snapshot.runtime),
   );
+
   if (
     readerCaptures.some((readerCapture) => readerCapture.kind === "changed") ||
     !factsCurrent(facts)
   )
     return Object.freeze({ kind: "changed" });
+
   const present =
     (capture?.kind === "stable" && capture.present) ||
     readerCaptures.some(
@@ -322,10 +339,14 @@ export function inspectBoundAddress(
   const occupied = present || boundAddressOccupied(binding, checkedKey);
   const completed = { ...facts, empty: !occupied };
   const stamp = Object.freeze({}) as BoundAddressStamp;
+
   stamps.set(stamp, completed);
+
   if (occupied)
     return Object.freeze({ kind: "stable", state: "occupied", present, basePresent, stamp });
+
   const condition = Object.freeze({}) as BoundAddressEmpty;
+
   emptyConditions.set(condition, { facts: completed, used: false });
   return Object.freeze({
     kind: "stable",
@@ -344,28 +365,37 @@ export function reserveBoundStreamAddress(
   condition: unknown,
 ): object {
   assertBindingContextOpen(binding.context);
+
   if (condition !== undefined) {
     const record = emptyConditions.get(condition as object);
+
     if (
       record === undefined ||
       record.facts.binding !== binding ||
       record.facts.key !== String(key)
     )
       throw new TypeError("Empty condition does not belong to this stream address");
+
     if (record.used || !record.facts.empty || !factsCurrent(record.facts))
       throw new TypeError("The inspected stream address is no longer empty");
+
     const address = bindingAddress(binding, String(key));
+
     noteTransferChange(binding);
     noteTransferChange(binding.handle);
     noteTransferChange(address);
     const token = beginBindingAddress(binding, String(key))!;
+
     noteTransferChange(condition as object);
     record.used = true;
     return token;
   }
+
   const address = bindingAddress(binding, String(key));
+
   if (address.operations.size !== 0)
     throw new TypeError("The bound stream address is transitioning");
+
   noteTransferChange(binding);
   noteTransferChange(binding.handle);
   noteTransferChange(address);

@@ -57,9 +57,11 @@ describe("mutation effects and failure routing", () => {
       contract: defineContract({ namespace: "operations", operations: { query, rename } }),
     });
     const store = graph.api.query({ id: "optimistic" });
+
     backend.resolve(backend.calls[0]!, { id: "base" });
     await flush();
     const mutation = graph.api.rename({ id: "optimistic", name: "next" });
+
     expect(store.value.get()).toEqual({ id: "base-optimistic" });
     backend.resolve(backend.calls[1]!, "ok");
     await mutation;
@@ -88,6 +90,7 @@ describe("mutation effects and failure routing", () => {
       contract: defineContract({ namespace: "operations", operations: { query, mutation } }),
     });
     const store = graph.api.query(undefined);
+
     await store.ready;
     expect(fetches).toBe(1);
     await graph.api.mutation(undefined);
@@ -126,8 +129,10 @@ describe("mutation effects and failure routing", () => {
       contract: defineContract({ namespace: "operations", operations: { query, failing, reads } }),
     });
     const store = graph.api.query({ id: "prediction" });
+
     store.set({ id: "base" });
     const failure = graph.api.failing({ id: "prediction" });
+
     expect(store.value.get()).toEqual({ id: "base-optimistic" });
     expect(activeDuringPrediction).toBe(true);
     backend.reject(
@@ -146,6 +151,7 @@ describe("mutation effects and failure routing", () => {
         optimistic: new Map([[storeKey("users/prediction"), () => store.value.get()]]),
       },
     );
+
     expect(store.value.get()).toEqual({ id: "base" });
     expect(faults.some((fault) => fault.kind === "prediction")).toBe(true);
     backend.resolve(
@@ -178,6 +184,7 @@ describe("mutation effects and failure routing", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "operations", operations: { query, mutation } }),
     });
+
     graph.api.query(undefined);
     await flush();
     expect(calls[0]?.graph).toBe(graph.id);
@@ -200,6 +207,7 @@ describe("mutation effects and failure routing", () => {
               firstSelection = false;
               return input;
             }
+
             throw new Error("bad selector");
           },
           on: "invalidate",
@@ -214,10 +222,12 @@ describe("mutation effects and failure routing", () => {
     const contract = defineContract({ namespace: "operations", operations: { query, broken } });
     const graph = createGraph({ contract });
     const store = graph.api.query({ id: "effects" });
+
     store.set({ id: "effects" });
     const faults: Fault[] = [];
     const stop = onFault(graph, (fault) => faults.push(fault));
     const promise = graph.api.broken({ id: "effects" });
+
     backend.resolve(
       backend.calls.find((call) => call.name === "effects.broken")!,
       "ok",

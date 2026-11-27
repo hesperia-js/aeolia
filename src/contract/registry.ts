@@ -58,8 +58,10 @@ export function registerDormantStoreHandle<T>(
 ): void {
   if (handle === runtime.store || runtimeByStore.has(handle) || queryRuntimeByStore.has(handle))
     throw new TypeError("A passive claim must use a fresh Store wrapper");
+
   if (typeof isPublished !== "function")
     throw new TypeError("Expected a native publication predicate");
+
   if (typeof query !== "boolean") throw new TypeError("Expected a native Store role");
   noteTransferChange(handle);
   dormantStoreHandles.set(handle, { runtime, isPublished, query });
@@ -70,13 +72,16 @@ export function registerDormantStoreHandle<T>(
 /** @internal Refuses a pre-registered passive Store until its transfer publishes. */
 export function assertStoreHandlePublished(handle: object): void {
   const claim = dormantStoreHandles.get(handle);
+
   if (claim === undefined) return;
+
   if (
     runtimeByStore.get(handle) !== claim.runtime ||
     (claim.query && queryRuntimeByStore.get(handle) !== claim.runtime) ||
     (!claim.query && queryRuntimeByStore.has(handle))
   )
     throw new TypeError("The passive Store handle has changed");
+
   if (!claim.isPublished()) throw new TypeError("The passive Store handle is still dormant");
 }
 
@@ -85,12 +90,14 @@ export const graphRuntimeByGraph = new WeakMap<object, GraphRuntimeState<any>>()
 
 export function registerProjection(graph: Graph, projection: GraphProjection): Unsubscribe {
   const state = graphRuntimeByGraph.get(graph as object);
+
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
   noteTransferChange(state);
   noteTransferChange(projection);
   state.projections.add(projection);
   let active = true;
+
   return () => {
     if (!active) return;
     noteTransferChange(state);
@@ -102,6 +109,7 @@ export function registerProjection(graph: Graph, projection: GraphProjection): U
 
 export function reportGraphContinuationError(graph: Graph, error: unknown): void {
   const state = graphRuntimeByGraph.get(graph as object);
+
   if (state === undefined || state.disposed) return;
   reportContinuationError(state, error);
 }
@@ -109,16 +117,21 @@ export function reportGraphContinuationError(graph: Graph, error: unknown): void
 export function runtimeForStore(value: unknown): StoreRuntime<unknown> | undefined {
   if (value === null || (typeof value !== "object" && typeof value !== "function"))
     return undefined;
+
   assertStoreHandlePublished(value as object);
   let current: object | null = value;
+
   while (current !== null) {
     const runtime = runtimeByStore.get(current);
+
     if (runtime !== undefined) {
       assertStoreHandlePublished(current);
       return runtime;
     }
+
     current = Object.getPrototypeOf(current) as object | null;
   }
+
   return undefined;
 }
 
@@ -137,6 +150,7 @@ export function assertBindingContextOpen(context: BindingContextRuntime): void {
 
 export function isQueryTargetCurrent(target: QueryTargetRuntime): boolean {
   const { runtime, binding, incarnation } = target;
+
   return (
     !binding.context.disposed &&
     !binding.context.state.disposed &&
@@ -152,6 +166,7 @@ export function captureQueryTarget<Q extends QueryDefinition<any, any, any, any>
 ): TypedTarget<Q, V> | undefined {
   assertBindingContextOpen(binding.context);
   const incarnation = runtime.incarnation;
+
   if (runtime.disposed) throw new Fault("disposed", [String(runtime.key)]);
   if (runtime.dropped || incarnation === undefined) return undefined;
   const record: QueryTargetRuntime = { binding, runtime, incarnation };
@@ -161,12 +176,14 @@ export function captureQueryTarget<Q extends QueryDefinition<any, any, any, any>
     profile: binding.profile,
     forBinding<W>(candidate: QueryBinding<Q, W>): TypedTarget<Q, W> | undefined {
       const checked = queryBindingByHandle.get(candidate);
+
       if (checked === undefined) throw new TypeError("The value is not an Aeolia query binding");
       assertBindingContextOpen(checked.context);
       if (checked !== binding || !isQueryTargetCurrent(record)) return undefined;
       return target as unknown as TypedTarget<Q, W>;
     },
   }) as TypedTarget<Q, V>;
+
   queryTargetByHandle.set(target, record);
   return target;
 }
@@ -184,24 +201,32 @@ export function captureBoundProducer<
   ) => NoInfer<V>,
 ): BoundProducerRuntime {
   const record = queryTargetByHandle.get(target);
+
   if (record === undefined || typeof producer !== "function")
     throw new TypeError("Prediction requires a genuine target and a producer");
+
   assertBindingContextOpen(record.binding.context);
   const state = record.binding.context.state;
+
   if (!state.mutationDefinitions.has(mutation))
     throw new TypeError("Prediction target is not affected by this mutation");
+
   const effects = mutation.affects;
+
   assertBindingContextOpen(record.binding.context);
   const some = effects.some;
+
   assertBindingContextOpen(record.binding.context);
   const matched = Reflect.apply(some, effects, [
     (effect: (typeof effects)[number]) => {
       assertBindingContextOpen(record.binding.context);
       const query = effect.query;
+
       assertBindingContextOpen(record.binding.context);
       return query === record.binding.definition;
     },
   ]);
+
   assertBindingContextOpen(record.binding.context);
   if (!matched) throw new TypeError("Prediction target is not affected by this mutation");
   return {
@@ -254,6 +279,7 @@ export const positionedOpenRequestByOpenOptions = new WeakMap<
 
 export function bindingAddress(binding: StoreBindingRuntime, key: string): BindingAddressRuntime {
   let address = binding.addresses.get(key);
+
   if (address === undefined) {
     address = { binding, key, operations: new Set(), guard: {} };
     noteTransferChange(binding);
@@ -261,11 +287,13 @@ export function bindingAddress(binding: StoreBindingRuntime, key: string): Bindi
     noteTransferChange(address);
     binding.addresses.set(key, address);
   }
+
   return address;
 }
 
 export function changeBoundAddress<T>(runtime: StoreRuntime<T>): void {
   const address = storeBindingAddress(runtime);
+
   if (address !== undefined) {
     noteTransferChange(runtime);
     noteTransferChange(address.binding);
@@ -273,8 +301,10 @@ export function changeBoundAddress<T>(runtime: StoreRuntime<T>): void {
     noteTransferChange(address);
     address.guard = {};
   }
+
   if (runtime.readerScope !== undefined && runtime.binding !== undefined) {
     const aggregate = bindingAddress(runtime.binding, String(runtime.key));
+
     noteTransferChange(runtime);
     noteTransferChange(runtime.binding);
     noteTransferChange(runtime.binding.handle);
@@ -305,24 +335,28 @@ export function storeBindingAddress<T>(
 
 export function beginStoreAddress<T>(runtime: StoreRuntime<T>): object | undefined {
   const address = storeBindingAddress(runtime);
+
   if (address === undefined) return undefined;
   const aggregate =
     runtime.readerScope !== undefined && runtime.binding !== undefined
       ? bindingAddress(runtime.binding, String(runtime.key))
       : undefined;
   const token = {};
+
   noteTransferChange(runtime);
   noteTransferChange(address.binding);
   noteTransferChange(address.binding.handle);
   noteTransferChange(address);
   address.operations.add(token);
   address.guard = {};
+
   if (aggregate !== undefined && aggregate !== address) {
     noteTransferChange(aggregate);
     noteTransferChange(aggregate.binding.handle);
     aggregate.operations.add(token);
     aggregate.guard = {};
   }
+
   storeAddressOperations.set(token, {
     runtime: runtime as StoreRuntime<unknown>,
     address,
@@ -334,6 +368,7 @@ export function beginStoreAddress<T>(runtime: StoreRuntime<T>): object | undefin
 export function endStoreAddress<T>(runtime: StoreRuntime<T>, token: object | undefined): void {
   if (token === undefined) return;
   const operation = storeAddressOperations.get(token);
+
   if (operation === undefined || operation.runtime !== runtime) return;
   noteTransferChange(runtime);
   noteTransferChange(operation.address.binding);
@@ -341,6 +376,7 @@ export function endStoreAddress<T>(runtime: StoreRuntime<T>, token: object | und
   noteTransferChange(operation.address);
   storeAddressOperations.delete(token);
   if (operation.address.operations.delete(token)) operation.address.guard = {};
+
   if (operation.aggregate?.operations.has(token)) {
     noteTransferChange(operation.aggregate);
     noteTransferChange(operation.aggregate.binding.handle);
@@ -356,6 +392,7 @@ export function beginBindingAddress(
   if (binding === undefined) return undefined;
   const address = bindingAddress(binding, key);
   const token = {};
+
   noteTransferChange(binding);
   noteTransferChange(binding.handle);
   noteTransferChange(address);
@@ -371,6 +408,7 @@ export function endBindingAddress(
 ): void {
   if (binding === undefined || token === undefined) return;
   const address = binding.addresses.get(key);
+
   if (address?.operations.has(token)) {
     noteTransferChange(binding);
     noteTransferChange(binding.handle);
@@ -387,6 +425,7 @@ export function captureStoreRuntime<T>(
 ): StoreCapture<T> {
   assertStoreOpen(runtime);
   if (runtime.binding !== undefined) assertBindingContextOpen(runtime.binding.context);
+
   if (
     retirement !== undefined &&
     (retirement.runtime !== runtime ||
@@ -395,8 +434,10 @@ export function captureStoreRuntime<T>(
       retirement.retirement === undefined)
   )
     throw new TypeError("Invalid native retirement capture authority");
+
   if (retirement === undefined && (runtime.transitioning || runtime.boundRetirement !== undefined))
     return Object.freeze({ kind: "changed" });
+
   const incarnation = runtime.incarnation;
   const revision = runtime.valueRevision;
   const epoch = runtime.graph.__runtime.resetEpoch;
@@ -414,6 +455,7 @@ export function captureStoreRuntime<T>(
         retirement.phase === "retiring" &&
         retirement.retirement?.token === retirementToken);
   const value = reactiveInternal.nativePeek(runtime.value, current);
+
   if (!current()) return Object.freeze({ kind: "changed" });
   const present =
     runtime.baseAvailable ||
@@ -427,5 +469,6 @@ export function captureStoreRuntime<T>(
         value: value as T,
       }
     : { kind: "stable", identity: runtime.identity, valueRevision: revision, present: false };
+
   return Object.freeze(capture);
 }

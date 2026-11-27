@@ -27,6 +27,7 @@ it.each([false, true])(
     const contract = contractWithStore(definition);
     const source = createGraph({ contract });
     const target = createGraph({ contract });
+
     try {
       source.api.local();
       const store = target.api.local();
@@ -36,6 +37,7 @@ it.each([false, true])(
         ...encoded,
         entries: encoded.entries.map((row) => ({ ...row, generation })),
       } as unknown as typeof encoded;
+
       adopt(target, incoming, {});
       const before = peekStore(store);
       let callbacks = 0;
@@ -49,12 +51,14 @@ it.each([false, true])(
       ).toThrow(RangeError);
 
       expect(callbacks).toBe(reenter ? 1 : 0);
+
       if (reenter) {
         expect(store.value.get()).toBe(101);
       } else {
         expect(peekStore(store)).toEqual(before);
         expect(store.value.get()).toBe(4);
       }
+
       expect(Number(snapshot(target, { version: 2 }).entries[0]?.generation)).toBe(
         Number.MAX_SAFE_INTEGER,
       );
@@ -74,6 +78,7 @@ async function flush(): Promise<void> {
 describe("Aeolia graph and stores", () => {
   it("rejects invalid graph bounds as contract faults", () => {
     const contract = defineContract({ namespace: "graph-tests", operations: {} });
+
     for (const options of [
       { contract, idleMs: Number.POSITIVE_INFINITY },
       { contract, maxPredictions: 0 },
@@ -154,6 +159,7 @@ describe("Aeolia graph and stores", () => {
       idleMs: 10,
     });
     const store = graph.at("temporary");
+
     store.set("value");
     await flush();
     jest.advanceTimersByTime(11);
@@ -167,6 +173,7 @@ describe("Aeolia graph and stores", () => {
     const graph = createGraph({ contract: contractWithStore(definition), idleMs: 1 });
     const store = graph.store(definition);
     const stop = watch(store.value, () => undefined);
+
     await flush();
     jest.advanceTimersByTime(100);
     expect(store.value.get()).toBe(1);
@@ -181,6 +188,7 @@ describe("Aeolia graph and stores", () => {
     const right = createGraph({ contract });
     const leftStore = left.store(definition);
     const rightStore = right.store(definition);
+
     leftStore.set(7);
 
     expect(rightStore.value.get()).toBe(0);
@@ -205,6 +213,7 @@ describe("Aeolia graph and stores", () => {
     const faults: Fault[] = [];
     const stopFaults = onFault(graph, (fault) => faults.push(fault));
     const store = graph.store(definition);
+
     store.set(2);
 
     expect(store.value.get()).toBe(2);
@@ -231,6 +240,7 @@ describe("Aeolia graph and stores", () => {
         reported.push(error);
       },
     });
+
     onFault(graph, () => {
       throw marker;
     });
@@ -258,6 +268,7 @@ describe("Aeolia graph and stores", () => {
     });
     const store = graph.api.query({ id: "7" });
     const call = backend.calls[0]!;
+
     graph.dispose();
     graph.dispose();
 
@@ -285,6 +296,7 @@ describe("Aeolia graph and stores", () => {
     });
     const store = graph.api.query({ id: "moved" });
     const call = backend.calls[0]!;
+
     store.set({ id: "local" });
     jest.advanceTimersByTime(5);
     backend.resolve(call, { id: "late" });
@@ -308,6 +320,7 @@ describe("Aeolia graph and stores", () => {
     });
     const store = graph.api.query({ id: "status" });
     const call = backend.calls[0]!;
+
     backend.resolve(call, "ready");
     await flush();
     const derived = computed(() => store.status.get());
@@ -315,6 +328,7 @@ describe("Aeolia graph and stores", () => {
     const stop = watch(derived, () => {
       notifications += 1;
     });
+
     expect(derived.get()).toBe("ready");
     jest.advanceTimersByTime(11);
     expect(derived.get()).toBe("stale");
@@ -336,6 +350,7 @@ describe("Aeolia graph and stores", () => {
       idleMs: 10,
     });
     const store = graph.api.query(undefined);
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
     const stop = watch(store.pending, () => undefined);

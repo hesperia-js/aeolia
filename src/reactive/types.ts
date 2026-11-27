@@ -70,6 +70,7 @@ export function isSignalOptions(value: unknown): value is SignalOptions<unknown>
   if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
 
   const options = value as Record<PropertyKey, unknown>;
+
   return (
     (options.equals === undefined || typeof options.equals === "function") &&
     (options.label === undefined || typeof options.label === "string") &&

@@ -66,8 +66,10 @@ function fixture(options: { readonly holdReturn?: boolean } = {}) {
     },
     open: (input: string, openOptions) => {
       opens += 1;
+
       if (options.holdReturn !== true)
         return backend.stream<string, number | undefined>("events")(input, openOptions);
+
       return {
         [Symbol.asyncIterator]() {
           return {
@@ -77,6 +79,7 @@ function fixture(options: { readonly holdReturn?: boolean } = {}) {
                 firstPull.resolve();
                 return firstValue.promise;
               }
+
               return new Promise<IteratorResult<number | undefined>>(() => undefined);
             },
             return() {
@@ -101,6 +104,7 @@ function fixture(options: { readonly holdReturn?: boolean } = {}) {
   const context = createBindingContext(graph);
   const binding = bindStream(graph, stream, graph.api.stream, { context });
   const queries = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
+
   return {
     backend,
     graph,
@@ -132,21 +136,26 @@ function emptyCondition(
   key: string,
 ): BoundAddressEmpty {
   const inspected = inspectBoundAddress(binding, storeKey(key));
+
   expect(inspected).toMatchObject({
     kind: "stable",
     state: "empty",
     present: false,
     basePresent: false,
   });
+
   if (inspected.kind !== "stable" || inspected.state !== "empty")
     throw new Error("Expected an empty native address");
+
   return inspected.condition;
 }
 
 function emptyStamp(binding: Parameters<typeof inspectBoundAddress>[0], key: string) {
   const inspected = inspectBoundAddress(binding, storeKey(key));
+
   if (inspected.kind !== "stable" || inspected.state !== "empty")
     throw new Error("Expected an empty native address");
+
   return inspected.stamp;
 }
 
@@ -154,21 +163,25 @@ const transferReference = { module: "rooms", operation: "updates" };
 
 function importedStream(value: number | undefined) {
   const source = fixture();
+
   source.binding.member("one", { initial: value });
   const snapshotV2 = snapshot(source.graph, {
     version: 2,
     bindings: [{ binding: source.binding, reference: transferReference }],
   });
+
   return { source, snapshotV2 };
 }
 
 async function transferFromEndedSession(value: number | undefined) {
   const source = fixture();
   let stop: (() => void) | undefined;
+
   try {
     const store = source.binding.member("one");
     const session = source.binding.session(store);
     const accepted = Promise.withResolvers<void>();
+
     stop = subscribe(store.available, (available) => {
       if (available) accepted.resolve();
     });
@@ -178,6 +191,7 @@ async function transferFromEndedSession(value: number | undefined) {
     stop = undefined;
     source.backend.end("events");
     const receipt = await session.detached;
+
     expect(receipt.terminalCapture).toMatchObject({
       kind: "captured",
       capture: { kind: "stable", present: true, value },
@@ -201,9 +215,11 @@ function streamSnapshot(world: ReturnType<typeof fixture>) {
 
 it("inspects missing native addresses without key/open/fetch activity and checks exact provenance", () => {
   const f = fixture();
+
   try {
     const key = storeKey("Room/é");
     const inspected = inspectBoundAddress(f.binding, key);
+
     expect(inspected).toMatchObject({
       kind: "stable",
       state: "empty",
@@ -219,6 +235,7 @@ it("inspects missing native addresses without key/open/fetch activity and checks
     const other = bindStream(f.graph, f.stream, f.graph.api.stream, {
       context: createBindingContext(f.graph),
     });
+
     expect(() => inspectBoundAddress(other, key, { expected: inspected.stamp })).toThrow(TypeError);
     expect(() =>
       inspectBoundAddress(f.binding, storeKey("other"), { expected: inspected.stamp }),
@@ -237,8 +254,10 @@ it.each([false, true])(
   "distinguishes an active empty session from present undefined (initial=%s)",
   async (initial) => {
     const f = fixture();
+
     try {
       const source = f.binding.member("one", initial ? { initial: undefined } : undefined);
+
       expect(inspectBoundAddress(f.binding, source.key)).toMatchObject({
         kind: "stable",
         state: "occupied",
@@ -261,11 +280,13 @@ it.each([false, true])(
 
 it("permanently invalidates an empty condition across an empty opening and one-use admission", async () => {
   const f = fixture();
+
   try {
     const key = storeKey("one");
     const firstStamp = emptyStamp(f.binding, "one");
     const independentStamp = emptyStamp(f.binding, "one");
     const condition = emptyCondition(f.binding, "one");
+
     expect(inspectBoundAddress(f.binding, key, { expected: firstStamp })).toMatchObject({
       state: "empty",
     });
@@ -273,14 +294,18 @@ it("permanently invalidates an empty condition across an empty opening and one-u
       state: "empty",
     });
     const a = f.binding.member("one", { expectEmpty: condition });
+
     f.backend.end("events");
     await f.binding.session(a).detached;
+
     for (const expected of [firstStamp, independentStamp])
       expect(inspectBoundAddress(f.binding, key, { expected })).toEqual({ kind: "changed" });
+
     expect(() => f.binding.member("one", { expectEmpty: condition })).toThrow(TypeError);
     expect(f.backend.calls).toHaveLength(1);
     const current = emptyCondition(f.binding, "one");
     const b = f.binding.member("one", { expectEmpty: current });
+
     expect(f.binding.session(b).identity).not.toBe(f.binding.session(a).identity);
     expect(() => f.binding.member("one", { expectEmpty: current })).toThrow(TypeError);
     expect(f.backend.calls).toHaveLength(2);
@@ -293,6 +318,7 @@ it.each(["options", "key"] as const)(
   "rechecks expectEmpty after an authored %s callback acquires the address",
   (phase) => {
     const f = fixture();
+
     try {
       const condition = emptyCondition(f.binding, "one");
       let once = false;
@@ -302,6 +328,7 @@ it.each(["options", "key"] as const)(
         once = true;
         nested = f.binding.member("one", { initial: 41 });
       };
+
       if (phase === "key") f.beforeKey(acquire);
       const options = {
         expectEmpty: condition,
@@ -310,6 +337,7 @@ it.each(["options", "key"] as const)(
           return undefined;
         },
       };
+
       expect(() => f.binding.member("one", options)).toThrow(TypeError);
       expect(f.backend.calls).toHaveLength(1);
       expect(nested!.value.get()).toBe(41);
@@ -326,12 +354,15 @@ it.each(["options", "key"] as const)(
 
 it("reports finite bound query occupation without acquiring or refreshing, and rejects its condition on a stream", async () => {
   const f = fixture();
+
   try {
     const condition = emptyCondition(f.queries, "one");
+
     expect(() => f.binding.member("one", { expectEmpty: condition })).toThrow(TypeError);
     expect(f.backend.calls).toHaveLength(0);
     const query = f.queries.member("one");
     const pending = inspectBoundAddress(f.queries, query.key);
+
     expect(pending).toMatchObject({
       kind: "stable",
       state: "occupied",
@@ -358,14 +389,17 @@ it("reports finite bound query occupation without acquiring or refreshing, and r
 
 it("leaves unknown raw/query fields ignored while the genuine bound stream validates expectEmpty", async () => {
   const f = fixture();
+
   try {
     const options = { initial: 3, expectEmpty: Object.freeze({}) };
     const raw = f.graph.api.stream("one", options);
     const query = f.queries.member("one", options);
+
     expect([raw.value.get(), query.value.get()]).toEqual([3, 3]);
     expect(() => f.binding.member("one", options as never)).toThrow(TypeError);
     expect(f.backend.calls.map((call) => call.name)).toEqual(["events"]);
     const refresh = query.revalidate();
+
     expect(f.backend.calls.map((call) => call.name)).toEqual(["events", "read"]);
     f.backend.resolve(f.backend.pending("read")[0]!, 4);
     await refresh;
@@ -377,11 +411,14 @@ it("leaves unknown raw/query fields ignored while the genuine bound stream valid
 
 it("invalidates even missing-address stamps on reset and keeps scope disposal in the fault channel", async () => {
   const f = fixture();
+
   try {
     const key = storeKey("missing");
     const before = inspectBoundAddress(f.binding, key);
+
     if (before.kind !== "stable" || before.state !== "empty")
       throw new Error("Expected missing address");
+
     await f.graph.reset();
     expect(inspectBoundAddress(f.binding, key, { expected: before.stamp })).toEqual({
       kind: "changed",
@@ -399,8 +436,10 @@ it.each([41, undefined])(
   async (value) => {
     const source = importedStream(value);
     const target = fixture();
+
     try {
       const beforeImport = inspectBoundAddress(target.binding, storeKey("one"));
+
       if (beforeImport.kind !== "stable" || beforeImport.state !== "empty")
         throw new Error("Expected an empty target address before adoption");
 
@@ -409,6 +448,7 @@ it.each([41, undefined])(
           { binding: target.binding, reference: { operation: "updates", module: "rooms" } },
         ],
       });
+
       expect(report.adopted).toMatchObject([
         { address: { kind: "stream-binding", key: "one" }, valueRevision: expect.any(Number) },
       ]);
@@ -424,6 +464,7 @@ it.each([41, undefined])(
       expect(target.backend.calls).toHaveLength(0);
 
       const first = target.binding.member("one");
+
       expect([first.available.get(), first.value.get(), first.pending.get()]).toEqual([
         true,
         value,
@@ -433,6 +474,7 @@ it.each([41, undefined])(
       await target.binding.session(first).detached;
 
       const second = target.binding.member("one");
+
       expect([second.available.get(), second.value.get(), second.pending.get()]).toEqual([
         false,
         undefined,
@@ -449,11 +491,15 @@ it.each([41, undefined])(
 it("rechecks an inspected empty address after a real import reenters through the key callback", () => {
   const source = importedStream(73);
   const target = fixture();
+
   try {
     const inspected = inspectBoundAddress(target.binding, storeKey("one"));
+
     if (inspected.kind !== "stable" || inspected.state !== "empty")
       throw new Error("Expected an empty target address before acquisition");
+
     let imported = false;
+
     target.beforeKey(() => {
       if (imported) return;
       imported = true;
@@ -473,6 +519,7 @@ it("rechecks an inspected empty address after a real import reenters through the
       basePresent: true,
     });
     const claimed = target.binding.member("one");
+
     expect(claimed.value.get()).toBe(73);
     expect(target.backend.calls).toHaveLength(1);
   } finally {
@@ -484,10 +531,13 @@ it("rechecks an inspected empty address after a real import reenters through the
 it("does not revive an empty-address stamp after its imported base is collected", async () => {
   const source = importedStream(19);
   const target = fixture();
+
   try {
     const beforeImport = inspectBoundAddress(target.binding, storeKey("one"));
+
     if (beforeImport.kind !== "stable" || beforeImport.state !== "empty")
       throw new Error("Expected an empty target address before adoption");
+
     adopt(target.graph, source.snapshotV2, {
       bindings: [{ binding: target.binding, reference: transferReference }],
     });
@@ -495,6 +545,7 @@ it("does not revive an empty-address stamp after its imported base is collected"
     jest.advanceTimersByTime(10);
 
     const afterCollection = inspectBoundAddress(target.binding, storeKey("one"));
+
     expect(afterCollection).toMatchObject({
       kind: "stable",
       state: "empty",
@@ -517,6 +568,7 @@ it("does not revive an empty-address stamp after its imported base is collected"
 it("skips an active empty stream and adopts the same shell after genuine idle collection", async () => {
   const source = importedStream(73);
   const target = fixture();
+
   try {
     const incoming = JSON.parse(JSON.stringify(source.snapshotV2)) as typeof source.snapshotV2;
     const options = {
@@ -526,10 +578,12 @@ it("skips an active empty stream and adopts the same shell after genuine idle co
     const active = target.binding.member("one");
     const session = target.binding.session(active);
     const before = peekStore(active);
+
     if (before.kind !== "stable") throw new Error("Expected the real active session capture");
     expect(before.present).toBe(false);
     expect(active.pending.get()).toBe(true);
     const occupied = inspectBoundAddress(target.binding, key);
+
     expect(occupied).toMatchObject({
       kind: "stable",
       state: "occupied",
@@ -558,8 +612,10 @@ it("skips an active empty stream and adopts the same shell after genuine idle co
 
     target.backend.end("events");
     const detached = await session.detached;
+
     expect(detached.terminalCapture).toEqual({ kind: "captured", capture: before });
     const ended = inspectBoundAddress(target.binding, key);
+
     if (ended.kind !== "stable" || ended.state !== "empty")
       throw new Error("Expected the ended no-base shell before collection");
 
@@ -577,15 +633,18 @@ it("skips an active empty stream and adopts the same shell after genuine idle co
     });
     const beforeAdoption = [target.keys(), target.opens(), target.backend.calls.length];
     const report = adopt(target.graph, incoming, options);
+
     expect(report.skipped).toEqual([]);
     expect(report.adopted).toHaveLength(1);
     const imported = report.adopted[0];
+
     if (
       imported === undefined ||
       imported.address.kind !== "stream-binding" ||
       !("valueRevision" in imported)
     )
       throw new Error("Expected the actual imported stream stamp");
+
     expect(imported.address).toEqual({
       kind: "stream-binding",
       key: "one",
@@ -603,6 +662,7 @@ it("skips an active empty stream and adopts the same shell after genuine idle co
     const claimed = target.binding.member("one");
     const nextSession = target.binding.session(claimed);
     const capture = peekStore(claimed);
+
     if (capture.kind !== "stable") throw new Error("Expected the current claimed imported base");
     expect(nextSession.identity).not.toBe(session.identity);
     expect(nextSession.storeIdentity).toBe(imported.identity);
@@ -628,6 +688,7 @@ it("skips an active empty stream and adopts the same shell after genuine idle co
 it("keeps a missing address stamp current when another key receives an imported stream base", () => {
   const source = fixture();
   const target = fixture();
+
   try {
     source.binding.member("present", { initial: 5 });
     const transfer = snapshot(source.graph, {
@@ -635,6 +696,7 @@ it("keeps a missing address stamp current when another key receives an imported 
       bindings: [{ binding: source.binding, reference: transferReference }],
     });
     const missing = inspectBoundAddress(target.binding, storeKey("absent"));
+
     if (missing.kind !== "stable" || missing.state !== "empty")
       throw new Error("Expected an empty unrelated address");
 
@@ -645,6 +707,7 @@ it("keeps a missing address stamp current when another key receives an imported 
       inspectBoundAddress(target.binding, storeKey("absent"), { expected: missing.stamp }),
     ).toMatchObject({ kind: "stable", state: "empty", present: false, basePresent: false });
     const admitted = target.binding.member("absent", { expectEmpty: missing.condition });
+
     expect([admitted.available.get(), admitted.pending.get()]).toEqual([false, true]);
     expect(target.backend.calls).toHaveLength(1);
   } finally {
@@ -666,14 +729,18 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
     let snapshotBefore: ReturnType<typeof streamSnapshot>["entries"][number] | undefined;
     let reentrantReport: AdoptionReportV2 | undefined;
     let reentrantThrew = false;
+
     try {
       const incoming = await transferFromEndedSession(99);
+
       if (mode === "retained-value" || mode === "retained-undefined") {
         const value = mode === "retained-value" ? 17 : undefined;
         const store = target.binding.member("one");
+
         existing = store;
         existingSession = target.binding.session(store);
         const accepted = Promise.withResolvers<void>();
+
         stop = subscribe(store.available, (available) => {
           if (available) accepted.resolve();
         });
@@ -683,15 +750,18 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
         stop = undefined;
         target.backend.end("events");
         const receipt = await existingSession.detached;
+
         expect(receipt.terminalCapture).toMatchObject({
           kind: "captured",
           capture: { kind: "stable", present: true, value },
         });
       } else if (mode === "retiring-prefix") {
         const store = target.binding.member("one");
+
         existing = store;
         existingSession = target.binding.session(store);
         const accepted = Promise.withResolvers<void>();
+
         stop = subscribe(store.available, (available) => {
           if (available) accepted.resolve();
         });
@@ -701,8 +771,10 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
         stop();
         stop = undefined;
         snapshotBefore = streamSnapshot(target).entries[0];
+
         if (snapshotBefore === undefined)
           throw new Error("Expected the retiring stream prefix in its public snapshot");
+
         target.beforePhysicalReturn(() => {
           try {
             reentrantReport = adopt(target.graph, incoming, {
@@ -715,6 +787,7 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
         target.graph.cancelPending();
         await target.returnStarted();
         const receipt = await existingSession.detached;
+
         expect(receipt.terminalCapture).toMatchObject({
           kind: "captured",
           capture: { kind: "stable", present: true, value: 23 },
@@ -724,14 +797,17 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
         const seeded = adopt(target.graph, seed, {
           bindings: [{ binding: target.binding, reference: transferReference }],
         });
+
         expect(seeded.adopted).toHaveLength(1);
         const seededRow = seeded.adopted[0];
+
         if (
           seededRow === undefined ||
           seededRow.address.kind !== "stream-binding" ||
           !("valueRevision" in seededRow)
         )
           throw new Error("Expected an actual stream adoption stamp");
+
         importedIdentity = seededRow.identity;
         importedRevision = seededRow.valueRevision;
         expect(seededRow.address.key).toBe("one");
@@ -741,19 +817,25 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
       }
 
       const before = inspectBoundAddress(target.binding, key);
+
       if (before.kind !== "stable" || before.state !== "occupied")
         throw new Error("Expected the incumbent stream address to be occupied");
+
       expect(before).toMatchObject({ present: true, basePresent: true });
       if (mode !== "retiring-prefix") snapshotBefore = streamSnapshot(target).entries[0];
+
       if (snapshotBefore === undefined)
         throw new Error("Expected the incumbent stream base in its public snapshot");
+
       const storeIdentity = existingSession?.storeIdentity ?? importedIdentity;
       const opensBefore = target.opens();
       const keysBefore = target.keys();
 
       expect(reentrantThrew).toBe(false);
+
       if (mode === "retiring-prefix" && reentrantReport === undefined)
         throw new Error("Expected an adoption report from the actual retirement callout");
+
       const report =
         reentrantReport ??
         adopt(target.graph, incoming, {
@@ -769,28 +851,36 @@ it.each(["retained-value", "retained-undefined", "retiring-prefix", "unclaimed-i
         mode === "retiring-prefix"
           ? inspectBoundAddress(target.binding, key)
           : inspectBoundAddress(target.binding, key, { expected: before.stamp });
+
       expect(after).toMatchObject({
         kind: "stable",
         state: "occupied",
         present: true,
         basePresent: true,
       });
+
       if (existing !== undefined && existingSession !== undefined) {
         if (storeIdentity === undefined)
           throw new Error("Expected the incumbent physical identity");
+
         expect(existing.identity).toBe(storeIdentity);
         expect(target.binding.session(existing).identity).toBe(existingSession.identity);
         const expected =
           mode === "retained-value" ? 17 : mode === "retiring-prefix" ? 23 : undefined;
+
         expect(existing.value.get()).toBe(expected);
       }
+
       expect(streamSnapshot(target).entries[0]).toEqual(snapshotBefore);
+
       if (mode === "unclaimed-import") {
         if (importedIdentity === undefined || importedRevision === undefined)
           throw new Error("Expected the imported physical identity and revision");
+
         const claimed = target.binding.member("one");
         const claimedSession = target.binding.session(claimed);
         const capture = peekStore(claimed);
+
         expect(claimed.identity).toBe(importedIdentity);
         expect(claimedSession.storeIdentity).toBe(importedIdentity);
         expect(claimedSession.identity).not.toBe(importedIdentity);
@@ -846,17 +936,23 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
         };
         const emit = (event: Event): void => {
           const waiter = waiters.shift();
+
           if (waiter === undefined)
             throw new Error("The positioned address source has no pending next call");
+
           waiter({ done: false, value: event });
         };
+
         openings.push({ reader: options.reader });
+
         if (options.reader === undefined) emitLive = emit;
         else readers.set(options.reader, emit);
+
         return iterable;
       },
       readerLifetime: (_input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         if (
           reservation === undefined ||
           reservation.input !== _input ||
@@ -864,10 +960,12 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
           reservation.seed !== seed
         )
           throw new TypeError("The reader lifetime does not match its exact reservation");
+
         return { signal: reservation.controller.signal, expiresAt: reservation.expiresAt };
       },
       validateReader: (input, reader, after, _checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -877,6 +975,7 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -889,11 +988,13 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
         releases.set(reader, (releases.get(reader) ?? 0) + 1);
       },
     };
+
     return {
       source,
       openings,
       reserve(input: Input, after: number, seed: unknown) {
         const reader = Object.freeze({});
+
         reservations.set(reader, {
           input,
           after,
@@ -963,21 +1064,27 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
   let peerReader: object | undefined;
   let capturePublished = false;
   let adoptionPublished = false;
+
   try {
     const landed = new Promise<void>((resolve) => {
       let stop: () => void = () => undefined;
+
       stop = subscribe(sourceProjection.value, (value) => {
         if (value !== 3) return;
         stop();
         resolve();
       });
     });
+
     providerA.emitLive({ position: 5, value: 3 });
     await landed;
     const checkpoint = capturePositionedStore(sourceStore, [sourceProjection] as const);
+
     expect(checkpoint.present).toBe(true);
+
     if (!checkpoint.present)
       throw new Error("The positioned source event is absent at the captured cut");
+
     expect(checkpoint.hasPosition).toBe(true);
     expect(checkpoint.position).toBe(5);
     expect(checkpoint.values).toStrictEqual([3]);
@@ -1006,14 +1113,17 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
           (value as { readonly $ref?: unknown }).$ref === seedId
         ) {
           const decoded = decodedSeeds.get(seedId);
+
           if (decoded === undefined) throw new Error("The positioned seed reference is missing");
           return decoded;
         }
+
         return value;
       },
       decodeFailure: (failure) => new Error(String(failure)),
     };
     const sourceRoot = computed(() => sourceProjection.value.get());
+
     expect(sourceRoot.get()).toBe(3);
     capture = prepareRequiredTransferCapture({
       graphs: [sourceGraph],
@@ -1023,11 +1133,13 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     });
     const image = capture.image;
     const positionedRows = image.positioned;
+
     if (positionedRows === undefined) throw new Error("The bound positioned group row was omitted");
     expect(positionedRows).toHaveLength(1);
     expect(positionedRows[0]).toMatchObject({ slot: "p0", store: "s0", seed: { $ref: "p0-seed" } });
     expect(decodedSeeds.get("p0-seed")).toBe(seed);
     const captureCommit = capture.seal();
+
     if (captureCommit === undefined) throw new Error("The bound positioned capture did not seal");
     captureCommit.publish();
     capturePublished = true;
@@ -1035,23 +1147,28 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     await capture.retired;
 
     const empty = inspectBoundAddress(targetBinding, key);
+
     if (empty.kind !== "stable") throw new Error("Expected a stable empty target address");
     expect(empty).toMatchObject({ kind: "stable", state: "empty" });
     const firstReaderLocal = providerB.reserve(input, 5, seed);
+
     firstReader = firstReaderLocal;
     const first = preparePassiveTransferClaim(targetGraph, targetBinding, input, undefined, {
       policies: [policy] as const,
       seed,
       reader: firstReaderLocal,
     });
+
     firstClaim = first;
     const peerReaderLocal = providerB.reserve(input, 5, seed);
+
     peerReader = peerReaderLocal;
     const peer = preparePassiveTransferClaim(targetGraph, targetBinding, input, undefined, {
       policies: [policy] as const,
       seed,
       reader: peerReaderLocal,
     });
+
     peerClaim = peer;
     expect(first.store.identity).not.toBe(peer.store.identity);
     expect(providerB.openings).toHaveLength(0);
@@ -1065,6 +1182,7 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
       targetRuns += 1;
       return first.restoration.projections[0]!.value.get();
     });
+
     adoption = prepareRequiredTransferAdoption(image, {
       graphs: [targetGraph],
       sources: [{ slot: "s0", claim: first }],
@@ -1080,6 +1198,7 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
       mappedStateWrites: [],
     });
     const commit = adoption.seal();
+
     if (commit === undefined) throw new Error("The bound positioned claim did not seal");
     commit.publish();
     adoptionPublished = true;
@@ -1088,8 +1207,10 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     expect(targetValue.get()).toBe(3);
     expect(targetRuns).toBe(0);
     const occupied = inspectBoundAddress(targetBinding, key);
+
     if (occupied.kind !== "stable")
       throw new Error("Expected the published reader address to be stable");
+
     expect(occupied).toMatchObject({
       kind: "stable",
       state: "occupied",
@@ -1100,6 +1221,7 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
       kind: "changed",
     });
     const firstSession = targetBinding.session(first.store);
+
     expect(firstSession.storeIdentity).toBe(first.store.identity);
     expect(providerB.openings).toHaveLength(0);
     expect(providerB.releaseCount(firstReaderLocal)).toBe(0);
@@ -1108,8 +1230,10 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     await Promise.all([peer.retired, peer.restoration.retired]);
     expect(providerB.releaseCount(peerReaderLocal)).toBe(1);
     const afterPeerDiscard = inspectBoundAddress(targetBinding, key, { expected: occupied.stamp });
+
     if (afterPeerDiscard.kind !== "stable")
       throw new Error("Discarding the peer changed the published reader address");
+
     expect(afterPeerDiscard).toMatchObject({
       kind: "stable",
       state: "occupied",
@@ -1125,37 +1249,44 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
     expect(providerB.releaseCount(firstReaderLocal)).toBe(1);
   } finally {
     if (!capturePublished) capture?.discard();
+
     if (!adoptionPublished) {
       adoption?.discard();
       firstClaim?.discard();
     } else firstClaim?.restoration.discard();
+
     peerClaim?.discard();
     sourceProjection.close();
     sourceGraph.dispose();
     targetContext.dispose();
     targetGraph.dispose();
+
     if (
       firstReader !== undefined &&
       firstClaim === undefined &&
       providerB.releaseCount(firstReader) === 0
     )
       providerB.source.releaseReader(input, firstReader);
+
     if (
       peerReader !== undefined &&
       peerClaim === undefined &&
       providerB.releaseCount(peerReader) === 0
     )
       providerB.source.releaseReader(input, peerReader);
+
     if (capture !== undefined)
       await capture.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (adoption !== undefined)
       await adoption.retired.then(
         () => undefined,
         () => undefined,
       );
+
     if (firstClaim !== undefined) {
       await firstClaim.retired.then(
         () => undefined,
@@ -1166,6 +1297,7 @@ it("keeps same-key positioned claims out of bound addresses until publication", 
         () => undefined,
       );
     }
+
     if (peerClaim !== undefined)
       await peerClaim.retired.then(
         () => undefined,
@@ -1190,6 +1322,7 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
     const emit = (event: Event): void => {
       if (ended) return;
       const waiter = waiters.shift();
+
       if (waiter !== undefined) waiter({ done: false, value: event });
       else queued.push(event);
     };
@@ -1198,6 +1331,7 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
         return {
           next: () => {
             const event = queued.shift();
+
             if (event !== undefined) return Promise.resolve({ done: false as const, value: event });
             if (ended) return Promise.resolve({ done: true as const, value: undefined });
             return new Promise<IteratorResult<Event>>((resolve) => waiters.push(resolve));
@@ -1210,10 +1344,12 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
         };
       },
     };
+
     return { iterable, emit };
   };
   const reserve = (input: Input, after: number, seed: unknown): object => {
     const reader = Object.freeze({});
+
     reservations.set(reader, { input, after, seed });
     return reader;
   };
@@ -1228,12 +1364,14 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
     source: {
       open: (input, options) => {
         const channel = makeChannel();
+
         openings.push({ room: input.room, reader: options.reader });
         if (options.reader === undefined) liveEmitters.set(input.room, channel.emit);
         return channel.iterable;
       },
       validateReader: (input, reader, after, checkpoint, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           checkpoint === undefined &&
           reservation !== undefined &&
@@ -1244,6 +1382,7 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
       },
       isReaderCurrent: (input, reader, after, seed) => {
         const reservation = reservations.get(reader);
+
         return (
           reservation !== undefined &&
           reservation.input === input &&
@@ -1280,6 +1419,7 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
   try {
     const folded = new Promise<void>((resolve) => {
       let stop = (): void => undefined;
+
       stop = subscribe(projection.value, (value) => {
         if (value !== 5) return;
         stop();
@@ -1287,19 +1427,24 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
       });
     });
     const emit = liveEmitters.get(input.room);
+
     if (emit === undefined) throw new Error("The genuine source did not open");
     emit({ position: 1, value: 5 });
     await folded;
 
     const checkpoint = capturePositionedStore(source, [projection] as const);
+
     if (!checkpoint.present || !checkpoint.hasPosition || typeof checkpoint.position !== "number")
       throw new Error("The genuine source Store has no positioned landing");
+
     const after: number = checkpoint.position;
     const seed = { after, latest: checkpoint.latest, values: checkpoint.values };
 
     const before = inspectBoundAddress(binding, storeKey("one"));
+
     if (before.kind !== "stable" || before.state !== "empty")
       throw new Error("Expected an empty reader address before admission");
+
     firstReader = reserve(input, after, seed);
     secondReader = reserve(input, after, seed);
     const first = preparePositionedStoreRestore(
@@ -1309,6 +1454,7 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
       seed,
       firstReader,
     );
+
     firstTransferred = true;
     const second = preparePositionedStoreRestore(
       binding,
@@ -1317,6 +1463,7 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
       seed,
       secondReader,
     );
+
     secondTransferred = true;
     const firstSession = binding.session(first.source);
     const secondSession = binding.session(second.source);
@@ -1337,6 +1484,7 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
 
     const other = binding.member(otherInput);
     const otherSession = binding.session(other);
+
     expect(openings).toHaveLength(2);
     expect(inspectBoundAddress(binding, storeKey("other"))).toMatchObject({
       kind: "stable",
@@ -1370,8 +1518,10 @@ it("aggregates reader-scoped Stores at their binding address without deleting an
   } finally {
     if (firstReader !== undefined && !firstTransferred && releaseCount(firstReader) === 0)
       releaseReader(firstReader);
+
     if (secondReader !== undefined && !secondTransferred && releaseCount(secondReader) === 0)
       releaseReader(secondReader);
+
     context.dispose();
     sourceGraph.dispose();
     targetGraph.dispose();

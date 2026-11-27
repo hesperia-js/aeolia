@@ -26,6 +26,7 @@ export type ValueRevision = number & { readonly __valueRevision: unique symbol }
 export function nextValueRevision(current: ValueRevision): ValueRevision {
   if (!Number.isSafeInteger(current) || current < 0 || current >= Number.MAX_SAFE_INTEGER)
     throw new RangeError("Store value revision exhausted");
+
   return (current + 1) as ValueRevision;
 }
 
@@ -63,6 +64,7 @@ export function storeKey(value: string): StoreKey {
   if (!isStoreKey(value)) {
     throw new TypeError("StoreKey must be a non-empty string");
   }
+
   return value;
 }
 

@@ -70,6 +70,7 @@ function observationIssueReadable<Value>(
     assertStoreOpen(runtime);
     return state.issue.get();
   });
+
   reactiveInternal.bindReadable(issue, {
     graphId: graph.id,
     reportFault: (fault) => reportContinuationError(graphState, fault),
@@ -85,6 +86,7 @@ function attachObservationIssueHooks<Value>(
 ): void {
   if (issueHooksInstalled.has(state)) return;
   const stops: (() => void)[] = [];
+
   try {
     stops.push(
       reactiveInternal.onActualRead(issue, () => {
@@ -107,6 +109,7 @@ function attachObservationIssueHooks<Value>(
     issueHooksInstalled.add(state);
   } catch (cause) {
     const errors: unknown[] = [cause];
+
     for (const stop of stops) {
       try {
         stop();
@@ -114,6 +117,7 @@ function attachObservationIssueHooks<Value>(
         errors.push(cleanupCause);
       }
     }
+
     if (errors.length === 1) throw cause;
     throw new AggregateError(errors, "Observation issue hook preparation failed");
   }
@@ -182,8 +186,10 @@ export function prepareObservationTransfer<Value>(
 ): PreparedObservationTransfer<Value> {
   if (incarnation === null || typeof incarnation !== "object" || typeof claimCurrent !== "function")
     throw new TypeError("Observation transfer requires an exact native claim and incarnation");
+
   if (!claimCurrent()) throw new TypeError("Observation transfer claim is no longer current");
   assertStoreOpen(runtime);
+
   if (
     runtime.transitioning ||
     runtime.graph.__runtime.disposed ||
@@ -195,6 +201,7 @@ export function prepareObservationTransfer<Value>(
     const record = observationLeaseRecords.get(existingLease as object) as
       | ObservationLeaseRecord<Value>
       | undefined;
+
     if (
       record === undefined ||
       record.runtime !== runtime ||
@@ -209,7 +216,9 @@ export function prepareObservationTransfer<Value>(
       throw new TypeError(
         "Existing observation lease is not the exact current lease for this claim",
       );
+
     let adopted = false;
+
     return Object.freeze({
       lease: existingLease,
       state: record.state,
@@ -226,6 +235,7 @@ export function prepareObservationTransfer<Value>(
   }
 
   const observationBefore = runtime.observation;
+
   if (
     observationBefore !== undefined &&
     (observationBefore.retired ||
@@ -233,12 +243,16 @@ export function prepareObservationTransfer<Value>(
       observationBefore.publisher !== undefined)
   )
     throw new TypeError("The query already has an observation publisher or another incarnation");
+
   if (observationBefore?.publisherActivity !== undefined)
     throw new TypeError("The query has an unowned observation activity cell");
+
   const ownsState = observationBefore === undefined;
   const state = observationBefore ?? createObservationState(runtime, incarnation, false);
+
   if (!ownsState && !reactiveInternal.signalValue(state.live))
     throw new TypeError("An inactive observation state cannot be reused");
+
   const issueBefore = state.issueReadable;
   const ownsIssue = issueBefore === undefined;
   const issue =
@@ -252,9 +266,12 @@ export function prepareObservationTransfer<Value>(
   const registerFacet = (readable: Readable<unknown>, role: string): void => {
     const previousRuntime = transferReadableStore(readable);
     const previousRole = transferReadableRole(readable);
+
     if (previousRuntime === runtime && previousRole === role) return;
+
     if (previousRuntime !== undefined || previousRole !== undefined)
       throw new TypeError("Observation facet already belongs to another native owner");
+
     registerTransferReadable(readable, runtime, role);
     registeredFacets.push(readable);
   };
@@ -293,12 +310,15 @@ export function prepareObservationTransfer<Value>(
     if (published || discarded) return;
     discarded = true;
     const failures: unknown[] = [];
+
     try {
       activityReadableReservation.discard();
     } catch (cause) {
       failures.push(cause);
     }
+
     if (failures.length === 1) throw failures[0];
+
     if (failures.length > 1)
       throw new AggregateError(failures, "Observation participant cleanup failed");
   };
@@ -309,30 +329,38 @@ export function prepareObservationTransfer<Value>(
       if (!leaseCurrent()) return false;
       const data: Record<string, unknown> =
         options === undefined ? {} : ownData(options, ["transfer"]);
+
       if (
         data.transfer !== undefined &&
         data.transfer !== "eligible" &&
         data.transfer !== "exclude"
       )
         throw new TypeError("Invalid observation transfer policy");
+
       if (!leaseCurrent()) return false;
       reactiveInternal.assertWritesAllowed(runtime.committed);
       return publishObservation(runtime, value, data.transfer !== "exclude", leaseCurrent);
     },
     reject(value: Readonly<object>, diagnostic?: { readonly cause: unknown }): boolean {
       if (!leaseCurrent()) return false;
+
       if (value === null || typeof value !== "object")
         throw new TypeError("Expected an observation issue object");
+
       const data = diagnostic === undefined ? undefined : ownData(diagnostic, ["cause"]);
+
       if (data !== undefined && !Object.hasOwn(data, "cause"))
         throw new TypeError("Missing diagnostic cause");
+
       if (!leaseCurrent()) return false;
       reactiveInternal.assertWritesAllowed(state.issue);
+
       if (state.issue.peek() !== value) {
         noteTransferChange(state);
         noteTransferChange(runtime);
         if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
       }
+
       state.issue.set(value);
       if (data !== undefined) reportContinuationError(runtime.graph.__runtime, data.cause);
       return true;
@@ -347,6 +375,7 @@ export function prepareObservationTransfer<Value>(
         if (!discarded) discard();
         return;
       }
+
       if (state.publisher !== token) return;
       reactiveInternal.assertWritesAllowed(activity.cell);
       noteTransferChange(state);
@@ -357,6 +386,7 @@ export function prepareObservationTransfer<Value>(
       activity.cell.set(false);
     },
   });
+
   observationLeaseRecords.set(lease, {
     runtime,
     state,
@@ -375,11 +405,13 @@ export function prepareObservationTransfer<Value>(
     registerFacet(activity.readable, "observation-activity");
   } catch (cause) {
     const failures: unknown[] = [cause];
+
     try {
       activityReadableReservation.discard();
     } catch (cleanupCause) {
       failures.push(cleanupCause);
     }
+
     for (const readable of registeredFacets) {
       try {
         unregisterTransferReadable(readable, runtime);
@@ -387,6 +419,7 @@ export function prepareObservationTransfer<Value>(
         failures.push(cleanupCause);
       }
     }
+
     if (ownsState) {
       try {
         discardObservationState(runtime, state);
@@ -394,10 +427,13 @@ export function prepareObservationTransfer<Value>(
         failures.push(cleanupCause);
       }
     }
+
     if (failures.length === 1) throw cause;
     throw new AggregateError(failures, "Observation participant preparation and cleanup failed");
   }
+
   const writes: { readonly target: WritableSignal<unknown>; readonly value: unknown }[] = [];
+
   if (ownsState) writes.push({ target: state.live as WritableSignal<unknown>, value: true });
   writes.push({ target: activity.cell as WritableSignal<unknown>, value: true });
   const participant: PreparedObservationTransfer<Value> = Object.freeze({
@@ -423,21 +459,28 @@ export function prepareObservationTransfer<Value>(
     discard,
     getFacet: (role: string) => observationTransferFacet(state, activity, issue, role),
   });
+
   return participant;
 }
 
 function ownData(value: unknown, allowed: readonly string[]): Record<string, unknown> {
   if (value === null || typeof value !== "object")
     throw new TypeError("Expected observation options");
+
   const result: Record<string, unknown> = Object.create(null);
+
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string" || !allowed.includes(key))
       throw new TypeError("Unknown observation option");
+
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
+
     if (descriptor === undefined || !("value" in descriptor))
       throw new TypeError("Observation options require own data fields");
+
     result[key] = descriptor.value;
   }
+
   return result;
 }
 
@@ -456,20 +499,26 @@ export function observeStore<Value>(
   existingProfileQuery: QueryStore<Value, any>,
 ): ObservationLease<Value> {
   const graphState = graphRuntimeByGraph.get(graph);
+
   if (graphState === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(graphState);
   assertStoreHandlePublished(existingProfileQuery as object);
   const runtime = queryRuntimeByStore.get(existingProfileQuery) as StoreRuntime<Value> | undefined;
+
   if (runtime === undefined || runtime.graph !== graph)
     throw new TypeError("Query does not belong to this graph");
+
   assertStoreOpen(runtime);
   if (runtime.incarnation === undefined) throw new TypeError("The query incarnation is inactive");
   inheritTransferCoverage(runtime);
   const state = observationState(runtime);
+
   if (state.publisher !== undefined)
     throw new TypeError("The query already has an observation publisher");
+
   const token = {};
   const activity = publisherActive(state);
+
   registerTransferReadable(activity.cell, runtime, "observation-activity-cell");
   noteTransferChange(runtime);
   if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
@@ -483,14 +532,17 @@ export function observeStore<Value>(
     !runtime.transitioning &&
     !graphState.disposed &&
     runtime.binding?.context.disposed !== true;
+
   state.publisher = token;
   let issue = state.issueReadable;
+
   if (issue === undefined) {
     issue = observationIssueReadable(runtime, state, graph, graphState);
     state.issueReadable = issue;
     registerTransferReadable(issue, runtime, "observation-issue");
     attachObservationIssueHooks(runtime, state, issue, graphState);
   }
+
   reactiveInternal.bindReadable(activity.readable, { graphId: graph.id });
   registerTransferReadable(activity.readable, runtime, "observation-activity");
   const lease: ObservationLease<Value> = Object.freeze({
@@ -500,30 +552,38 @@ export function observeStore<Value>(
       if (!current()) return false;
       const data: Record<string, unknown> =
         options === undefined ? {} : ownData(options, ["transfer"]);
+
       if (
         data.transfer !== undefined &&
         data.transfer !== "eligible" &&
         data.transfer !== "exclude"
       )
         throw new TypeError("Invalid observation transfer policy");
+
       if (!current()) return false;
       reactiveInternal.assertWritesAllowed(runtime.committed);
       return publishObservation(runtime, value, data.transfer !== "exclude", current);
     },
     reject(value: Readonly<object>, diagnostic?: { readonly cause: unknown }): boolean {
       if (!current()) return false;
+
       if (value === null || typeof value !== "object")
         throw new TypeError("Expected an observation issue object");
+
       const data = diagnostic === undefined ? undefined : ownData(diagnostic, ["cause"]);
+
       if (data !== undefined && !Object.hasOwn(data, "cause"))
         throw new TypeError("Missing diagnostic cause");
+
       if (!current()) return false;
       reactiveInternal.assertWritesAllowed(state.issue);
+
       if (state.issue.peek() !== value) {
         noteTransferChange(state);
         noteTransferChange(runtime);
         if (runtime.binding !== undefined) noteTransferChange(runtime.binding.handle);
       }
+
       state.issue.set(value);
       if (data !== undefined) reportContinuationError(graphState, data.cause);
       return true;
@@ -544,6 +604,7 @@ export function observeStore<Value>(
       activity.cell.set(false);
     },
   });
+
   observationLeaseRecords.set(lease, {
     runtime,
     state,

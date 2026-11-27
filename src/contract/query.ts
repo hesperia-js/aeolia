@@ -63,9 +63,12 @@ const nativePromiseThen = Promise.prototype.then;
 /** @internal Checks caller authority without accepting asynchronous validation. */
 export function assertSynchronousQueryAuthority(assertCurrent?: () => void): void {
   if (assertCurrent === undefined) return;
+
   if (typeof assertCurrent !== "function")
     throw new TypeError("Query acquisition authority must be a function.");
+
   const result: unknown = Reflect.apply(assertCurrent, undefined, []);
+
   if ((typeof result === "object" && result !== null) || typeof result === "function") {
     void Reflect.apply(nativePromiseThen, result, [undefined, () => undefined]);
     throw new TypeError("Query acquisition authority must be synchronous.");
@@ -121,8 +124,10 @@ export function callQueryWithProgress<T, P>(
 ): QueryStore<T, P> {
   if (typeof member !== "function") throw new TypeError("Expected a genuine query member.");
   const source = transferSource(member);
+
   if (source?.kind !== "query" || source.invokeQuery === undefined)
     throw new TypeError("Expected a genuine query member.");
+
   return source.invokeQuery(args, entries, assertCurrent);
 }
 
@@ -135,7 +140,9 @@ export function createQueryRuntimeActivation<T>(runtime: StoreRuntime<T>): () =>
       (candidate) =>
         candidate.query === activeSource.query && Object.is(candidate.input, activeSource.input),
     );
+
     if (activeCaller === undefined) return;
+
     try {
       void startQuery(runtime, activeCaller, false, activeCaller.abortSignal, runtime.failing);
     } catch (error) {
@@ -160,6 +167,7 @@ export function addCaller<T>(runtime: StoreRuntime<T>, caller: QueryCaller<T>): 
     noteTransferChange(runtime);
     runtime.callers.push(caller);
   }
+
   runtime.dropped = false;
   touch(runtime);
 }
@@ -170,14 +178,17 @@ export function readinessState<T>(
   return computed(
     () => {
       caller.runtime.lifecycle.get();
+
       if (
         caller.runtime.disposed ||
         caller.runtime.graph.__runtime.disposed ||
         caller.runtime.binding?.context.disposed
       )
         return "disposed";
+
       const status = caller.statusCell.get();
       const pending = status === "fetching" || status === "revalidating";
+
       return pending ? "pending" : status;
     },
     { label: `query:${String(caller.runtime.key)}:ready-state` },
@@ -187,11 +198,14 @@ export function readinessState<T>(
 /** @internal Starts the normal caller readiness wait for a genuine query view. */
 export function ready<T>(runtime: StoreRuntime<T>, caller: QueryCaller<T>): Promise<T> {
   assertStoreOpen(runtime);
+
   if (!runtime.callers.includes(caller)) {
     addCaller(runtime, caller);
     writeCallerStatus(caller);
   }
+
   const state = readinessState(caller);
+
   runtime.readyWaiterCount += 1;
   touch(runtime);
   let waiterHeld = true;
@@ -207,17 +221,22 @@ export function ready<T>(runtime: StoreRuntime<T>, caller: QueryCaller<T>): Prom
     const finish = (complete: () => void): void => {
       if (settled) return;
       settled = true;
+
       if (stop !== undefined) {
         const cleanup = stop;
+
         stop = undefined;
+
         try {
           cleanup();
         } finally {
           releaseWaiter();
           complete();
         }
+
         return;
       }
+
       releaseWaiter();
       complete();
     };
@@ -228,14 +247,17 @@ export function ready<T>(runtime: StoreRuntime<T>, caller: QueryCaller<T>): Prom
       else if (current === "disposed")
         finish(() => reject(new Fault("disposed", [runtime.key as string])));
     };
+
     try {
       const subscription = subscribe(state, observe);
+
       if (settled) subscription();
       else stop = subscription;
     } catch (error) {
       finish(() => reject(error));
     }
   });
+
   return promise;
 }
 
@@ -258,22 +280,27 @@ export function makeQueryStore<T, P = never>(
   );
   let admission: TransferAdmission | undefined;
   let admittedRuntime: StoreRuntime<T> | undefined;
+
   try {
     admission = beginTransferAdmission(state, binding?.definition ?? query, binding, input);
     const epoch = state.resetEpoch;
     let admitted = false;
     const assertNativeCurrent = (): void => {
       assertGraphOpen(state);
+
       if (binding !== undefined) {
         if (binding.context.disposed) throw new Fault("disposed", [String(state.graph.id)]);
+
         if (state.resetEpoch !== epoch)
           throw new AbortError("Query acquisition crossed a graph reset.");
       }
+
       if (hasAuthority && state.resetEpoch !== epoch)
         throw new AbortError("Query acquisition crossed a graph reset.");
     };
     const assertCurrent = (): void => {
       assertNativeCurrent();
+
       if (!admitted && hostAuthority !== undefined) {
         assertSynchronousQueryAuthority(hostAuthority);
         assertNativeCurrent();
@@ -284,41 +311,58 @@ export function makeQueryStore<T, P = never>(
         ? undefined
         : captureQueryProgressCohort<T, P>(cohortInput.entries, () => {
             assertCurrent();
+
             if (state.resetEpoch !== epoch)
               throw new AbortError("Query acquisition crossed a graph reset.");
           });
     const requestedWindow = options?.revalidateAfterMs;
+
     assertCurrent();
     const defaultWindow = query.revalidateAfterMs;
+
     assertCurrent();
     const window = asWindow(requestedWindow, defaultWindow);
     const keyForInput = query.key;
+
     assertCurrent();
     const keyValue = Reflect.apply(keyForInput, query, [input]);
+
     assertCurrent();
     const key = storeKey(keyValue);
+
     assertCurrent();
     const addressAdmission = beginBindingAddress(binding, String(key));
+
     try {
       const runtime = getOrCreateStore<T>(state, key, undefined, binding, false);
+
       admittedRuntime = runtime;
       assertCurrent();
       let configuredOptions = options;
+
       if (!runtime.configured && bindingDefaults !== undefined) {
         const hasInitial = Object.hasOwn(bindingDefaults, "initial");
+
         assertCurrent();
+
         if (hasInitial) {
           const initial = bindingDefaults.initial;
+
           assertCurrent();
           const merged: StoreOptions<T> = { initial };
+
           if (options !== undefined) {
             const keys = Reflect.ownKeys(options);
+
             assertCurrent();
+
             for (const optionKey of keys) {
               const descriptor = Reflect.getOwnPropertyDescriptor(options, optionKey);
+
               assertCurrent();
               if (!descriptor?.enumerable) continue;
               const value: unknown = Reflect.get(options, optionKey);
+
               assertCurrent();
               Object.defineProperty(merged, optionKey, {
                 value,
@@ -328,24 +372,33 @@ export function makeQueryStore<T, P = never>(
               });
             }
           }
+
           configuredOptions = merged;
         }
       }
+
       configureKeyedValue(runtime, query, configuredOptions, undefined, false, true, assertCurrent);
       assertCurrent();
+
       if (binding !== undefined) {
         assertStoreOpen(runtime);
+
         if (state.resetEpoch !== epoch)
           throw new AbortError("Query acquisition crossed a graph reset.");
       }
+
       const abortSignal = options?.abortSignal;
+
       assertCurrent();
       const caller = createCaller(runtime, query, input, window, abortSignal);
+
       if (hostAuthority !== undefined) assertCurrent();
+
       if (admission !== undefined) {
         finishTransferAdmission(admission, runtime);
         admission = undefined;
       }
+
       registerTransferReadable(caller.statusCell, runtime, "query-status-cell", caller);
       registerTransferReadable(caller.status, runtime, "query-status", caller);
       registerTransferReadable(caller.pending, runtime, "query-pending", caller);
@@ -364,18 +417,22 @@ export function makeQueryStore<T, P = never>(
         readonly abortSignal?: AbortSignal;
       }): Promise<void> => {
         assertStoreOpen(runtime);
+
         if (
           revalidateOptions !== undefined &&
           !isCancellationOptions(revalidateOptions, () => assertStoreOpen(runtime))
         )
           throw new TypeError("Invalid query revalidation options.");
+
         assertStoreOpen(runtime);
         nextGeneration(runtime.generation);
         addCaller(runtime, caller);
         const abortSignal = revalidateOptions?.abortSignal ?? caller.abortSignal;
+
         assertStoreOpen(runtime);
         return startQuery(runtime, caller, true, abortSignal);
       };
+
       Object.assign(queryStore, { pending, error: runtime.error, status, revalidate });
       Object.defineProperty(queryStore, "ready", {
         configurable: false,
@@ -400,6 +457,7 @@ export function makeQueryStore<T, P = never>(
       });
       let rollback: Unsubscribe | undefined;
       let assertCohortCurrent: (() => void) | undefined;
+
       try {
         if (cohort !== undefined) {
           const incarnation = runtime.incarnation;
@@ -407,8 +465,10 @@ export function makeQueryStore<T, P = never>(
           const callerWasAborted = caller.abortSignal?.aborted === true;
           const assertCohortNative = (): void => {
             const callerAborted = caller.abortSignal?.aborted === true;
+
             assertNativeCurrent();
             assertStoreOpen(runtime);
+
             if (
               state.resetEpoch !== epoch ||
               runtime.incarnation !== incarnation ||
@@ -416,11 +476,14 @@ export function makeQueryStore<T, P = never>(
               !Object.is(runtime.source?.input, source?.input)
             )
               throw new AbortError("Query acquisition lost its current source.");
+
             if (!callerWasAborted && callerAborted)
               throw new AbortError("Query acquisition caller was aborted.");
           };
+
           assertCohortCurrent = (): void => {
             assertCohortNative();
+
             if (!admitted && hostAuthority !== undefined) {
               assertSynchronousQueryAuthority(hostAuthority);
               assertCohortNative();
@@ -430,8 +493,11 @@ export function makeQueryStore<T, P = never>(
           rollback = enrollQueryProgressCohort(runtime, queryStore, cohort, assertCohortCurrent);
           assertCohortCurrent();
         }
+
         const stale = queryIsStale(caller);
+
         if (hostAuthority !== undefined) assertCohortCurrent?.();
+
         if (acquisition === "fetch" || stale) {
           const admission =
             hostAuthority === undefined || assertCohortCurrent === undefined
@@ -443,6 +509,7 @@ export function makeQueryStore<T, P = never>(
                     hostAuthority = undefined;
                   },
                 };
+
           void startQuery(
             runtime,
             caller,
@@ -453,6 +520,7 @@ export function makeQueryStore<T, P = never>(
             admission,
           );
         } else armStoreTimer(runtime);
+
         assertCohortCurrent?.();
         touch(runtime);
         return queryStore;
@@ -467,6 +535,7 @@ export function makeQueryStore<T, P = never>(
             );
           }
         }
+
         throw cause;
       }
     } finally {
@@ -474,6 +543,7 @@ export function makeQueryStore<T, P = never>(
     }
   } finally {
     hostAuthority = undefined;
+
     try {
       if (admission !== undefined) finishTransferAdmission(admission, admittedRuntime);
     } finally {
@@ -501,6 +571,7 @@ export function makeQueryStore<T, P = never>(
 export function observeQueryProgress<T, P>(store: QueryStore<T, P>): QueryProgressObservation<P> {
   assertStoreHandlePublished(store);
   const runtime = queryRuntimeByStore.get(store);
+
   if (runtime === undefined) throw new TypeError("The value is not an Aeolia query store");
   return queryProgressObservation<unknown, P>(runtime);
 }

@@ -23,6 +23,7 @@ type Input = { readonly id: string; readonly revision?: number };
 type Change = Input & { readonly value: number };
 
 let ownsFakeTimers = false;
+
 beforeEach(() => {
   jest.useFakeTimers();
   ownsFakeTimers = true;
@@ -88,6 +89,7 @@ function fixture(on: "invalidate" | "revalidate" = "revalidate", maxPredictions 
       run: async (input, call) => ({ receipt: await save.run(input, call) }),
     });
   const completeSave = (value = "saved") => backend.resolve(backend.pending("save")[0]!, value);
+
   return {
     backend,
     faults,
@@ -113,6 +115,7 @@ async function expectPending(promise: Promise<unknown>): Promise<void> {
   jest.useRealTimers();
   ownsFakeTimers = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+
   try {
     const result = await Promise.race([
       promise.then(
@@ -123,6 +126,7 @@ async function expectPending(promise: Promise<unknown>): Promise<void> {
         timer = setTimeout(() => resolve("pending"), 0);
       }),
     ]);
+
     expect(result).toBe("pending");
   } finally {
     if (timer !== undefined) clearTimeout(timer);
@@ -135,9 +139,11 @@ describe("context-bound mutation effects", () => {
     const handle = f.native.member({ id: "one" });
     const values: number[] = [];
     const stop = subscribe(handle, (value) => values.push(value));
+
     try {
       const prediction = predictionFor(f.save, f.native.target(handle)!, () => 42);
       const pending = f.binding().member({ id: "one", value: 42 }, { optimistic: [prediction] });
+
       void pending.catch(() => undefined);
       expect(values).toStrictEqual([42]);
       f.context.dispose();
@@ -182,6 +188,7 @@ describe("context-bound mutation effects", () => {
               return { done: true, value: undefined };
             },
           };
+
           Object.defineProperty(values, Symbol.iterator, {
             get() {
               if (phase === "iterator getter") retire();
@@ -193,8 +200,10 @@ describe("context-bound mutation effects", () => {
               };
             },
           });
+
           try {
             let semanticError: unknown;
+
             try {
               if (arrayKind === "effects")
                 bindOperation(f.graph, f.save, {
@@ -207,14 +216,17 @@ describe("context-bound mutation effects", () => {
             } catch (error) {
               semanticError = error;
             }
+
             expect(semanticError).toMatchObject({ kind: "disposed" });
             expect(factories).toBe(phase === "iterator getter" ? 0 : 1);
             expect(pulls).toBe(0);
             expect(closes).toBe(phase === "iterator getter" ? 0 : 1);
+
             if (phase !== "iterator getter") {
               expect(factoryReceiver).toBe(values);
               expect(closeReceiver).toBe(iterator);
             }
+
             expect(f.backend.calls.filter((call) => call.name === "save")).toHaveLength(0);
             expect(retirement).toBeDefined();
             await expect(retirement!).resolves.toBeUndefined();
@@ -252,13 +264,16 @@ describe("context-bound mutation effects", () => {
               };
             },
           };
+
           Object.defineProperty(values, Symbol.iterator, {
             value() {
               return iterator;
             },
           });
+
           try {
             let observed: unknown;
+
             try {
               if (arrayKind === "effects")
                 bindOperation(f.graph, f.save, {
@@ -271,11 +286,13 @@ describe("context-bound mutation effects", () => {
             } catch (error) {
               observed = error;
             }
+
             expect(observed).toBe(semanticError);
             expect(returnReads).toBe(1);
             expect(returnCalls).toBe(failure === "return getter" ? 0 : 1);
             expect(f.backend.calls.filter((call) => call.name === "save")).toHaveLength(0);
             expect(retirement).toBeDefined();
+
             if (failure === "invalid return")
               await expect(retirement!).rejects.toBeInstanceOf(TypeError);
             else await expect(retirement!).rejects.toBe(cleanupError);
@@ -305,14 +322,17 @@ describe("context-bound mutation effects", () => {
           return { done: true, value: undefined };
         },
       };
+
       Object.defineProperty(values, Symbol.iterator, {
         value(this: unknown) {
           factoryReceiver = this;
           return iterator;
         },
       });
+
       try {
         let observed: unknown;
+
         try {
           if (arrayKind === "effects")
             bindOperation(f.graph, f.save, {
@@ -325,6 +345,7 @@ describe("context-bound mutation effects", () => {
         } catch (error) {
           observed = error;
         }
+
         expect(observed).toBe(failure);
         expect(factoryReceiver).toBe(values);
         expect(nextReceiver).toBe(iterator);
@@ -367,7 +388,9 @@ describe("context-bound mutation effects", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "selector-receiver", operations: { query, mutation } }),
     });
+
     context = createBindingContext(graph);
+
     try {
       const effect = profileEffect(mutation, 0, query, { prepare: () => [], settle: () => [] });
       const binding = bindOperation(graph, mutation, {
@@ -376,10 +399,12 @@ describe("context-bound mutation effects", () => {
         effects: [effect],
         run: mutation.run,
       });
+
       await expect(binding.member("live")).resolves.toBe("live");
       expect(receivers.length).toBeGreaterThan(0);
       expect(receivers.every((receiver) => receiver === observed)).toBe(true);
       const previousCalls = receivers.length;
+
       armed = true;
       await expect(binding.member("closed")).rejects.toMatchObject({ name: "AbortError" });
       expect(retirement).toBeDefined();
@@ -419,11 +444,13 @@ describe("context-bound mutation effects", () => {
             callPropertyRead = true;
             retirement ??= context.retire();
           }
+
           return Reflect.get(target, property, actualReceiver);
         },
       },
     );
     const thenable = { then } as unknown as PromiseLike<readonly PreparedEffect[]>;
+
     try {
       const effect = profileEffect(mutation, 0, query, {
         prepare: () => thenable,
@@ -439,6 +466,7 @@ describe("context-bound mutation effects", () => {
         (value) => ({ kind: "fulfilled" as const, value }),
         (reason: unknown) => ({ kind: "rejected" as const, reason }),
       );
+
       expect(callPropertyRead).toBe(false);
       expect(receiver).toBe(thenable);
       expect(outcome).toEqual({ kind: "fulfilled", value: "live" });
@@ -450,6 +478,7 @@ describe("context-bound mutation effects", () => {
 
   it("uses the executing plan and physical override identity across existing same-context profiles", async () => {
     const f = fixture();
+
     try {
       const numbers = f.native.member({ id: "one" }, { initial: 1 });
       const labels = f.labels.member({ id: "one" }, { initial: "label:1" });
@@ -475,8 +504,10 @@ describe("context-bound mutation effects", () => {
         prepare: (phase) =>
           phase.existing(phase.selectedInput).map((target) => {
             const native = target.forBinding(f.native);
+
             if (native !== undefined) return phase.original(native);
             const label = target.forBinding(f.labels);
+
             return label === undefined
               ? phase.prepare(target)
               : phase.predict(label, (_current, input) => {
@@ -495,6 +526,7 @@ describe("context-bound mutation effects", () => {
           prepare: (phase) =>
             phase.existing(phase.selectedInput).map((target) => {
               const label = target.forBinding(f.labels);
+
               return label === undefined
                 ? phase.prepare(target)
                 : phase.predict(label, () => "second-plan");
@@ -502,11 +534,13 @@ describe("context-bound mutation effects", () => {
           settle: () => [],
         }),
       );
+
       expect(f.backend.calls).toHaveLength(0);
       expect(f.selections).toHaveLength(0);
       const override = predictionFor(f.save, f.native.target(numbers)!, () => 20);
       const extra = predictionFor(f.save, f.native.target(unrelated)!, () => 99);
       const running = first.member({ id: "one", value: 7 }, { optimistic: [override, extra] });
+
       expect([
         visible(numbers),
         visible(labels),
@@ -525,6 +559,7 @@ describe("context-bound mutation effects", () => {
       await Promise.all([numbers.ready, labels.ready, sameValue.ready]);
       expect([visible(numbers), visible(labels)]).toEqual([8, "label:8"]);
       const again = second.member({ id: "one", value: 9 });
+
       expect(visible(labels)).toBe("second-plan");
       f.completeSave();
       await again;
@@ -548,6 +583,7 @@ describe("context-bound mutation effects", () => {
     const graph = createGraph({
       contract: defineContract({ namespace: "preparation", operations: { query, save } }),
     });
+
     try {
       const context = createBindingContext(graph);
       const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
@@ -580,6 +616,7 @@ describe("context-bound mutation effects", () => {
         () => undefined,
         (error: unknown) => error,
       );
+
       await entered.promise;
       expect(visible(handle)).toBe(1);
       expect(values).toEqual([1]);
@@ -596,6 +633,7 @@ describe("context-bound mutation effects", () => {
 
   it("preserves synchronous preparation and consumes a genuine thenable before run", async () => {
     const f = fixture();
+
     try {
       const handle = f.native.member({ id: "one" }, { initial: 1 });
       const order: string[] = [];
@@ -611,6 +649,7 @@ describe("context-bound mutation effects", () => {
               return Promise.resolve(instructions).then(resolve, reject);
             },
           };
+
           return thenable;
         },
         settle: () => {
@@ -630,6 +669,7 @@ describe("context-bound mutation effects", () => {
         },
       });
       const running = binding.member({ id: "one", value: 2 });
+
       expect(order).toEqual(["prepare", "then"]);
       await started.promise;
       expect(order).toEqual(["prepare", "then", "run"]);
@@ -675,16 +715,20 @@ describe("context-bound mutation effects", () => {
           return Promise.resolve(resolve([]));
         },
       } as PromiseLike<readonly PreparedEffect[]>;
+
       try {
         const handle = f.native.member({ id: "one" }, { initial: 1 });
         const mutation = f.binding(
           profileEffect(f.save, 0, f.query, {
             prepare: () => {
               prepareCalls += 1;
+
               if (mode === "graph.self-retire" || mode === "thenable.revoked")
                 retirement = f.graph.retire();
+
               if (mode === "context.self-retire") retirement = f.context.retire();
               if (mode === "thenable.revoked") return revokedThenable;
+
               if (
                 mode === "graph.retire" ||
                 mode === "context.retire" ||
@@ -692,6 +736,7 @@ describe("context-bound mutation effects", () => {
                 mode === "context.self-retire"
               )
                 return nativeOriginal;
+
               return gate.promise;
             },
             settle: () => [],
@@ -702,6 +747,7 @@ describe("context-bound mutation effects", () => {
           () => undefined,
           (error: unknown) => error,
         );
+
         if (mode === "caller") caller.abort();
         if (mode === "graph") f.graph.cancelPending();
         if (mode === "context") f.context.dispose();
@@ -711,14 +757,17 @@ describe("context-bound mutation effects", () => {
         if (mode === "context.retire") retirement = f.context.retire();
         expect(await outcome).toMatchObject({ name: "AbortError" });
         const selfRetired = mode === "graph.self-retire" || mode === "context.self-retire";
+
         if (retirement !== undefined && !selfRetired) {
           void retirement.catch(() => undefined);
           await expectPending(retirement);
         }
+
         gate.resolve([]);
         expect(f.backend.calls).toHaveLength(0);
         if (mode === "caller" || mode === "graph") expect(visible(handle)).toBe(1);
         expect(prepareCalls).toBe(1);
+
         if (selfRetired) {
           if (retirement === undefined) throw new Error("Expected self-retirement promise");
           finalizer.resolve();
@@ -746,6 +795,7 @@ describe("context-bound mutation effects", () => {
 
   it("enrolls before option and signal callouts and removes caller links after cancellation", async () => {
     const f = fixture();
+
     try {
       const mutation = f.binding();
       let linked = 0;
@@ -759,15 +809,19 @@ describe("context-bound mutation effects", () => {
               target.addEventListener(...args);
               f.graph.cancelPending();
             };
+
           if (key === "removeEventListener")
             return (...args: Parameters<AbortSignal["removeEventListener"]>) => {
               unlinked += 1;
               target.removeEventListener(...args);
             };
+
           const value: unknown = Reflect.get(target, key, target);
+
           return typeof value === "function" ? value.bind(target) : value;
         },
       });
+
       await expect(
         mutation.member({ id: "one", value: 2 }, { abortSignal: caller }),
       ).rejects.toMatchObject({ name: "AbortError" });
@@ -778,6 +832,7 @@ describe("context-bound mutation effects", () => {
           return controller.signal;
         },
       };
+
       await expect(mutation.member({ id: "one", value: 2 }, options)).rejects.toMatchObject({
         name: "AbortError",
       });
@@ -790,6 +845,7 @@ describe("context-bound mutation effects", () => {
 
   it("discovers new settlement siblings and preserves selected versus current completed sources", async () => {
     const f = fixture();
+
     try {
       const numbers = f.native.member({ id: "one", revision: 1 }, { initial: 1 });
       const alternate = bindOperation(f.graph, f.query, {
@@ -812,6 +868,7 @@ describe("context-bound mutation effects", () => {
               target.forBinding(f.labels) ??
               target.forBinding(alternate) ??
               target.forBinding(late);
+
             return compatible === undefined
               ? phase.prepare(target)
               : phase.predict(compatible, declared);
@@ -826,12 +883,15 @@ describe("context-bound mutation effects", () => {
             ),
       });
       const running = f.binding(effect).member({ id: "one", revision: 7, value: 8 });
+
       expect([visible(labels), visible(defaults)]).toEqual(["predicted:8", "predicted:8"]);
       const newSibling = late.member({ id: "one", revision: 100 }, { initial: "not predicted" });
+
       expect(visible(newSibling)).toBe("not predicted");
       f.completeSave();
       await running;
       const calls = f.backend.pending("read");
+
       expect(calls.map((call) => call.input)).toEqual([
         { id: "one", revision: 7 },
         { id: "one", revision: 2 },
@@ -856,6 +916,7 @@ describe("context-bound mutation effects", () => {
     const f = fixture();
     const prepared = Promise.withResolvers<void>();
     const gate = Promise.withResolvers<void>();
+
     try {
       const handle = f.native.member({ id: "one" }, { initial: 1 });
       const effect = profileEffect(f.save, 0, f.query, {
@@ -863,6 +924,7 @@ describe("context-bound mutation effects", () => {
           const instructions = phase
             .existing(phase.selectedInput)
             .map((target) => phase.original(target.forBinding(f.native)!));
+
           prepared.resolve();
           await gate.promise;
           return instructions;
@@ -880,6 +942,7 @@ describe("context-bound mutation effects", () => {
         },
       });
       const running = binding.member({ id: "one", value: 2 });
+
       await prepared.promise;
       jest.advanceTimersByTime(101);
       expect(f.native.target(handle)).toBeUndefined();
@@ -890,6 +953,7 @@ describe("context-bound mutation effects", () => {
       f.completeSave();
       await running;
       const refreshing = handle.revalidate();
+
       expect(f.backend.pending("read")).toHaveLength(1);
       f.backend.resolve(f.backend.pending("read")[0]!, 9);
       await refreshing;
@@ -907,6 +971,7 @@ describe("context-bound mutation effects", () => {
     const started = Promise.withResolvers<void>();
     let expiredProducerCalls = 0;
     let freshProducerCalls = 0;
+
     try {
       const handle = f.native.member({ id: "one" }, { initial: 1 });
       const oldTicket = f.native.target(handle)!;
@@ -914,9 +979,11 @@ describe("context-bound mutation effects", () => {
         prepare: async (phase) => {
           const old = phase.existing(phase.selectedInput)[0]!;
           const oldTyped = old.forBinding(f.native)!;
+
           discovered.resolve();
           await gate.promise;
           const fresh = phase.existing(phase.selectedInput)[0]!;
+
           return [
             phase.prepare(old),
             phase.predict(oldTyped, () => {
@@ -941,12 +1008,14 @@ describe("context-bound mutation effects", () => {
         },
       });
       const running = binding.member({ id: "one", value: 2 });
+
       await discovered.promise;
       jest.advanceTimersByTime(101);
       expect(f.native.target(handle)).toBeUndefined();
       expect(peekStore(handle)).toMatchObject({ kind: "stable", present: false });
       expect(f.backend.calls).toHaveLength(0);
       const successor = f.native.member({ id: "one" });
+
       expect(successor.identity).toBe(handle.identity);
       expect(f.backend.pending("read")).toHaveLength(1);
       f.backend.resolve(f.backend.pending("read")[0]!, 7);
@@ -972,24 +1041,29 @@ describe("context-bound mutation effects", () => {
   it("keeps old overrides stale while a retained reset handle constructs a fresh instruction", async () => {
     const f = fixture();
     let stop: (() => void) | undefined;
+
     try {
       const handle = f.native.member({ id: "one" }, { initial: 1 });
+
       stop = subscribe(handle, () => undefined);
       const identity = handle.identity;
       const old = predictionFor(f.save, f.native.target(handle)!, () => 99);
       const resetting = f.graph.reset();
       const fresh = predictionFor(f.save, f.native.target(handle)!, () => 22);
+
       expect(handle.identity).toBe(identity);
       expect(f.backend.pending("read")).toHaveLength(1);
       f.backend.resolve(f.backend.pending("read")[0]!, 2);
       await resetting;
       const first = f.binding().member({ id: "one", value: 3 }, { optimistic: [old] });
+
       expect(visible(handle)).toBe(2);
       f.completeSave();
       await first;
       f.backend.resolve(f.backend.pending("read")[0]!, 4);
       await handle.ready;
       const next = f.binding().member({ id: "one", value: 5 }, { optimistic: [fresh] });
+
       expect(visible(handle)).toBe(22);
       f.completeSave();
       await next;
@@ -1003,28 +1077,33 @@ describe("context-bound mutation effects", () => {
     "diagnoses and omits a %s prediction without fallback, issue mutation or dispatch failure",
     async (mode) => {
       const f = fixture("invalidate", mode === "capacity" ? 1 : 64);
+
       try {
         const handle = f.native.member({ id: "one" }, { initial: 1 });
         const label = f.labels.member({ id: "one" }, { initial: "one" });
         const lease = observeStore(f.graph, handle);
         const issue = Object.freeze({ message: "earlier observation issue" });
+
         lease.reject(issue);
         let fallbackCalls = 0;
         const effect = profileEffect(f.save, 0, f.query, {
           prepare: (phase) =>
             phase.existing(phase.selectedInput).map((target) => {
               const native = target.forBinding(f.native);
+
               if (native !== undefined)
                 return phase.predict(native, () => {
                   fallbackCalls += 1;
                   return 77;
                 });
+
               return phase.predict(target.forBinding(f.labels)!, () => "valid");
             }),
           settle: () => [],
         });
         const binding = f.binding(effect);
         let held: Promise<unknown> | undefined;
+
         if (mode === "capacity")
           held = f.binding().member(
             { id: "one", value: 6 },
@@ -1032,16 +1111,19 @@ describe("context-bound mutation effects", () => {
               optimistic: [predictionFor(f.save, f.native.target(handle)!, () => 6)],
             },
           );
+
         const readable = signal(10);
         const override = predictionFor(f.save, f.native.target(handle)!, () => {
           if (mode === "throw") throw new Error("predictor");
           if (mode === "read") return readable.get();
           return 99;
         });
+
         fallbackCalls = 0;
         const faults: Fault[] = [];
         const stopFaults = onFault(f.graph, (fault) => faults.push(fault));
         const running = binding.member({ id: "one", value: 2 }, { optimistic: [override] });
+
         expect(fallbackCalls).toBe(0);
         expect(lease.issue.peek()).toBe(issue);
         expect(faults.some((fault) => fault.kind === "prediction")).toBe(true);
@@ -1061,11 +1143,13 @@ describe("context-bound mutation effects", () => {
     "distinguishes dispatched transport cancellation from %s settlement authority",
     async (mode) => {
       const f = fixture();
+
       try {
         const handle = f.native.member({ id: "one" }, { initial: 1 });
         const caller = new AbortController();
         const running = f.binding().member({ id: "one", value: 2 }, { abortSignal: caller.signal });
         const original = f.backend.pending("save")[0]!;
+
         if (mode === "caller") caller.abort();
         if (mode === "graph") f.graph.cancelPending();
         if (mode === "context") f.context.dispose();
@@ -1085,6 +1169,7 @@ describe("context-bound mutation effects", () => {
 
   it("does not replay a backend write or settle effects when captured output completion rejects", async () => {
     const f = fixture();
+
     try {
       const handle = f.native.member({ id: "one" }, { initial: 1 });
       const cause = new Error("output rejected");
@@ -1099,11 +1184,13 @@ describe("context-bound mutation effects", () => {
       });
       const override = predictionFor(f.save, f.native.target(handle)!, () => 2);
       const running = binding.member({ id: "one", value: 2 }, { optimistic: [override] });
+
       expect(visible(handle)).toBe(2);
       const outcome = running.then(
         () => undefined,
         (error: unknown) => error,
       );
+
       f.completeSave();
       expect(await outcome).toBe(cause);
       expect(visible(handle)).toBe(1);
@@ -1136,6 +1223,7 @@ describe("context-bound mutation effects", () => {
             nativeAdd(type, listener, options);
             if (type === "abort") linkedListener = listener;
           };
+
         if (property === "removeEventListener")
           return (
             type: string,
@@ -1143,12 +1231,15 @@ describe("context-bound mutation effects", () => {
             options?: Parameters<typeof nativeRemove>[2],
           ) => {
             nativeRemove(type, listener, options);
+
             if (type === "abort" && listener === linkedListener) {
               finalOutputAdoption = true;
               listenerRemoved.resolve();
             }
           };
+
         const value = Reflect.get(target, property, target);
+
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
@@ -1158,6 +1249,7 @@ describe("context-bound mutation effects", () => {
           providerRead = true;
           return undefined;
         }
+
         if (!finalOutputAdoption) return undefined;
         return (resolve: (value: string) => void, reject: (reason: unknown) => void) => {
           finalization.promise.then(() => resolve("finalized"), reject);
@@ -1166,6 +1258,7 @@ describe("context-bound mutation effects", () => {
     });
     let call: (typeof f.backend.calls)[number] | undefined;
     let providerResolved = false;
+
     try {
       const binding = bindOperation(f.graph, f.save, {
         context: f.context,
@@ -1182,6 +1275,7 @@ describe("context-bound mutation effects", () => {
         },
       });
       const running = binding.member({ id: "one", value: 2 }, { abortSignal: signal });
+
       await started.promise;
       call = f.backend.pending("save")[0]!;
       f.backend.resolve(call, providerResult as unknown as string);
@@ -1191,6 +1285,7 @@ describe("context-bound mutation effects", () => {
       expect(finalOutputAdoption).toBe(true);
 
       const retirement = f.context.retire();
+
       await expectPending(running);
       await expectPending(retirement);
 
@@ -1201,6 +1296,7 @@ describe("context-bound mutation effects", () => {
     } finally {
       if (!providerResolved && call !== undefined)
         f.backend.resolve(call, providerResult as unknown as string);
+
       finalization.resolve();
       f.graph.dispose();
     }
@@ -1220,6 +1316,7 @@ describe("context-bound mutation effects", () => {
     let callbackInput: unknown;
     let callbackResult: unknown;
     let providerResolved = false;
+
     Object.defineProperty(provider.promise, "then", {
       configurable: true,
       value: function (
@@ -1228,8 +1325,10 @@ describe("context-bound mutation effects", () => {
         onRejected: ((cause: unknown) => unknown) | null | undefined,
       ): Promise<unknown> {
         observerCalls += 1;
+
         if (typeof onFulfilled !== "function")
           throw new Error("Expected the public bound mutation continuation");
+
         const callbackCarrier = Reflect.apply(nativeThen, this, [
           (value: unknown) => {
             callbackCalls += 1;
@@ -1238,6 +1337,7 @@ describe("context-bound mutation effects", () => {
           },
           onRejected,
         ]) as Promise<unknown>;
+
         void Reflect.apply(nativeThen, callbackCarrier, [
           (value: unknown) => {
             callbackResult = value;
@@ -1251,6 +1351,7 @@ describe("context-bound mutation effects", () => {
         return legacyCarrier.promise;
       },
     });
+
     try {
       const binding = bindOperation(f.graph, f.save, {
         context: f.context,
@@ -1271,6 +1372,7 @@ describe("context-bound mutation effects", () => {
         },
       });
       const running = binding.member({ id: "one", value: 2 });
+
       expect(runCalls).toBe(0);
       await started.promise;
       expect(prepareCalls).toBe(1);
@@ -1278,6 +1380,7 @@ describe("context-bound mutation effects", () => {
       expect(observerCalls).toBe(1);
 
       const retirement = f.context.retire();
+
       await expectPending(retirement);
       await expectPending(running);
       legacyCarrier.resolve("independent legacy result");
@@ -1301,6 +1404,7 @@ describe("context-bound mutation effects", () => {
 
   it("reports original post-success failures independently and finishes resolution before returning success", async () => {
     const f = fixture();
+
     try {
       const cause = new Error("settlement validation");
       const applied = new Error("target key");
@@ -1325,6 +1429,7 @@ describe("context-bound mutation effects", () => {
         contract: defineContract({ namespace: "continuations", operations: { query, save } }),
         onUnobservedFault: (error) => f.faults.push(error),
       });
+
       try {
         const context = createBindingContext(graph);
         const binding = bindOperation(graph, query, { context, profile: {}, fetch: query.fetch });
@@ -1348,6 +1453,7 @@ describe("context-bound mutation effects", () => {
               prepare: () => [],
               settle: async (phase) => {
                 const targets = phase.existing(phase.selectedInput);
+
                 entered.resolve();
                 await gate.promise;
                 return [
@@ -1363,6 +1469,7 @@ describe("context-bound mutation effects", () => {
           returned = true;
           return result;
         });
+
         f.backend.resolve(f.backend.pending("continuation")[0]!, "saved");
         await entered.promise;
         expect(returned).toBe(false);
@@ -1385,6 +1492,7 @@ describe("context-bound mutation effects", () => {
 
   it("rejects instructions reused from another preparation without publishing or running", async () => {
     const f = fixture();
+
     try {
       const handle = f.native.member({ id: "one" }, { initial: 1 });
       let previous: readonly PreparedEffect[] | undefined;
@@ -1395,6 +1503,7 @@ describe("context-bound mutation effects", () => {
       });
       const binding = f.binding(effect);
       const first = binding.member({ id: "one", value: 2 });
+
       f.completeSave();
       await first;
       await expect(binding.member({ id: "one", value: 3 })).rejects.toBeInstanceOf(TypeError);
@@ -1407,10 +1516,13 @@ describe("context-bound mutation effects", () => {
 
   it("keeps original raw pre-aborted callback behavior while refusing bound preparation", async () => {
     const f = fixture();
+
     try {
       const controller = new AbortController();
+
       controller.abort();
       const raw = f.graph.api.save({ id: "one", value: 1 }, { abortSignal: controller.signal });
+
       expect(f.backend.pending("save")[0]!.aborted).toBe(true);
       await expect(
         f.binding().member({ id: "one", value: 2 }, { abortSignal: controller.signal }),
@@ -1425,6 +1537,7 @@ describe("context-bound mutation effects", () => {
 
   it("retires only the bound context's mutation controllers before abort reentry", async () => {
     const f = fixture();
+
     try {
       const otherContext = createBindingContext(f.graph);
       const other = bindOperation(f.graph, f.save, {
@@ -1444,6 +1557,7 @@ describe("context-bound mutation effects", () => {
             "abort",
             () => {
               activeDuringAbort = f.context.active.peek();
+
               try {
                 f.binding().member(input);
               } catch (error) {
@@ -1459,6 +1573,7 @@ describe("context-bound mutation effects", () => {
       const b = other.member({ id: "one", value: 2 });
       const c = f.graph.api.save({ id: "one", value: 3 });
       const calls = [...f.backend.pending("save")];
+
       f.context.dispose();
       expect(reentry).toBeInstanceOf(Fault);
       expect(activeDuringAbort).toBe(false);
@@ -1477,6 +1592,7 @@ describe("context-bound mutation effects", () => {
       const f = fixture();
       const gate = Promise.withResolvers<void>();
       const entered = Promise.withResolvers<void>();
+
       try {
         f.native.member({ id: "one" }, { initial: 1 });
         const caller = new AbortController();
@@ -1484,6 +1600,7 @@ describe("context-bound mutation effects", () => {
           prepare: () => [],
           settle: async (phase) => {
             const targets = phase.existing(phase.selectedInput);
+
             entered.resolve();
             await gate.promise;
             return targets.map((target) => phase.current(target));
@@ -1492,6 +1609,7 @@ describe("context-bound mutation effects", () => {
         const running = f
           .binding(effect)
           .member({ id: "one", value: 2 }, { abortSignal: caller.signal });
+
         f.completeSave();
         await entered.promise;
         if (mode === "caller") caller.abort();
@@ -1513,6 +1631,7 @@ describe("context-bound mutation effects", () => {
     let reenter = false;
     let resetting: Promise<void> | undefined;
     let stop: (() => void) | undefined;
+
     try {
       const binding = bindOperation(f.graph, f.query, {
         context: f.context,
@@ -1531,16 +1650,19 @@ describe("context-bound mutation effects", () => {
         },
       });
       const handle = binding.member({ id: "one", revision: 1 });
+
       stop = subscribe(handle, () => undefined);
       const original = f.backend.pending("read")[0]!;
       const mutation = f.binding();
       const running = mutation.member({ id: "one", revision: 7, value: 2 });
+
       reenter = true;
       f.completeSave();
       await running;
       expect(original.aborted).toBe(true);
       expect(resetting).toBeDefined();
       const requests = f.backend.calls.filter((call) => call.name === "read");
+
       expect(requests).toHaveLength(2);
       expect(requests[1]!.input).toEqual({ id: "one", revision: 1 });
       f.backend.resolve(requests[1]!, 3);

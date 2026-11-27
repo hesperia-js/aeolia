@@ -326,6 +326,7 @@ function matchesOptions(
   if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
   return checks.every(([field, check]) => {
     const option: unknown = Reflect.get(value, field);
+
     afterRead?.();
     return option === undefined || check(option, afterRead, cleanup);
   });
@@ -333,11 +334,14 @@ function matchesOptions(
 
 function hasOptionFields(value: unknown, checks: OptionChecks, afterRead?: () => void): boolean {
   if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
+
   for (const [field] of checks) {
     const found = Object.hasOwn(value, field);
+
     afterRead?.();
     if (found) return true;
   }
+
   return false;
 }
 
@@ -381,9 +385,11 @@ export function isCancellationOptions(
 ): value is Pick<ValueOptions<unknown>, "abortSignal"> {
   if (!isObject(value) || typeof value === "function" || Array.isArray(value)) return false;
   const hasSignal = "abortSignal" in value;
+
   afterRead?.();
   if (!hasSignal) return true;
   const signal = value.abortSignal;
+
   afterRead?.();
   return signal === undefined || isAbortSignal(signal, afterRead);
 }
@@ -636,6 +642,7 @@ export function captureQueryAcquisition(value: unknown): QueryAcquisition {
 
   let descriptor: PropertyDescriptor | undefined;
   let inherited = false;
+
   try {
     descriptor = Object.getOwnPropertyDescriptor(value, "acquisition");
     inherited = descriptor === undefined && "acquisition" in value;
@@ -647,9 +654,11 @@ export function captureQueryAcquisition(value: unknown): QueryAcquisition {
     if (inherited) throw new TypeError("Invalid query acquisition.");
     return "cache";
   }
+
   if (!Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid query acquisition.");
 
   const acquisition: unknown = descriptor.value;
+
   if (acquisition === undefined || acquisition === "cache") return "cache";
   if (acquisition === "fetch") return acquisition;
   throw new TypeError("Invalid query acquisition.");
@@ -678,11 +687,13 @@ export function isCreateQueryInput(
   value: unknown,
 ): value is CreateQueryInput<unknown, unknown, string, any> {
   let acquisition: QueryAcquisition;
+
   try {
     acquisition = captureQueryAcquisition(value);
   } catch {
     return false;
   }
+
   return isCreateQueryInputWithAcquisition(value, acquisition);
 }
 
@@ -1093,10 +1104,12 @@ export function isCreatePositionedStreamInput(
     typeof value.key !== "function"
   )
     return false;
+
   if (!("source" in value) || !isObject(value.source)) return false;
   const source = value.source as Partial<
     PositionedStreamSource<unknown, unknown, unknown, unknown>
   >;
+
   return (
     typeof source.open === "function" &&
     typeof source.validateReader === "function" &&
@@ -1252,6 +1265,7 @@ export function isCreateMutationInput(
     !Array.isArray(value.affects)
   )
     return false;
+
   for (const effect of value.affects) if (!isAffected(effect)) return false;
   return true;
 }
@@ -1301,52 +1315,69 @@ function isOptimisticMap(
   if (!isObject(value)) return false;
   const read = (target: object, key: PropertyKey): unknown => {
     const result: unknown = Reflect.get(target, key);
+
     afterRead?.();
     return result;
   };
   const size = read(value, "size");
+
   if (typeof size !== "number" || !Number.isInteger(size) || size < 0) return false;
+
   for (const key of ["get", "has", "forEach", "entries", "keys", "values"] as const) {
     if (typeof read(value, key) !== "function") return false;
   }
+
   const factory = read(value, Symbol.iterator);
+
   if (typeof factory !== "function") return false;
   const iterator: unknown = Reflect.apply(factory, value, []);
+
   if (!isObject(iterator)) {
     afterRead?.();
     throw new TypeError("The optimistic map iterator is not an object.");
   }
+
   let needsClose = true;
   const close = (): void => {
     if (!needsClose) return;
     needsClose = false;
     const action = (): void => {
       const closeMethod: unknown = Reflect.get(iterator, "return");
+
       if (closeMethod === undefined || closeMethod === null) return;
       const result: unknown = Reflect.apply(
         closeMethod as (...args: never[]) => unknown,
         iterator,
         [],
       );
+
       if (!isObject(result))
         throw new TypeError("The optimistic map iterator return is not an object.");
     };
+
     if (cleanup === undefined) action();
     else cleanup(action);
   };
+
   try {
     afterRead?.();
     const next = read(iterator, "next");
+
     for (;;) {
       const step: unknown = Reflect.apply(next as (...args: never[]) => unknown, iterator, []);
+
       afterRead?.();
+
       if (!isObject(step))
         throw new TypeError("The optimistic map iterator result is not an object.");
+
       if (read(step, "done")) {
         needsClose = false;
         return true;
       }
+
       const entry = read(step, "value");
+
       if (
         !Array.isArray(entry) ||
         read(entry, "length") !== 2 ||
@@ -1359,6 +1390,7 @@ function isOptimisticMap(
           // An owned close failure cannot replace the invalid-options result.
           if (cleanup === undefined) throw error;
         }
+
         return false;
       }
     }
@@ -1368,6 +1400,7 @@ function isOptimisticMap(
     } catch {
       // A validation failure keeps its original cause.
     }
+
     throw error;
   }
 }
@@ -1400,6 +1433,7 @@ export type OperationDefinition =
 
 export function isOperationDefinition(value: unknown): value is OperationDefinition {
   if (!isObject(value) || !("kind" in value)) return false;
+
   switch (value.kind) {
     case "query":
       return isQueryDefinition(value);

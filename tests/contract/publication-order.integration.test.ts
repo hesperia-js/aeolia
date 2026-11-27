@@ -63,14 +63,17 @@ describe("state-layer golden paths", () => {
       operations: { zeta, alpha },
     });
     const source = createGraph({ contract });
+
     source.store(zeta).set(9);
     source.store(alpha).set(1);
 
     const state = snapshot(source);
+
     expect(Object.keys(state.entries)).toEqual(["alpha", "zeta"]);
 
     const target = createGraph({ contract });
     const report = adopt(target, state);
+
     expect(report.skipped).toEqual([]);
     expect(target.store(alpha).value.get()).toBe(1);
     expect(target.store(zeta).value.get()).toBe(9);
@@ -103,16 +106,19 @@ describe("state-layer golden paths", () => {
       }),
     });
     const store = graph.api.query("one");
+
     backend.resolve(backend.calls[0]!, { id: "one" });
     await flush();
 
     const invalidation = graph.api.invalidate("one");
+
     backend.resolve(backend.calls[1]!, undefined);
     await invalidation;
     expect(store.status.get()).toBe("stale");
     expect(backend.calls).toHaveLength(2);
 
     const refresh = graph.api.revalidate("one");
+
     backend.resolve(backend.calls[2]!, undefined);
     await refresh;
     expect(backend.calls).toHaveLength(4);
@@ -154,6 +160,7 @@ describe("state-layer golden paths", () => {
       idleMs: 5,
     });
     const held = graph.api.query("one");
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
     jest.advanceTimersByTime(5);
@@ -161,6 +168,7 @@ describe("state-layer golden paths", () => {
     expect(held.value.get()).toBeUndefined();
 
     const invalidation = graph.api.invalidate("one");
+
     expect(held.value.get()).toBeUndefined();
     backend.resolve(backend.calls[1]!, undefined);
     await invalidation;
@@ -168,6 +176,7 @@ describe("state-layer golden paths", () => {
     expect(held.value.get()).toBeUndefined();
 
     const refresh = graph.api.revalidate("one");
+
     backend.resolve(backend.calls[2]!, undefined);
     await refresh;
     expect(backend.calls).toHaveLength(3);
@@ -199,6 +208,7 @@ describe("state-layer golden paths", () => {
 
     const settlement = graph.api.mutation({ id: "7" });
     const reached = graph.at("missing/7");
+
     expect(reached.value.get()).toBeUndefined();
 
     backend.resolve(backend.calls[0]!, "ok");
@@ -219,9 +229,11 @@ describe("state-layer golden paths", () => {
 
     const liveGraph = createGraph({ contract, idleMs: 100 });
     const liveStore = liveGraph.api.query();
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
     const stop = watch(liveStore.value, () => undefined);
+
     jest.advanceTimersByTime(5);
     liveStore.set(2);
     jest.advanceTimersByTime(9);
@@ -234,6 +246,7 @@ describe("state-layer golden paths", () => {
     backend.clear();
     const collectedGraph = createGraph({ contract, idleMs: 5 });
     const collectedStore = collectedGraph.api.query();
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
     jest.advanceTimersByTime(6);
@@ -313,6 +326,7 @@ describe("state-layer golden paths", () => {
     });
     const first = graph.api.stream();
     const second = graph.api.stream();
+
     expect(first.value).toBe(second.value);
     expect(first.status.get()).toBe("opening");
 

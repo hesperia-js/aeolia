@@ -77,6 +77,7 @@ function makeWorld(
     rawName === undefined
       ? undefined
       : graph.api.query({ key: rawName }, { initial: "raw-initial" });
+
   queryKeys = 0;
   const context = createBindingContext(graph);
   const queryBinding = bindOperation(graph, query, {
@@ -97,6 +98,7 @@ function makeWorld(
     },
   });
   const streamBinding = bindStream(graph, stream, graph.api.stream, { context });
+
   return {
     backend,
     graph,
@@ -121,6 +123,7 @@ function isAdoptedStreamEntry(entry: AdoptedEntryV2): entry is AdoptedStreamEntr
 
 function reference(role: string, reverse = false): unknown {
   const shared = { room: "shared" };
+
   return reverse ? { role, alpha: shared, zeta: shared } : { zeta: shared, alpha: shared, role };
 }
 
@@ -130,6 +133,7 @@ async function receiveStreamValue(world: World, input: Input, value: string) {
   const stop = subscribe(store, (item) => {
     if (item === value) received.resolve();
   });
+
   world.backend.emit("updates", value);
   await received.promise;
   stop();
@@ -150,10 +154,12 @@ it("retains genuine sibling transfer discovery after another binding context ret
   const world = makeWorld();
   const input = { key: "same-key" };
   const retiredStore = world.queryBinding.member(input);
+
   try {
     await expect(retiredStore.ready).resolves.toBe("bound:same-key");
     await world.queryBinding.context.retire();
     const sibling = world.siblingQueryBinding.member(input);
+
     await expect(sibling.ready).resolves.toBe("sibling:same-key");
     expect(() => createTransferScope(world.graph, world.queryBinding, retiredStore)).toThrow(
       TypeError,
@@ -178,12 +184,15 @@ it("round-trips equal-key raw, query, and stream addresses without activating im
   let stopSource: (() => void) | undefined;
   let stopProjection: (() => void) | undefined;
   let closeProjection: (() => void) | undefined;
+
   try {
     source.rawStore!.set("raw-source");
     const sourceQuery = source.queryBinding.member(input);
+
     expect(await sourceQuery.ready).toBe("bound:shared");
     const sourceStream = source.streamBinding.member(input);
     const sourceValue = Promise.withResolvers<void>();
+
     stopSource = subscribe(sourceStream, (value) => {
       if (value === "stream-source") sourceValue.resolve();
     });
@@ -198,6 +207,7 @@ it("round-trips equal-key raw, query, and stream addresses without activating im
         { binding: source.streamBinding, reference: streamReference },
       ],
     });
+
     expect(encoded.version).toBe(2);
     expect(encoded.entries).toHaveLength(3);
     expect(encoded.entries.map((entry) => entry.address.kind).sort()).toEqual([
@@ -208,6 +218,7 @@ it("round-trips equal-key raw, query, and stream addresses without activating im
     const queryEntry = encoded.entries.find((entry) => entry.address.kind === "binding");
     const streamEntry = encoded.entries.find((entry) => entry.address.kind === "stream-binding");
     const rawEntry = encoded.entries.find((entry) => entry.address.kind === "raw");
+
     expect(queryEntry?.address).toMatchObject({
       kind: "binding",
       key: "shared",
@@ -241,6 +252,7 @@ it("round-trips equal-key raw, query, and stream addresses without activating im
         { binding: target.streamBinding, reference: reference("stream", true) },
       ],
     });
+
     expect(target.queryKeys()).toBe(0);
     expect(target.streamKeys()).toBe(0);
     expect(target.fetches()).toBe(0);
@@ -252,16 +264,20 @@ it("round-trips equal-key raw, query, and stream addresses without activating im
       "stream-binding",
     ]);
     const adoptedStream = report.adopted.find(isAdoptedStreamEntry);
+
     if (adoptedStream === undefined)
       throw new Error("Expected the stream address in the adoption report");
+
     expect(adoptedStream.valueRevision).toBeGreaterThan(0);
     expect(target.rawStore?.value.get()).toBe("raw-source");
 
     const targetQuery = target.queryBinding.member(input);
+
     expect(targetQuery.value.get()).toBe("bound:shared");
     expect(target.fetches()).toBe(0);
 
     const targetStream = target.streamBinding.member(input, { initial: "target-initial" });
+
     expect([
       targetStream.available.get(),
       targetStream.value.get(),
@@ -270,9 +286,11 @@ it("round-trips equal-key raw, query, and stream addresses without activating im
     expect(target.opens()).toBe(1);
 
     const targetProjection = project(targetStream, { kind: "accumulate", max: 3 });
+
     closeProjection = () => targetProjection.close();
     expect(targetProjection.value.get()).toEqual([]);
     const delivered = Promise.withResolvers<void>();
+
     stopProjection = subscribe(targetProjection, (values) => {
       if (values.length === 1 && values[0] === "stream-target") delivered.resolve();
     });
@@ -295,9 +313,11 @@ it("restores equal-key query siblings through their distinct profile and context
   const input = { key: "shared" };
   const firstReference = reference("profile-first");
   const secondReference = reference("profile-second");
+
   try {
     const first = source.queryBinding.member(input);
     const second = source.siblingQueryBinding.member(input);
+
     expect(await first.ready).toBe("bound:shared");
     expect(await second.ready).toBe("sibling:shared");
     expect(first.key).toBe(second.key);
@@ -310,6 +330,7 @@ it("restores equal-key query siblings through their distinct profile and context
         { binding: source.siblingQueryBinding, reference: secondReference },
       ],
     });
+
     expect(encoded.entries).toHaveLength(2);
     const report = adopt(target.graph, JSON.parse(JSON.stringify(encoded)) as typeof encoded, {
       bindings: [
@@ -318,6 +339,7 @@ it("restores equal-key query siblings through their distinct profile and context
       ],
     });
     const adopted = report.adopted.filter((row) => row.address.kind === "binding");
+
     expect(adopted).toHaveLength(2);
     expect(new Set(adopted.map((row) => row.identity)).size).toBe(2);
     expect(target.queryKeys()).toBe(0);
@@ -325,6 +347,7 @@ it("restores equal-key query siblings through their distinct profile and context
 
     const restoredFirst = target.queryBinding.member(input);
     const restoredSecond = target.siblingQueryBinding.member(input);
+
     expect([restoredFirst.value.get(), restoredSecond.value.get()]).toEqual([
       "bound:shared",
       "sibling:shared",
@@ -342,6 +365,7 @@ it("reports the stream import commit revision when a later public observer write
   const input = { key: "shared" };
   const streamReference = reference("stream");
   let stopRaw: (() => void) | undefined;
+
   try {
     source.rawStore!.set("raw-source");
     await receiveStreamValue(source, input, "stream-source");
@@ -352,6 +376,7 @@ it("reports the stream import commit revision when a later public observer write
     const targetRaw = target.rawStore!;
     const reentered = Promise.withResolvers<void>();
     let targetStream: ReturnType<typeof target.streamBinding.member> | undefined;
+
     stopRaw = subscribe(targetRaw, (value) => {
       if (value !== "raw-source" || targetStream !== undefined) return;
       targetStream = target.streamBinding.member(input);
@@ -362,13 +387,17 @@ it("reports the stream import commit revision when a later public observer write
     const report = adopt(target.graph, encoded, {
       bindings: [{ binding: target.streamBinding, reference: reference("stream", true) }],
     });
+
     await reentered.promise;
     const adopted = report.adopted.find(isAdoptedStreamEntry);
+
     if (adopted === undefined)
       throw new Error("Expected the stream address in the adoption report");
+
     expect(targetStream).toBeDefined();
     expect(targetStream?.value.get()).toBe("after-observer");
     const after = peekStore(targetStream!);
+
     if (after.kind !== "stable") throw new Error("Expected the reentrant write to remain current");
     expect(adopted.valueRevision).toBeLessThan(after.valueRevision);
   } finally {
@@ -380,6 +409,7 @@ it("reports the stream import commit revision when a later public observer write
 
 it("rejects repeated handles and canonical references before running binding callbacks", () => {
   const graph = makeWorld();
+
   try {
     expect(() =>
       snapshot(graph.graph, {
@@ -413,15 +443,18 @@ it.each(["write", "reset"] as const)(
     const source = makeWorld();
     const input = { key: "shared" };
     let resetting: Promise<void> | undefined;
+
     try {
       const store = await receiveStreamValue(source, input, "before-encoding");
       const qualified = {
         get role() {
           if (reentry === "write") store.set("after-write");
           else resetting = source.graph.reset();
+
           return "stream";
         },
       };
+
       expect(() =>
         snapshot(source.graph, {
           version: 2,
@@ -448,6 +481,7 @@ it("fences a raw source value when its getter writes a successor during v2 encod
       operations: { payload: definition },
     }),
   });
+
   try {
     const store = graph.api.payload();
     let replace = (): void => undefined;
@@ -458,6 +492,7 @@ it("fences a raw source value when its getter writes a successor during v2 encod
         return "captured-before-write";
       },
     }) as { value: string };
+
     replace = () => store.set({ value: "successor" });
     store.set(value);
 
@@ -473,6 +508,7 @@ it("does not overwrite a target stream acquired by a value getter during destina
   const target = makeWorld();
   const input = { key: "shared" };
   let reentrant: ReturnType<typeof target.streamBinding.member> | undefined;
+
   try {
     await receiveStreamValue(source, input, "imported");
     const encoded = snapshot(source.graph, {
@@ -481,6 +517,7 @@ it("does not overwrite a target stream acquired by a value getter during destina
     });
     const streamRow = encoded.entries[0]!;
     const entry = { ...streamRow };
+
     Object.defineProperty(entry, "value", {
       enumerable: true,
       get() {
@@ -510,15 +547,19 @@ it("preserves a query binding's completed value and skips a sibling stream opene
   let target!: World;
   let openedByEquality: ReturnType<World["streamBinding"]["member"]> | undefined;
   let reentered = false;
+
   target = makeWorld(undefined, (left, right) => {
     if (!reentered) {
       reentered = true;
       openedByEquality = target.streamBinding.member(input);
     }
+
     return Object.is(left, right);
   });
+
   try {
     const query = source.queryBinding.member(input);
+
     expect(await query.ready).toBe("bound:shared");
     await receiveStreamValue(source, input, "stream-source");
     const encoded = snapshot(source.graph, {
@@ -569,8 +610,10 @@ it("honors a bound query's snapshot:false policy in v2", () => {
     fetch: async () => "completed",
     value: { snapshot: false },
   });
+
   try {
     const store = binding.member(undefined, { initial: "private" });
+
     expect(store.value.get()).toBe("private");
     expect(
       snapshot(graph, { version: 2, bindings: [{ binding, reference: { operation: "excluded" } }] })
@@ -585,17 +628,20 @@ it("keeps the destination stream's snapshot:false policy after importing and cla
   const source = makeWorld();
   const target = makeWorld(undefined, undefined, false);
   const input = { key: "shared" };
+
   try {
     source.streamBinding.member(input).set("imported");
     const encoded = snapshot(source.graph, {
       version: 2,
       bindings: [{ binding: source.streamBinding, reference: reference("stream") }],
     });
+
     adopt(target.graph, encoded, {
       bindings: [{ binding: target.streamBinding, reference: reference("stream", true) }],
     });
 
     const claimed = target.streamBinding.member(input);
+
     expect([claimed.available.get(), claimed.value.get(), claimed.pending.get()]).toEqual([
       true,
       "imported",
@@ -618,13 +664,17 @@ it("keeps a target observation issue when its completed query binding is adopted
   const target = makeWorld();
   const input = { key: "shared" };
   const qualified = reference("query");
+
   try {
     const sourceStore = source.queryBinding.member(input);
+
     expect(await sourceStore.ready).toBe("bound:shared");
     const targetStore = target.queryBinding.member(input);
+
     expect(await targetStore.ready).toBe("bound:shared");
     const lease = observeStore(target.graph, targetStore);
     const issue = Object.freeze({ invalid: true });
+
     lease.reject(issue);
     const before = peekStore(targetStore);
     const encoded = snapshot(source.graph, {
@@ -638,8 +688,10 @@ it("keeps a target observation issue when its completed query binding is adopted
 
     expect(report.adopted).toMatchObject([{ address: { kind: "binding", key: "shared" } }]);
     expect(lease.issue.get()).toBe(issue);
+
     if (before.kind !== "stable" || after.kind !== "stable")
       throw new Error("Expected stable v2 adoption captures");
+
     expect(after.valueRevision).toBeGreaterThan(before.valueRevision);
     expect(after).toMatchObject({ present: true, value: "bound:shared" });
   } finally {
@@ -663,6 +715,7 @@ it.each([
   const foreign = makeWorld();
   const input = { key: "shared" };
   const streamReference = reference("stream");
+
   try {
     source.rawStore!.set("raw-source");
     source.streamBinding.member(input).set("stream-source");
@@ -671,10 +724,13 @@ it.each([
       bindings: [{ binding: source.streamBinding, reference: streamReference }],
     });
     let bindings: SnapshotBindingReference[] = [];
+
     if (failure === "wrong-kind")
       bindings = [{ binding: target.queryBinding, reference: reference("stream", true) }];
+
     if (failure === "foreign")
       bindings = [{ binding: foreign.streamBinding, reference: reference("stream", true) }];
+
     if (failure === "fabricated")
       bindings = [
         {
@@ -682,22 +738,27 @@ it.each([
           reference: reference("stream", true),
         },
       ];
+
     if (failure === "inactive") {
       target.queryBinding.context.dispose();
       bindings = [{ binding: target.streamBinding, reference: reference("stream", true) }];
     }
+
     if (failure === "reference")
       bindings = [{ binding: target.streamBinding, reference: reference("other") }];
+
     if (failure === "duplicate-handle")
       bindings = [
         { binding: target.streamBinding, reference: reference("stream", true) },
         { binding: target.streamBinding, reference: reference("another") },
       ];
+
     if (failure === "duplicate-reference")
       bindings = [
         { binding: target.streamBinding, reference: reference("same") },
         { binding: target.queryBinding, reference: reference("same", true) },
       ];
+
     expect(() => adopt(target.graph, encoded, { bindings })).toThrow();
     expect(target.rawStore!.value.get()).toBe("raw-initial");
     expect([target.queryKeys(), target.streamKeys(), target.fetches(), target.opens()]).toEqual([
@@ -714,6 +775,7 @@ it("skips a stream row with landing:none instead of decoding it as a raw address
   const source = makeWorld();
   const target = makeWorld();
   const input = { key: "shared" };
+
   try {
     await receiveStreamValue(source, input, "must-not-import");
     const encoded = snapshot(source.graph, {
@@ -726,10 +788,12 @@ it("skips a stream row with landing:none instead of decoding it as a raw address
     const report = adopt(target.graph, invalid, {
       bindings: [{ binding: target.streamBinding, reference: reference("stream", true) }],
     });
+
     expect(report.adopted).toEqual([]);
     expect(report.skipped).toHaveLength(1);
     expect(report.skipped[0]?.address).toBe(original.address);
     const store = target.streamBinding.member(input);
+
     expect([store.available.get(), store.value.get(), store.pending.get()]).toEqual([
       false,
       undefined,
@@ -744,9 +808,11 @@ it("skips a stream row with landing:none instead of decoding it as a raw address
 it("rejects unsupported v2 envelope metadata and skips unsafe ordering without writing", () => {
   const source = makeWorld("shared");
   const target = makeWorld("shared");
+
   try {
     source.rawStore!.set("raw-source");
     const valid = snapshot(source.graph, { version: 2 });
+
     for (const candidate of [
       { ...valid, version: 1 },
       { ...valid, namespace: "other" },
@@ -755,12 +821,14 @@ it("rejects unsupported v2 envelope metadata and skips unsafe ordering without w
       expect(() => adopt(target.graph, candidate as unknown as typeof valid, {})).toThrow(Fault);
       expect(target.rawStore!.value.get()).toBe("raw-initial");
     }
+
     const malformedAddress = valid.entries[0]!.address;
     const invalidOrdering = {
       ...valid,
       entries: valid.entries.map((entry) => ({ ...entry, generation: 1.5 })),
     } as unknown as typeof valid;
     const report = adopt(target.graph, invalidOrdering, {});
+
     expect(report.adopted).toEqual([]);
     expect(report.skipped).toHaveLength(1);
     expect(report.skipped[0]?.address).toBe(malformedAddress);
@@ -775,6 +843,7 @@ it("rejects duplicate physical stream addresses before writing a valid raw sibli
   const source = makeWorld("shared");
   const target = makeWorld("shared");
   const input = { key: "shared" };
+
   try {
     source.rawStore!.set("raw-source");
     source.streamBinding.member(input).set("stream-source");
@@ -784,8 +853,10 @@ it("rejects duplicate physical stream addresses before writing a valid raw sibli
     });
     const rawEntry = encoded.entries.find((entry) => entry.address.kind === "raw");
     const streamEntry = encoded.entries.find((entry) => entry.address.kind === "stream-binding");
+
     if (rawEntry === undefined || streamEntry === undefined)
       throw new Error("Expected both the raw sibling and stream address");
+
     const duplicate = { ...encoded, entries: [rawEntry, streamEntry, streamEntry] };
 
     expect(() =>
@@ -807,6 +878,7 @@ it("preflights local ordering capacity before committing an earlier raw sibling"
   const source = makeWorld("shared");
   const target = makeWorld("shared");
   const input = { key: "shared" };
+
   try {
     source.rawStore!.set("raw-source");
     source.streamBinding.member(input).set("stream-source");
@@ -821,8 +893,10 @@ it("preflights local ordering capacity before committing an earlier raw sibling"
     );
     const rawEntry = entries.find((entry) => entry.address.kind === "raw");
     const streamEntry = entries.find((entry) => entry.address.kind === "stream-binding");
+
     if (rawEntry === undefined || streamEntry === undefined)
       throw new Error("Expected both the raw sibling and stream address");
+
     const exhausted = { ...encoded, entries: [rawEntry, streamEntry] } as unknown as typeof encoded;
 
     expect(() =>
@@ -860,6 +934,7 @@ it.each(["normal", "last-request", "exhausted"] as const)(
     const remove = caller.signal.removeEventListener.bind(caller.signal);
     let links = 0;
     let unlinks = 0;
+
     Object.defineProperties(caller.signal, {
       addEventListener: {
         value: (...args: Parameters<AbortSignal["addEventListener"]>) => {
@@ -875,6 +950,7 @@ it.each(["normal", "last-request", "exhausted"] as const)(
       },
     });
     let refresh: Promise<void> | undefined;
+
     try {
       source.api.query(undefined, { initial: 4 });
       const handle = target.api.query(undefined, { initial: 0 });
@@ -885,26 +961,31 @@ it.each(["normal", "last-request", "exhausted"] as const)(
         ...encoded,
         entries: encoded.entries.map((row) => ({ ...row, generation })),
       } as unknown as typeof encoded;
+
       adopt(target, incoming, {});
       const before = peekStore(handle);
       let refreshThrew = false;
       let refreshError: unknown;
       let writeThrew = false;
       let writeError: unknown;
+
       try {
         refresh = handle.revalidate({ abortSignal: caller.signal });
       } catch (error) {
         refreshThrew = true;
         refreshError = error;
       }
+
       try {
         handle.set(100);
       } catch (error) {
         writeThrew = true;
         writeError = error;
       }
+
       const during = peekStore(handle);
       const dispatched = [...backend.calls];
+
       // Settle the actual request before assertions, including on the unfixed candidate.
       for (const call of dispatched) backend.resolve(call, 1);
       if (refresh !== undefined) await refresh;
@@ -917,6 +998,7 @@ it.each(["normal", "last-request", "exhausted"] as const)(
       expect(dispatched.every((call) => !call.aborted && call.settled)).toBe(true);
       expect(links).toBe(mode === "exhausted" ? 0 : 1);
       expect(unlinks).toBe(links);
+
       if (mode === "exhausted") {
         expect(during).toEqual(before);
         expect(peekStore(handle)).toEqual(before);
@@ -924,7 +1006,9 @@ it.each(["normal", "last-request", "exhausted"] as const)(
         expect(during).toMatchObject({ present: true, value: mode === "normal" ? 100 : 4 });
         expect(handle.value.get()).toBe(mode === "normal" ? 100 : 1);
       }
+
       const current = snapshot(target, { version: 2 }).entries[0]!;
+
       expect(Number.isSafeInteger(current.generation)).toBe(true);
       expect(Number(current.generation)).toBe(mode === "normal" ? 23 : Number.MAX_SAFE_INTEGER);
     } finally {
@@ -940,10 +1024,12 @@ it("keeps a bound query claim dormant until ordinary post-discard acquisition", 
   const input = { key: "passive-query" };
   const beforeKeys = world.queryKeys();
   const controller = new AbortController();
+
   try {
     const claim = preparePassiveTransferClaim(world.graph, world.queryBinding, input, {
       abortSignal: controller.signal,
     });
+
     expect(world.queryKeys()).toBe(beforeKeys + 1);
     expect(world.fetches()).toBe(0);
     expect(claim.store.key).toBe(storeKey("passive-query"));
@@ -957,6 +1043,7 @@ it("keeps a bound query claim dormant until ordinary post-discard acquisition", 
     expect(world.fetches()).toBe(0);
 
     const ordinary = world.queryBinding.member(input);
+
     expect(world.queryKeys()).toBe(beforeKeys + 2);
     expect(world.fetches()).toBe(1);
     await expect(ordinary.ready).resolves.toBe("bound:passive-query");
@@ -970,8 +1057,10 @@ it("does not open a raw stream while preparing or discarding its passive claim",
   const input = { key: "passive-stream" };
   const member = world.graph.api.stream;
   const beforeKeys = world.streamKeys();
+
   try {
     const claim = preparePassiveTransferClaim(world.graph, member, input);
+
     expect(world.streamKeys()).toBe(beforeKeys + 1);
     expect(world.opens()).toBe(0);
     expect(claim.store.key).toBe(storeKey("passive-stream"));
@@ -1032,8 +1121,10 @@ it("joins a bound mutation to the exact native operation role until physical com
     },
     effects: [mutationEffect],
   });
+
   try {
     const queryStore = queryBinding.member(input);
+
     await expect(queryStore.ready).resolves.toBe(1);
     const scope = createTransferScope(graph, queryBinding, queryStore);
     const pending = prepareTransferOperation(
@@ -1047,6 +1138,7 @@ it("joins a bound mutation to the exact native operation role until physical com
       ],
     );
     const operationCommit = pending.seal();
+
     if (operationCommit === undefined) throw new Error("The bound mutation operation did not seal");
     operationCommit.publish();
     operationCommit.notifications.deliver();
@@ -1062,8 +1154,10 @@ it("joins a bound mutation to the exact native operation role until physical com
     runSettled = true;
     const retirement = prepareTransferOperationRetirement(pending.operation);
     const retirementCommit = retirement.seal();
+
     if (retirementCommit === undefined)
       throw new Error("The completed bound mutation did not retire");
+
     retirementCommit.publish();
     retirementCommit.notifications.deliver();
     await retirement.retired;
@@ -1071,6 +1165,7 @@ it("joins a bound mutation to the exact native operation role until physical com
     expect(queryStore.status.get()).toBe("stale");
 
     const claim = preparePassiveTransferClaim(graph, queryBinding, input);
+
     claim.discard();
     await claim.retired;
   } finally {
@@ -1078,6 +1173,7 @@ it("joins a bound mutation to the exact native operation role until physical com
       resolveRun(undefined);
       await completion.catch(() => undefined);
     }
+
     context.dispose();
     graph.dispose();
   }

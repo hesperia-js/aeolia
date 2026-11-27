@@ -48,6 +48,7 @@ import { Signal, computed, signal } from "aeolia/reactive";
 function subpathConsumer(): void {
   const state: RootSignal.State<number> = signal(1);
   const derived: Signal.Computed<number> = computed(() => state.get() * 2);
+
   // @ts-expect-error The reactive subpath retains its signal value type.
   state.set("wrong");
 
@@ -60,6 +61,7 @@ function subpathConsumer(): void {
     contract: defineContract({ namespace: "subpaths", operations: { item } }),
   });
   const active: boolean = graph.active;
+
   // @ts-expect-error Graph logical state is read-only through the contract subpath.
   graph.active = false;
   void active;
@@ -68,6 +70,7 @@ function subpathConsumer(): void {
   const lease: ObservationLease<{ id: string }> = observeStore(graph, handle);
   const rootLease: RootObservationLease<{ id: string }> = rootObserveStore(graph, handle);
   const capture: StoreCapture<{ id: string }> = peekStore(handle);
+
   // @ts-expect-error The contract entry preserves the observed query's value type.
   lease.publish(1);
   void [rootLease, capture];
@@ -113,6 +116,7 @@ function mutationSubpathConsumer(): void {
     run: async (input) => String(input),
   });
   const result: Promise<string> = save.member(2, { optimistic: [override] });
+
   // @ts-expect-error Contract-subpath producers retain the transformed target value.
   predictionFor(mutation, target, () => 1);
   void result;
@@ -135,6 +139,7 @@ function streamSubpathConsumer(): void {
     context: createBindingContext(graph),
   });
   const inspected = inspectBoundAddress(binding, storeKey("one"));
+
   if (inspected.kind === "stable" && inspected.state === "empty") {
     const options: BoundStreamValueOptions<number> = { expectEmpty: inspected.condition };
     const source = binding.member("one", options);
@@ -142,12 +147,15 @@ function streamSubpathConsumer(): void {
     const detached: Promise<number | undefined> = session.detached.then((receipt) => {
       if (receipt.terminalCapture.kind !== "captured") return undefined;
       const capture = receipt.terminalCapture.capture;
+
       return capture.kind === "stable" && capture.present ? capture.value : undefined;
     });
+
     // @ts-expect-error Contract-subpath bound values remain numeric.
     source.set("wrong");
     void detached;
   }
+
   graph.dispose();
 }
 
@@ -184,6 +192,7 @@ function versionedTransferSubpathConsumer(): void {
   ];
   const captured: SnapshotV2 = rootSnapshot(graph, { version: 2, bindings });
   const options: AdoptOptionsV2 = { bindings };
+
   rootAdopt(graph, captured, options);
   // @ts-expect-error Version 2 requires explicit root adoption options.
   rootAdopt(graph, captured);
@@ -222,8 +231,10 @@ function queryProgressSubpathConsumer(): void {
   const captured: QueryProgressSnapshot<Progress> = observation.capture();
   const stop = rootObservation.subscribe((event: RootQueryProgressEvent<Progress>) => {
     const current: QueryProgressEvent<Progress> = event;
+
     void current;
   });
+
   // @ts-expect-error Contract subpath snapshots expose no Hesperia projection field.
   void snapshot.project;
   void [result, status, captured, stop];

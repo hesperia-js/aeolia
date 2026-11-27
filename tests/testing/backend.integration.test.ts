@@ -34,6 +34,7 @@ test("test backend defers and settles individual calls, including abort state", 
   expect(backend.calls[1]?.aborted).toBe(true);
 
   const calls = backend.calls;
+
   backend.resolve(calls[1]!, "second");
   backend.reject(calls[0]!, new Error("first failed"));
   await expect(second).resolves.toBe("second");
@@ -46,6 +47,7 @@ test("test backend defers and settles individual calls, including abort state", 
       graph: "graph-a" as GraphId,
     },
   );
+
   expect(Object.prototype.hasOwnProperty.call(backend.calls[2], "key")).toBe(false);
   backend.resolve(backend.calls[2]!, "renamed");
   await expect(mutation).resolves.toBe("renamed");
@@ -64,6 +66,7 @@ test("test backend rejects repeated and foreign settlement handles", async () =>
     key: storeKey("settle/1"),
   };
   const firstPromise = firstBackend.respond<void, number>("settle")(undefined, options);
+
   void secondBackend.respond<void, number>("settle")(undefined, options);
   const firstCall = firstBackend.calls[0]!;
   const foreignCall = secondBackend.calls[0]!;
@@ -106,6 +109,7 @@ test("test backend broadcasts emissions, gaps, and failed termination to every m
   )[Symbol.asyncIterator]();
   const first = firstIterator.next();
   const second = secondIterator.next();
+
   backend.emit("rooms.events", 7);
   await expect(first).resolves.toEqual({ done: false, value: 7 });
   await expect(second).resolves.toEqual({ done: false, value: 7 });
@@ -116,6 +120,7 @@ test("test backend broadcasts emissions, gaps, and failed termination to every m
   const firstEnded = firstIterator.next();
   const secondEnded = secondIterator.next();
   const error = new Error("stream failed");
+
   backend.end("rooms.events", error);
   await expect(firstEnded).rejects.toBe(error);
   await expect(secondEnded).rejects.toBe(error);
@@ -145,6 +150,7 @@ test("test backend stream return settles, and clear detaches an open stream", as
   expect(returnedCall.aborted).toBe(false);
 
   const clearedAbort = new AbortController();
+
   void backend.stream<void, number>("clear-stream")(undefined, {
     abortSignal: clearedAbort.signal,
     graph: "graph-stream" as GraphId,
@@ -152,6 +158,7 @@ test("test backend stream return settles, and clear detaches an open stream", as
     reportGap: () => undefined,
   });
   const clearedCall = backend.calls[1]!;
+
   backend.clear();
   clearedAbort.abort();
 
@@ -164,6 +171,7 @@ test("test backend clear removes abort listeners without settling deferred calls
   const backend = testBackend();
   const controller = new AbortController();
   const fetch = backend.respond("clear-me");
+
   void fetch(undefined, {
     abortSignal: controller.signal,
     graph: "graph-clear" as GraphId,

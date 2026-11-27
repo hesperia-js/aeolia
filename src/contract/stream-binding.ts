@@ -129,27 +129,37 @@ export function bindStream<S extends AnyStream>(
   configuration: { readonly context: BindingContext },
 ): StreamBinding<S> {
   const state = graphRuntimeByGraph.get(graph);
+
   if (state === undefined) throw new TypeError("The value is not an Aeolia graph");
   assertGraphOpen(state);
   const physical = beginPhysicalWork(state.retirement, "acquisition");
+
   try {
     const original = rawStreamMemberByFunction.get(originalMember);
+
     if (original === undefined || original.state !== state || original.definition !== definition)
       throw new TypeError(
         "Stream binding requires the exact original native member and definition",
       );
+
     if (configuration === null || typeof configuration !== "object" || Array.isArray(configuration))
       throw new TypeError("Invalid stream binding configuration");
+
     const contextHandle = configuration.context;
+
     assertGraphOpen(state);
     const context = bindingContextByHandle.get(contextHandle);
+
     if (context === undefined || context.state !== state)
       throw new TypeError("Stream binding requires its actual graph context");
+
     assertBindingContextOpen(context);
     const contextWork = beginPhysicalWork(context.retirement, "acquisition");
+
     try {
       let members = context.streamBindings.get(definition);
       const existing = members?.get(originalMember);
+
       if (existing !== undefined) return existing.handle as StreamBinding<S>;
       let binding!: StreamBindingRuntime;
       const handle = Object.freeze({
@@ -160,11 +170,14 @@ export function bindStream<S extends AnyStream>(
           streamMember(state, definition, input, options, binding) as StreamStore<StreamValue<S>>,
         session: (store: StreamStore<StreamValue<S>>): BoundStreamSession<StreamValue<S>> => {
           const record = boundStreamByStore.get(store);
+
           if (record === undefined || record.binding !== binding)
             throw new TypeError("Stream wrapper does not belong to this native binding");
+
           return record.handle as BoundStreamSession<StreamValue<S>>;
         },
       }) as StreamBinding<S>;
+
       binding = {
         kind: "stream",
         context,
@@ -175,10 +188,12 @@ export function bindStream<S extends AnyStream>(
         addresses: new Map(),
       };
       streamBindingByHandle.set(handle, binding);
+
       if (members === undefined) {
         members = new Map();
         context.streamBindings.set(definition, members);
       }
+
       members.set(originalMember, binding);
       return handle;
     } finally {

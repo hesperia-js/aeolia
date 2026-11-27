@@ -38,6 +38,7 @@ function fixture() {
     idleMs: 10,
   });
   const store = graph.api.query("one");
+
   return { backend, graph, store };
 }
 
@@ -57,8 +58,10 @@ it("distinguishes absence from present undefined across native shells and return
   const graph = createGraph({
     contract: { namespace: "presence-capture", operations: { query, stream, declared } },
   });
+
   try {
     const empty = graph.at("empty");
+
     expect(peekStore(empty)).toMatchObject({
       kind: "stable",
       present: false,
@@ -68,18 +71,22 @@ it("distinguishes absence from present undefined across native shells and return
     empty.set(undefined);
     expect(peekStore(empty)).toMatchObject({ kind: "stable", present: true, value: undefined });
     const seeded = graph.api.declared();
+
     expect(peekStore(seeded)).toMatchObject({ kind: "stable", present: true, value: undefined });
     const incoming = graph.api.stream("incoming", { initial: undefined });
+
     expect(peekStore(incoming)).toMatchObject({ kind: "stable", present: true, value: undefined });
     expect(incoming.pending.get()).toBe(true);
     const requested = graph.api.query("requested");
     const ready = requested.ready;
+
     backend.resolve(
       backend.calls.find((call) => call.name === "query")!,
       undefined,
     );
     await ready;
     expect(peekStore(requested)).toMatchObject({ kind: "stable", present: true, value: undefined });
+
     for (const store of [empty, seeded, incoming, requested])
       expect(() => peekStore(Object.create(store))).toThrow(TypeError);
   } finally {
@@ -89,19 +96,24 @@ it("distinguishes absence from present undefined across native shells and return
 
 it("orders value changes independently of request starts and issue-only updates", async () => {
   const f = fixture();
+
   try {
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[0]!, 1);
     await ready;
     const lease = observeStore(f.graph, f.store);
     const initial = peekStore(f.store);
+
     if (initial.kind !== "stable") throw new Error("Expected stable initial capture");
     const request = f.store.revalidate();
+
     expect(peekStore(f.store)).toStrictEqual(initial);
     lease.reject(Object.freeze({ invalid: true }));
     expect(peekStore(f.store)).toStrictEqual(initial);
     lease.publish(1);
     const equal = peekStore(f.store);
+
     if (equal.kind !== "stable") throw new Error("Expected stable equal publication");
     expect(equal.identity).toBe(initial.identity);
     expect(equal.valueRevision).toBeGreaterThan(initial.valueRevision);
@@ -109,6 +121,7 @@ it("orders value changes independently of request starts and issue-only updates"
     f.backend.resolve(f.backend.calls[1]!, 2);
     await request;
     const landed = peekStore(f.store);
+
     if (landed.kind !== "stable") throw new Error("Expected stable request landing");
     expect(landed.valueRevision).toBeGreaterThan(equal.valueRevision);
     expect(landed).toMatchObject({ present: true, value: 2 });
@@ -138,6 +151,7 @@ it("returns changed when a prediction dies during the actual folded capture, the
             failCapture = false;
             throw new Error("prediction failed");
           }
+
           return 3;
         },
       }),
@@ -149,9 +163,11 @@ it("returns changed when a prediction dies during the actual folded capture, the
       diagnostics.push(cause);
     },
   });
+
   try {
     const store = graph.api.query();
     const run = graph.api.mutation();
+
     failCapture = true;
     expect(peekStore(store)).toStrictEqual({ kind: "changed" });
     expect(peekStore(store)).toMatchObject({ kind: "stable", present: false });
@@ -167,6 +183,7 @@ it("returns changed when a prediction dies during the actual folded capture, the
 it("does not create an outer reactive dependency or bypass graph affinity", () => {
   const f = fixture();
   const other = fixture();
+
   try {
     f.store.set(1);
     other.store.set(2);
@@ -177,6 +194,7 @@ it("does not create an outer reactive dependency or bypass graph affinity", () =
     });
     const stop = subscribe(captured, () => undefined);
     const original = captured.get();
+
     f.store.set(3);
     expect(captured.get()).toBe(original);
     expect(evaluations).toBe(1);
@@ -184,6 +202,7 @@ it("does not create an outer reactive dependency or bypass graph affinity", () =
       f.store.value.get();
       return peekStore(other.store);
     });
+
     expect(() => crossed.get()).toThrow(Fault);
     stop();
   } finally {
@@ -207,13 +226,16 @@ it("captures a prediction without a base and loses presence after its rejected m
   const graph = createGraph({
     contract: { namespace: "prediction-presence", operations: { query, mutation } },
   });
+
   try {
     const store = graph.api.query();
     const run = graph.api.mutation();
+
     expect(peekStore(store)).toMatchObject({ kind: "stable", present: true, value: 3 });
     expect(store.available.get()).toBe(true);
     expect(store.status.get()).toBe("fetching");
     const failure = new Error("mutation rejected");
+
     backend.reject(backend.calls[1]!, failure);
     await expect(run).rejects.toBe(failure);
     expect(peekStore(store)).toMatchObject({ kind: "stable", present: false });
@@ -244,6 +266,7 @@ it("cannot return a pre-reset value when the authored fold resets its native gra
             resetCapture = false;
             reset = resetGraph();
           }
+
           return 3;
         },
       }),
@@ -252,11 +275,14 @@ it("cannot return a pre-reset value when the authored fold resets its native gra
   const graph = createGraph({
     contract: { namespace: "capture-reset", operations: { query, mutation } },
   });
+
   resetGraph = () => graph.reset();
+
   try {
     const store = graph.api.query();
     const run = graph.api.mutation();
     const outcome = run.catch(() => undefined);
+
     resetCapture = true;
     expect(peekStore(store)).toStrictEqual({ kind: "changed" });
     expect(reset).toBeDefined();
@@ -283,15 +309,19 @@ it("does not cache an obsolete folded value after equality resets and replaces t
         armed = false;
         replace();
       }
+
       return false;
     },
   });
   const graph = createGraph({ contract: { namespace: "capture-cache", operations: { query } } });
+
   try {
     const store = graph.api.query();
+
     store.set(1);
     peekStore(store);
     const lease = observeStore(graph, store);
+
     replace = () => {
       reset = graph.reset();
       store.set(7);
@@ -308,8 +338,10 @@ it("does not cache an obsolete folded value after equality resets and replaces t
 
 it("capture and active observers do not renew an idle query or revive its collected incarnation", async () => {
   const f = fixture();
+
   try {
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[0]!, 1);
     await ready;
     const lease = observeStore(f.graph, f.store);
@@ -317,11 +349,13 @@ it("capture and active observers do not renew an idle query or revive its collec
     const stop = subscribe(lease.active, (active) => {
       activity.push(active);
     });
+
     for (let elapsed = 0; elapsed < 10; elapsed++) {
       peekStore(f.store);
       lease.active.get();
       jest.advanceTimersByTime(1);
     }
+
     expect(activity).toStrictEqual([true, false]);
     expect(lease.publish(9)).toBe(false);
     expect(peekStore(f.store)).toMatchObject({ kind: "stable", present: false });
@@ -336,8 +370,10 @@ it("capture and active observers do not renew an idle query or revive its collec
 for (const metadata of ["available", "issue"] as const) {
   it(`${metadata} subscriptions retain metadata and join reset without fetching on activation`, async () => {
     const f = fixture();
+
     try {
       const ready = f.store.ready;
+
       f.backend.resolve(f.backend.calls[0]!, 1);
       await ready;
       const lease = observeStore(f.graph, f.store);
@@ -345,10 +381,12 @@ for (const metadata of ["available", "issue"] as const) {
         metadata === "available"
           ? subscribe(f.store.available, () => undefined)
           : subscribe(lease.issue, () => undefined);
+
       jest.advanceTimersByTime(20);
       expect(f.backend.calls).toHaveLength(1);
       expect(lease.active.get()).toBe(true);
       const reset = f.graph.reset();
+
       expect(f.backend.calls).toHaveLength(2);
       f.backend.resolve(f.backend.calls[1]!, 2);
       await reset;
@@ -365,8 +403,10 @@ it("keeps a declared Store passive until publication and leaves the graph reusab
   const graph = createGraph({
     contract: { namespace: "passive-declared-store", operations: { declared: definition } },
   });
+
   try {
     const claim = preparePassiveTransferClaim(graph, graph.api.declared, undefined);
+
     expect(claim.store.key).toBe(storeKey("declared"));
     expect(claim.store.graph).toBe(graph.id);
     expect(() => claim.store.value.peek()).toThrow(TypeError);
@@ -375,6 +415,7 @@ it("keeps a declared Store passive until publication and leaves the graph reusab
     await claim.retired;
 
     const store = graph.api.declared();
+
     expect(peekStore(store)).toMatchObject({ kind: "stable", present: true, value: 3 });
   } finally {
     graph.dispose();
@@ -386,16 +427,20 @@ it("leaves an existing unconfigured Store untouched until a passive claim publis
   const graph = createGraph({
     contract: { namespace: "passive-existing-store", operations: { declared: definition } },
   });
+
   try {
     const physical = graph.at("declared");
+
     physical.set(9);
     const claim = preparePassiveTransferClaim(graph, graph.api.declared, undefined);
+
     expect(claim.store.identity).toBe(physical.identity);
     expect(() => claim.store.value.get()).toThrow(TypeError);
     claim.discard();
     await claim.retired;
     expect(peekStore(physical)).toMatchObject({ kind: "stable", present: true, value: 9 });
     const admitted = graph.api.declared();
+
     expect(admitted.identity).toBe(physical.identity);
     expect(peekStore(admitted)).toMatchObject({ kind: "stable", present: true, value: 9 });
   } finally {
