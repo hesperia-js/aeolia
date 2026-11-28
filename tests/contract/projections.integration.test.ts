@@ -2453,12 +2453,14 @@ describe("positioned reader release retirement", () => {
         const cleanup = Promise.withResolvers<void>();
         const syncCause = Object.freeze({ cause: "release failed" });
         let thenReads = 0;
+        // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
         const thenable = Object.defineProperty({}, "then", {
           get() {
             thenReads++;
             throw new Error("must not assimilate");
           },
         });
+        // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
         const callable = Object.defineProperty(() => undefined, "then", {
           get() {
             thenReads++;
@@ -2473,6 +2475,7 @@ describe("positioned reader release retirement", () => {
             },
           });
         } else {
+          // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
           Object.defineProperty(cleanup.promise, "then", {
             get() {
               thenReads++;

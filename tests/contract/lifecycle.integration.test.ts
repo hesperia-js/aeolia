@@ -3006,6 +3006,7 @@ it("joins the final mutation output adoption after abort-listener removal", asyn
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+  // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
   const providerResult = Object.defineProperty({}, "then", {
     get() {
       if (!providerRead) {
@@ -3153,6 +3154,7 @@ it.each(["stateful constructor and species", "custom then observer"] as const)(
     let customThenResult: string | undefined;
 
     if (mode === "custom then observer")
+      // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
       Object.defineProperty(provider.promise, "then", {
         configurable: true,
         value: function (

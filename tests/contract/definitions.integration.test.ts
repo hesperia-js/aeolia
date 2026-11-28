@@ -335,6 +335,7 @@ test("positioned declarations capture an optional acquisition without invoking i
   const checkpoint = { after: 5, latest: 2, values: [2] as const };
   const request = { input, checkpoint, signal: controller.signal };
   let thenReads = 0;
+  // oxlint-disable-next-line unicorn/no-thenable -- The fixture exercises PromiseLike observation.
   const opaque = Object.defineProperty({}, "then", {
     get() {
       thenReads++;

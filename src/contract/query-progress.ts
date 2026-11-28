@@ -388,7 +388,10 @@ function drain<T>(runtime: StoreRuntime<T>, owner: QueryProgressAuthority): void
 
     if (!deliveryIsCurrent(runtime, delivery)) continue;
 
-    for (const listener of [...owner.listeners]) {
+    // Progress callbacks can add or remove listeners during delivery.
+    const listeners = [...owner.listeners];
+
+    for (const listener of listeners) {
       if (!listener.active || delivery.sequence <= listener.frontier) continue;
       if (!deliveryIsCurrent(runtime, delivery)) break;
       listener.frontier = delivery.sequence;
