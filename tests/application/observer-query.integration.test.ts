@@ -30,6 +30,7 @@ test("a framework observer sees a managed query settlement as one complete updat
       });
     },
   });
+
   try {
     observer.track(read);
     snapshots.length = 0;
@@ -54,6 +55,7 @@ test("forbidden store writes leave an in-flight query eligible to publish", asyn
   });
   const store = graph.api.query();
   let updaterRan = false;
+
   try {
     withoutWrites(() => {
       expect(() => store.set(99)).toThrow("write-forbidden");

@@ -11,6 +11,7 @@ export function finiteBound(value: number, option: string): number {
   if (!Number.isFinite(value) || value < 1 || !Number.isInteger(value)) {
     throw new Fault("contract", [option]);
   }
+
   return value;
 }
 

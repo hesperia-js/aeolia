@@ -1,5 +1,15 @@
 import { expect, test } from "bun:test";
-import { affects, createGraph, createMutation, createQuery, subscribe } from "../../src/index.ts";
+import {
+  affects,
+  createGraph,
+  createMutation,
+  createQuery,
+  createTransferScope,
+  preparePassiveTransferClaim,
+  prepareTransferOperation,
+  prepareTransferOperationRetirement,
+  subscribe,
+} from "../../src/index.ts";
 import { testBackend } from "../../src/testing.ts";
 
 async function fixture(on: "invalidate" | "revalidate" = "revalidate") {
@@ -27,6 +37,7 @@ async function fixture(on: "invalidate" | "revalidate" = "revalidate") {
   const values: Array<number | undefined> = [];
   const stop = subscribe(store.value, (value) => values.push(value));
   const ready = store.ready;
+
   backend.resolve(backend.calls[0]!, 0);
   await ready;
   return {
@@ -44,22 +55,27 @@ async function fixture(on: "invalidate" | "revalidate" = "revalidate") {
 
 test("reconciles equal and corrected results without exposing the old base or applying a prediction twice", async () => {
   const f = await fixture();
+
   try {
     const mutation = f.graph.api.mutation(42);
+
     expect(f.values).toEqual([undefined, 0, 42]);
     f.backend.resolve(f.backend.calls[1]!, undefined);
     await mutation;
     expect(f.store.status.get()).toBe("revalidating");
     expect(f.values).toEqual([undefined, 0, 42]);
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[2]!, 42);
     expect(await ready).toBe(42);
     expect(f.values).toEqual([undefined, 0, 42]);
 
     const corrected = f.graph.api.mutation(1);
+
     f.backend.resolve(f.backend.calls[3]!, undefined);
     await corrected;
     const correctedReady = f.store.ready;
+
     f.backend.resolve(f.backend.calls[4]!, 44);
     expect(await correctedReady).toBe(44);
     expect(f.values).toEqual([undefined, 0, 42, 43, 44]);
@@ -70,12 +86,15 @@ test("reconciles equal and corrected results without exposing the old base or ap
 
 test("retains an unconfirmed prediction on refresh failure and reconciles it on retry", async () => {
   const f = await fixture();
+
   try {
     const mutation = f.graph.api.mutation(42);
+
     f.backend.resolve(f.backend.calls[1]!, undefined);
     await mutation;
     const failure = new Error("refresh unavailable");
     const ready = f.store.ready;
+
     f.backend.reject(f.backend.calls[2]!, failure);
     await expect(ready).rejects.toBe(failure);
     expect(f.store.error.get()).toBe(failure);
@@ -84,6 +103,7 @@ test("retains an unconfirmed prediction on refresh failure and reconciles it on 
     expect(f.values).toEqual([undefined, 0, 42]);
     const retry = f.store.revalidate();
     const retriedReady = f.store.ready;
+
     f.backend.resolve(f.backend.calls[3]!, 42);
     await retry;
     expect(await retriedReady).toBe(42);
@@ -96,17 +116,21 @@ test("retains an unconfirmed prediction on refresh failure and reconciles it on 
 
 test("a refresh retires its covered prediction but preserves a newer pending mutation", async () => {
   const f = await fixture();
+
   try {
     const first = f.graph.api.mutation(1);
+
     f.backend.resolve(f.backend.calls[1]!, undefined);
     await first;
     const second = f.graph.api.mutation(10);
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[2]!, 1);
     expect(await ready).toBe(1);
     expect(f.store.value.get()).toBe(11);
     expect(f.values).toEqual([undefined, 0, 1, 11]);
     const failure = new Error("mutation refused");
+
     f.backend.reject(f.backend.calls[3]!, failure);
     await expect(second).rejects.toBe(failure);
     expect(f.values).toEqual([undefined, 0, 1, 11, 1]);
@@ -117,9 +141,11 @@ test("a refresh retires its covered prediction but preserves a newer pending mut
 
 test("unobserved invalidation retains a successful prediction until an explicitly started refresh", async () => {
   const f = await fixture("invalidate");
+
   try {
     f.stop();
     const mutation = f.graph.api.mutation(42);
+
     f.backend.resolve(f.backend.calls[1]!, undefined);
     await mutation;
     expect(f.backend.calls).toHaveLength(2);
@@ -127,6 +153,7 @@ test("unobserved invalidation retains a successful prediction until an explicitl
     expect(f.store.value.get()).toBe(42);
     const refresh = f.store.revalidate();
     const ready = f.store.ready;
+
     f.backend.resolve(f.backend.calls[2]!, 42);
     await refresh;
     expect(await ready).toBe(42);
@@ -140,16 +167,20 @@ test.each(["invalidate", "revalidate"] as const)(
   "a superseded %s refresh cannot retire predictions owned by the newer reconciliation",
   async (on) => {
     const f = await fixture(on);
+
     try {
       const first = f.graph.api.mutation(1);
+
       f.backend.resolve(f.backend.calls[1]!, undefined);
       await first;
       const obsoleteRefresh = f.backend.calls[2]!;
       const second = f.graph.api.mutation(10);
+
       f.backend.resolve(f.backend.calls[3]!, undefined);
       await second;
       expect(obsoleteRefresh.aborted).toBe(true);
       const ready = f.store.ready;
+
       f.backend.resolve(obsoleteRefresh, 1);
       await Promise.resolve();
       expect(f.store.status.get()).toBe("revalidating");
@@ -165,9 +196,11 @@ test.each(["invalidate", "revalidate"] as const)(
 
 test("a request started before mutation success cannot retire its later successful prediction", async () => {
   const f = await fixture("invalidate");
+
   try {
     const oldRefresh = f.store.revalidate();
     const mutation = f.graph.api.mutation(42);
+
     f.backend.resolve(f.backend.calls[2]!, undefined);
     await mutation;
     expect(f.backend.calls[1]!.aborted).toBe(true);
@@ -176,11 +209,127 @@ test("a request started before mutation success cannot retire its later successf
     expect(f.values).toEqual([undefined, 0, 42]);
 
     const reconciliation = f.store.ready;
+
     f.backend.resolve(f.backend.calls[3]!, 42);
     await reconciliation;
     expect(f.values).toEqual([undefined, 0, 42]);
     expect(await f.store.ready).toBe(42);
   } finally {
     f.close();
+  }
+});
+
+test("joins the exact raw mutation dispatch through its original physical work", async () => {
+  let resolveRun!: (value: void) => void;
+  let runs = 0;
+  let selections = 0;
+  let completion: Promise<void> | undefined;
+  let repeated: Promise<void> | undefined;
+  let runSettled = false;
+  const runWork = new Promise<void>((resolve) => {
+    resolveRun = resolve;
+  });
+  const query = createQuery({
+    name: "transfer.work-query",
+    key: (input: { readonly key: string }) => input.key,
+    fetch: async () => 1,
+  });
+  const mutation = createMutation({
+    name: "transfer.work-mutation",
+    run: async () => {
+      runs += 1;
+      await runWork;
+    },
+    affects: [
+      affects(query, {
+        select: (input: { readonly key: string }) => {
+          selections += 1;
+          return input;
+        },
+        on: "invalidate",
+      }),
+    ],
+  });
+  const graph = createGraph({
+    contract: { namespace: "mutation-transfer-work", operations: { query, mutation } },
+  });
+  const input = { key: "one" };
+
+  try {
+    const queryStore = graph.api.query(input);
+
+    await expect(queryStore.ready).resolves.toBe(1);
+    const scope = createTransferScope(graph, graph.api.query, queryStore);
+    const dispatch = { role: "raw" as const, source: graph.api.mutation, input };
+    const pending = prepareTransferOperation([scope], [dispatch]);
+    const pendingCommit = pending.seal();
+
+    if (pendingCommit === undefined) throw new Error("The native mutation operation did not seal");
+    pendingCommit.publish();
+    pendingCommit.notifications.deliver();
+    await pending.retired;
+
+    completion = graph.api.mutation(input);
+    expect(runs).toBe(1);
+    expect(() => preparePassiveTransferClaim(graph, graph.api.query, input)).toThrow(TypeError);
+    expect(() => prepareTransferOperationRetirement(pending.operation)).toThrow(TypeError);
+
+    resolveRun(undefined);
+    await completion;
+    runSettled = true;
+    const retirement = prepareTransferOperationRetirement(pending.operation);
+    const retirementCommit = retirement.seal();
+
+    if (retirementCommit === undefined)
+      throw new Error("The completed native mutation did not retire");
+
+    retirementCommit.publish();
+    retirementCommit.notifications.deliver();
+    await retirement.retired;
+
+    const valueBeforeReuse = queryStore.value.get();
+    const runsBeforeReuse = runs;
+    const selectionsBeforeReuse = selections;
+    let reusePreparationError: unknown;
+    let reusedOperation: ReturnType<typeof prepareTransferOperation> | undefined;
+
+    try {
+      reusedOperation = prepareTransferOperation([scope], [dispatch]);
+    } catch (error) {
+      reusePreparationError = error;
+    }
+
+    if (reusedOperation !== undefined) {
+      reusedOperation.discard();
+      await reusedOperation.retired;
+    }
+
+    let repeatedDispatchError: unknown;
+
+    try {
+      repeated = graph.api.mutation(input);
+    } catch (error) {
+      repeatedDispatchError = error;
+    }
+
+    if (repeated !== undefined) await repeated.catch(() => undefined);
+    expect(reusePreparationError).toBeInstanceOf(TypeError);
+    expect(repeatedDispatchError).toBeInstanceOf(TypeError);
+    expect(runs).toBe(runsBeforeReuse);
+    expect(selections).toBe(selectionsBeforeReuse);
+    expect(queryStore.value.get()).toBe(valueBeforeReuse);
+
+    const claim = preparePassiveTransferClaim(graph, graph.api.query, input);
+
+    claim.discard();
+    await claim.retired;
+  } finally {
+    if (completion !== undefined && !runSettled) {
+      resolveRun(undefined);
+      await completion.catch(() => undefined);
+    }
+
+    if (repeated !== undefined) await repeated.catch(() => undefined);
+    graph.dispose();
   }
 });

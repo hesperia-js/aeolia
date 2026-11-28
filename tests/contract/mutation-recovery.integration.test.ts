@@ -38,10 +38,12 @@ async function failedQuery(on: "invalidate" | "revalidate") {
   const store = graph.api.query("one", { revalidateAfterMs: 1 });
   const stop = watch(store.value, () => undefined);
   const initial = store.ready.catch((error: unknown) => error);
+
   backend.reject(backend.calls[0]!, new Error("initial failure"));
   await initial;
   jest.advanceTimersByTime(2);
   const recovery = store.ready.catch((error: unknown) => error);
+
   backend.reject(backend.calls[1]!, new Error("recovery failure"));
   await recovery;
   jest.advanceTimersByTime(20);
@@ -58,6 +60,7 @@ async function failedQuery(on: "invalidate" | "revalidate") {
     },
     async save() {
       const operation = graph.api.save("one");
+
       backend.resolve(backend.pending("save")[0]!, "saved");
       expect(await operation).toBe("saved");
       expect(store.status.get()).toBe("fetching");
@@ -72,9 +75,11 @@ test.each(["invalidate", "revalidate"] as const)(
   async (on) => {
     const fixture = await failedQuery(on);
     const { backend, store } = fixture;
+
     try {
       const request = await fixture.save();
       const ready = store.ready;
+
       backend.resolve(request, 42);
       expect(await ready).toBe(42);
       expect(store.value.get()).toBe(42);
@@ -92,10 +97,12 @@ test.each(["invalidate", "revalidate"] as const)(
   async (on) => {
     const fixture = await failedQuery(on);
     const { backend, store, graph, faults } = fixture;
+
     try {
       const request = await fixture.save();
       const failure = new Error("still offline after save");
       const ready = store.ready.catch((error: unknown) => error);
+
       backend.reject(request, failure);
       expect(await ready).toBe(failure);
       expect(store.error.get()).toBe(failure);
@@ -115,13 +122,16 @@ test.each(["invalidate", "revalidate"] as const)(
   async (on) => {
     const fixture = await failedQuery(on);
     const { backend, store } = fixture;
+
     try {
       const first = await fixture.save();
       const second = await fixture.save();
+
       expect(first.aborted).toBe(true);
       backend.resolve(first, 99);
       const failure = new Error("newest refresh failed");
       const ready = store.ready.catch((error: unknown) => error);
+
       backend.reject(second, failure);
       expect(await ready).toBe(failure);
       expect(store.value.get()).toBeUndefined();

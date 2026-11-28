@@ -27,18 +27,25 @@ export function queryOptions<T extends SupportedOptions>(
 } {
   if (!isObject(options) || typeof options === "function" || Array.isArray(options))
     throw new TypeError("queryOptions expects an options object.");
+
   return Object.freeze({ ...options, [queryOptionsBrand]: true }) as Readonly<T> & {
     readonly [queryOptionsBrand]: true;
   };
 }
 
-export function hasQueryOptionsBrand(value: unknown): value is {
+export function hasQueryOptionsBrand(
+  value: unknown,
+  afterRead?: () => void,
+): value is {
   readonly [queryOptionsBrand]: true;
 } {
-  return (
-    isObject(value) &&
-    typeof value !== "function" &&
-    Object.hasOwn(value, queryOptionsBrand) &&
-    (value as { readonly [queryOptionsBrand]?: unknown })[queryOptionsBrand] === true
-  );
+  if (!isObject(value) || typeof value === "function") return false;
+  const hasBrand = Object.hasOwn(value, queryOptionsBrand);
+
+  afterRead?.();
+  if (!hasBrand) return false;
+  const brand = (value as { readonly [queryOptionsBrand]?: unknown })[queryOptionsBrand];
+
+  afterRead?.();
+  return brand === true;
 }

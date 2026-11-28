@@ -4,6 +4,7 @@ import { checkCoverage } from "../../scripts/ci/coverage.ts";
 test("coverage gates aggregate totals rather than averaging per-file percentages", () => {
   const largeCoveredFile = "LF:100\nLH:100\nFNF:100\nFNH:100\n";
   const smallUncoveredFile = "LF:1\nLH:0\nFNF:1\nFNH:0\n";
+
   expect(() => checkCoverage(largeCoveredFile + smallUncoveredFile)).not.toThrow();
   expect(() => checkCoverage("LF:100\nLH:90\nFNF:100\nFNH:90\n")).not.toThrow();
 });

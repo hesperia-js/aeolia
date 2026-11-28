@@ -3,7 +3,8 @@ import { adopt, snapshot } from "../../src/realm.ts";
 import { createGraph } from "../../src/contract/index.ts";
 import { Fault } from "../../src/fault.ts";
 import { affects, createMutation, createQuery, defineContract } from "../../src/contract/index.ts";
-import { subscribe, watch, withoutWrites } from "../../src/reactive.ts";
+import { subscribe } from "../../src/index.ts";
+import { watch, withoutWrites } from "../../src/reactive.ts";
 import { testBackend } from "../../src/testing.ts";
 
 beforeEach(() => {
@@ -41,25 +42,106 @@ function graphFor(
 }
 
 describe("QueryStore.ready", () => {
+  it("refreshes a raw query on reset for an available-only observer", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("reset-available", { initial: 7 });
+    const stop = subscribe(store.available, () => undefined);
+    let reset: Promise<void> | undefined;
+
+    try {
+      expect(backend.calls).toHaveLength(0);
+      reset = graph.reset();
+      void reset.catch(() => undefined);
+      expect(backend.calls).toHaveLength(1);
+      backend.resolve(backend.calls[0]!, 8);
+      await expect(reset).resolves.toBeUndefined();
+      expect(store.available.get()).toBe(true);
+      expect(store.value.get()).toBe(8);
+    } finally {
+      stop();
+      graph.dispose();
+      await reset?.catch(() => undefined);
+    }
+  });
+
+  it("replays an empty raw query on reset for a store subscriber", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+    const store = graph.api.query("reset-empty-subscriber");
+    const stop = subscribe(store, () => undefined);
+    let reset: Promise<void> | undefined;
+
+    try {
+      expect(store.available.get()).toBe(false);
+      expect(backend.calls).toHaveLength(1);
+      reset = graph.reset();
+      void reset.catch(() => undefined);
+      expect(backend.calls).toHaveLength(2);
+      backend.resolve(backend.calls[1]!, 9);
+      await expect(reset).resolves.toBeUndefined();
+      expect(store.value.get()).toBe(9);
+    } finally {
+      stop();
+      graph.dispose();
+      await reset?.catch(() => undefined);
+    }
+  });
+
+  it("starts recovery when a later initial seed follows a failed post-reset query", async () => {
+    const backend = testBackend();
+    const graph = graphFor(backend);
+
+    try {
+      await graph.reset();
+      const failed = graph.api.query("seed-after-failure", { revalidateAfterMs: 60_000 });
+      const firstReady = failed.ready;
+      const failure = new Error("offline after reset");
+
+      backend.reject(backend.calls[0]!, failure);
+      await expect(firstReady).rejects.toBe(failure);
+      expect(failed.error.get()).toBe(failure);
+
+      const seeded = graph.api.query("seed-after-failure", {
+        initial: 7,
+        revalidateAfterMs: 60_000,
+      });
+
+      expect(seeded.value.get()).toBe(7);
+      expect(backend.calls).toHaveLength(2);
+      expect(seeded.status.get()).toBe("revalidating");
+      const recovered = seeded.ready;
+
+      backend.resolve(backend.calls[1]!, 8);
+      await expect(recovered).resolves.toBe(8);
+    } finally {
+      graph.dispose();
+    }
+  });
+
   it("is lazy, waits through stale state, and resolves initial or undefined values", async () => {
     const backend = testBackend();
     const graph = graphFor(backend);
     const initial = graph.api.query("initial", { initial: 7, revalidateAfterMs: 1 });
     const initialReady = initial.ready;
+
     expect(backend.calls).toHaveLength(0);
     await expect(initialReady).resolves.toBe(7);
 
     jest.advanceTimersByTime(2);
     expect(initial.status.get()).toBe("stale");
     const staleReady = initial.ready;
+
     expect(backend.calls).toHaveLength(0);
     const refresh = initial.revalidate();
+
     backend.resolve(backend.calls[0]!, 8);
     await refresh;
     await expect(staleReady).resolves.toBe(8);
 
     const undefinedStore = graph.api.query("undefined");
     const call = backend.calls[1]!;
+
     backend.resolve(call, undefined);
     await flush();
     await expect(undefinedStore.ready).resolves.toBeUndefined();
@@ -71,15 +153,18 @@ describe("QueryStore.ready", () => {
     const backend = testBackend();
     const graph = graphFor(backend);
     const store = graph.api.query("reset-ready");
+
     backend.resolve(backend.calls[0]!, 7);
     await flush();
     await expect(store.ready).resolves.toBe(7);
 
     await expect(graph.reset()).resolves.toBeUndefined();
     const ready = store.ready;
+
     expect(backend.calls).toHaveLength(1);
 
     const revalidation = store.revalidate();
+
     expect(backend.calls).toHaveLength(2);
     backend.resolve(backend.calls[1]!, 9);
     await revalidation;
@@ -99,6 +184,7 @@ describe("QueryStore.ready", () => {
       if (outcome === "ready") await expect(store.ready).resolves.toBe(7);
       else {
         const failure = new Error("offline");
+
         backend.reject(backend.calls[0]!, failure);
         await flush();
         await expect(store.ready).rejects.toBe(failure);
@@ -115,18 +201,21 @@ describe("QueryStore.ready", () => {
       const backend = testBackend();
       const graph = graphFor(backend);
       const store = graph.api.query(`reset-ready-${readable}`);
+
       backend.resolve(backend.calls[0]!, 7);
       await flush();
       await expect(store.ready).resolves.toBe(7);
 
       await expect(graph.reset()).resolves.toBeUndefined();
       const ready = store.ready;
+
       expect(backend.calls).toHaveLength(1);
 
       const stop =
         readable === "status"
           ? subscribe(store.status, () => undefined)
           : subscribe(store.pending, () => undefined);
+
       expect(backend.calls).toHaveLength(2);
       backend.resolve(backend.calls[1]!, 9);
       await expect(ready).resolves.toBe(9);
@@ -142,6 +231,7 @@ describe("QueryStore.ready", () => {
     const store = graph.api.query("failure");
     const ready = store.ready;
     const failure = new Error("offline");
+
     backend.reject(backend.calls[0]!, failure);
     await expect(ready).rejects.toBe(failure);
     await expect(store.ready).rejects.toBe(failure);
@@ -153,6 +243,7 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const store = graph.api.query("zero-window", { revalidateAfterMs: 0 });
     const ready = store.ready;
+
     backend.resolve(backend.calls[0]!, 8);
     await expect(ready).resolves.toBe(8);
     expect(store.status.get()).toBe("ready");
@@ -170,6 +261,7 @@ describe("QueryStore.ready", () => {
     const store = graph.api.query("zero-live", { revalidateAfterMs: 0 });
     const stop = watch(store.value, () => undefined);
     const initialReady = store.ready;
+
     backend.resolve(backend.calls[0]!, 8);
     await expect(initialReady).resolves.toBe(8);
     expect(store.status.get()).toBe("ready");
@@ -178,6 +270,7 @@ describe("QueryStore.ready", () => {
     expect(store.status.get()).toBe("revalidating");
     expect(backend.calls).toHaveLength(2);
     const refreshedReady = store.ready;
+
     backend.resolve(backend.calls[1]!, 9);
     await expect(refreshedReady).resolves.toBe(9);
 
@@ -190,6 +283,7 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const zero = graph.api.query("mixed-window", { revalidateAfterMs: 0 });
     const long = graph.api.query("mixed-window", { revalidateAfterMs: 100 });
+
     backend.resolve(backend.calls[0]!, 8);
     await expect(zero.ready).resolves.toBe(8);
     await expect(long.ready).resolves.toBe(8);
@@ -206,6 +300,7 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const store = graph.api.query("error-retry");
     const failure = new Error("offline");
+
     backend.reject(backend.calls[0]!, failure);
     await flush();
 
@@ -214,8 +309,10 @@ describe("QueryStore.ready", () => {
     const stop = subscribe(store.error, (error) => {
       if (armed && error === undefined) retryReady = store.ready;
     });
+
     armed = true;
     const retry = store.revalidate();
+
     backend.resolve(backend.calls[1]!, 42);
     await retry;
     await expect(retryReady).resolves.toBe(42);
@@ -229,8 +326,10 @@ describe("QueryStore.ready", () => {
     const store = graph.api.query("supersede");
     const ready = store.ready;
     const first = backend.calls[0]!;
+
     store.revalidate();
     const second = backend.calls[1]!;
+
     expect(first.aborted).toBe(true);
     backend.reject(first, new Error("superseded"));
     await flush();
@@ -244,6 +343,7 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const store = graph.api.query("local");
     const ready = store.ready;
+
     store.set(9);
     await expect(ready).resolves.toBe(9);
     graph.dispose();
@@ -255,6 +355,7 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const store = graph.api.query("late-abort", { abortSignal: controller.signal });
     const ready = store.ready;
+
     store.set(9);
     expect(store.status.get()).toBe("ready");
     controller.abort();
@@ -286,8 +387,10 @@ describe("QueryStore.ready", () => {
     });
     const store = graph.api.query("optimistic", { initial: 0 });
     const pendingMutation = graph.api.mutation("optimistic");
+
     expect(store.value.get()).toBe(1);
     const ready = store.ready;
+
     await expect(ready).resolves.toBe(0);
     backend.resolve(backend.calls[0]!, "ok");
     await pendingMutation;
@@ -306,6 +409,7 @@ describe("QueryStore.ready", () => {
         store.set(2);
       }
     });
+
     backend.resolve(backend.calls[0]!, 1);
     await expect(ready).resolves.toBe(2);
     expect(store.value.get()).toBe(2);
@@ -317,10 +421,12 @@ describe("QueryStore.ready", () => {
     const backend = testBackend();
     const graph = graphFor(backend);
     const store = graph.api.query("retained");
+
     backend.resolve(backend.calls[0]!, 5);
     await flush();
     const refresh = store.revalidate();
     const failure = new Error("offline");
+
     backend.reject(backend.calls[1]!, failure);
     await refresh;
     await expect(store.ready).rejects.toBe(failure);
@@ -332,6 +438,7 @@ describe("QueryStore.ready", () => {
   it("resolves from adoption without waiting for the superseded request", async () => {
     const sourceBackend = testBackend();
     const source = graphFor(sourceBackend);
+
     source.api.query("adopt");
     sourceBackend.resolve(sourceBackend.calls[0]!, 11);
     await flush();
@@ -341,6 +448,7 @@ describe("QueryStore.ready", () => {
     const target = graphFor(targetBackend);
     const targetStore = target.api.query("adopt");
     const ready = targetStore.ready;
+
     adopt(target, encoded);
     await expect(ready).resolves.toBe(11);
     source.dispose();
@@ -355,10 +463,12 @@ describe("QueryStore.ready", () => {
     });
     const store = graph.api.query("cancel", { abortSignal: controller.signal });
     const ready = store.ready;
+
     controller.abort();
     expect(store.pending.get()).toBe(false);
     expect(store.status.get()).toBe("failed");
     const cancellation = store.error.get();
+
     expect(cancellation).toMatchObject({ name: "AbortError" });
     await expect(ready).rejects.toBe(cancellation);
     graph.dispose();
@@ -367,11 +477,13 @@ describe("QueryStore.ready", () => {
   it("rejects an already-aborted caller's readiness without waiting for its host callback", async () => {
     const backend = testBackend();
     const controller = new AbortController();
+
     controller.abort();
     const graph = createGraph({
       contract: defineContract({ namespace: "query-ready", operations: { query: query(backend) } }),
     });
     const store = graph.api.query("pre-aborted", { abortSignal: controller.signal });
+
     await expect(store.ready).rejects.toMatchObject({ name: "AbortError" });
     expect(backend.calls).toHaveLength(1);
     expect(backend.calls[0]!.aborted).toBe(true);
@@ -380,6 +492,7 @@ describe("QueryStore.ready", () => {
     const revalidation = store.revalidate().then(() => {
       revalidationSettled = true;
     });
+
     expect(backend.calls).toHaveLength(2);
     await Promise.resolve();
     expect(revalidationSettled).toBe(false);
@@ -394,6 +507,7 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const store = graph.api.query("dispose");
     const ready = store.ready;
+
     graph.dispose();
     await expect(ready).rejects.toMatchObject({
       constructor: Fault,
@@ -405,6 +519,7 @@ describe("QueryStore.ready", () => {
     const backend = testBackend();
     const graph = graphFor(backend, { idleMs: 1 });
     const held = graph.api.query("collect");
+
     backend.resolve(backend.calls[0]!, 3);
     await flush();
     jest.advanceTimersByTime(2);
@@ -412,6 +527,7 @@ describe("QueryStore.ready", () => {
     const readyAfterCollection = held.ready;
 
     const reactivated = graph.api.query("collect");
+
     expect(backend.calls).toHaveLength(2);
     backend.resolve(backend.calls[1]!, 4);
     await expect(readyAfterCollection).resolves.toBe(4);
@@ -442,6 +558,7 @@ describe("QueryStore.ready", () => {
     const store = graph.api.query("automatic-recovery", { revalidateAfterMs: 1 });
     const stop = watch(store.value, () => undefined);
     const initialFailure = new Error("initial offline");
+
     backend.reject(backend.calls[0]!, initialFailure);
     await flush();
     expect(store.status.get()).toBe("failed");
@@ -449,6 +566,7 @@ describe("QueryStore.ready", () => {
     jest.advanceTimersByTime(2);
     expect(backend.calls).toHaveLength(2);
     const recoveryFailure = new Error("recovery offline");
+
     backend.reject(backend.calls[1]!, recoveryFailure);
     await flush();
     expect(store.status.get()).toBe("failed");
@@ -464,6 +582,7 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const store = graph.api.query("retry-recovery", { revalidateAfterMs: 1 });
     const stop = watch(store.value, () => undefined);
+
     backend.reject(backend.calls[0]!, new Error("initial offline"));
     await flush();
 
@@ -474,6 +593,7 @@ describe("QueryStore.ready", () => {
     expect(backend.calls).toHaveLength(2);
 
     const retry = store.revalidate();
+
     expect(backend.calls).toHaveLength(3);
     backend.resolve(backend.calls[2]!, 42);
     await retry;
@@ -490,18 +610,54 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const first = graph.api.query("member-recovery", { revalidateAfterMs: 1 });
     const initialFailure = new Error("initial offline");
+
     backend.reject(backend.calls[0]!, initialFailure);
     await flush();
     expect(first.status.get()).toBe("failed");
 
     const second = graph.api.query("member-recovery");
+
     expect(backend.calls).toHaveLength(2);
     const recoveryFailure = new Error("recovery offline");
+
     backend.reject(backend.calls[1]!, recoveryFailure);
     await flush();
     expect(second.status.get()).toBe("failed");
 
     const third = graph.api.query("member-recovery");
+
+    expect(backend.calls).toHaveLength(2);
+    expect(third.status.get()).toBe("failed");
+    graph.dispose();
+  });
+
+  it("keeps explicit fetch acquisition inside shared automatic recovery limits", async () => {
+    const backend = testBackend();
+    const queryDefinition = createQuery({ ...query(backend), acquisition: "fetch" });
+    const graph = createGraph({
+      contract: defineContract({
+        namespace: "query-ready",
+        operations: { query: queryDefinition },
+      }),
+    });
+    const first = graph.api.query("member-recovery", { revalidateAfterMs: 1 });
+    const initialFailure = new Error("initial offline");
+
+    backend.reject(backend.calls[0]!, initialFailure);
+    await flush();
+    expect(first.status.get()).toBe("failed");
+
+    const second = graph.api.query("member-recovery");
+
+    expect(backend.calls).toHaveLength(2);
+    const recoveryFailure = new Error("recovery offline");
+
+    backend.reject(backend.calls[1]!, recoveryFailure);
+    await flush();
+    expect(second.status.get()).toBe("failed");
+
+    const third = graph.api.query("member-recovery");
+
     expect(backend.calls).toHaveLength(2);
     expect(third.status.get()).toBe("failed");
     graph.dispose();
@@ -512,18 +668,22 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const store = graph.api.query("local-after-recovery", { revalidateAfterMs: 1 });
     const stop = watch(store.value, () => undefined);
+
     try {
       const initial = store.ready.catch((error: unknown) => error);
+
       backend.reject(backend.calls[0]!, new Error("initial failure"));
       await initial;
       jest.advanceTimersByTime(2);
       const recovery = store.ready.catch((error: unknown) => error);
+
       backend.reject(backend.calls[1]!, new Error("recovery failure"));
       await recovery;
 
       store.set(42);
       expect(store.error.get()).toBeUndefined();
       const second = graph.api.query("local-after-recovery", { revalidateAfterMs: 1 });
+
       expect(second.value.get()).toBe(42);
       jest.advanceTimersByTime(20);
       expect(backend.calls).toHaveLength(2);
@@ -531,6 +691,7 @@ describe("QueryStore.ready", () => {
       expect(backend.calls).toHaveLength(2);
 
       const retry = store.revalidate();
+
       expect(backend.calls).toHaveLength(3);
       backend.resolve(backend.calls[2]!, 43);
       await retry;
@@ -546,14 +707,17 @@ describe("QueryStore.ready", () => {
     const graph = graphFor(backend);
     const store = graph.api.query("successful-recovery", { revalidateAfterMs: 1 });
     const stop = watch(store.value, () => undefined);
+
     try {
       const initial = store.ready.catch((error: unknown) => error);
+
       backend.reject(backend.calls[0]!, new Error("initial failure"));
       await initial;
       jest.advanceTimersByTime(2);
       expect(backend.calls).toHaveLength(2);
 
       const recovered = store.ready;
+
       backend.resolve(backend.calls[1]!, 42);
       expect(await recovered).toBe(42);
       expect(store.status.get()).toBe("ready");
@@ -561,6 +725,7 @@ describe("QueryStore.ready", () => {
       expect(backend.calls).toHaveLength(3);
 
       const refresh = store.ready.catch((error: unknown) => error);
+
       backend.reject(backend.calls[2]!, new Error("later refresh failure"));
       await refresh;
       jest.advanceTimersByTime(2);
@@ -568,6 +733,7 @@ describe("QueryStore.ready", () => {
 
       const failedRecovery = store.ready.catch((error: unknown) => error);
       const failure = new Error("later recovery failed");
+
       backend.reject(backend.calls[3]!, failure);
       expect(await failedRecovery).toBe(failure);
       jest.advanceTimersByTime(20);
@@ -592,12 +758,14 @@ describe("QueryStore.ready", () => {
     });
     const store = graph.api.query("timed-recovery", { revalidateAfterMs: 1 });
     const stop = watch(store.value, () => undefined);
+
     backend.resolve(backend.calls[0]!, 1);
     await flush();
 
     jest.advanceTimersByTime(2);
     expect(backend.calls).toHaveLength(2);
     const refreshFailure = new Error("refresh offline");
+
     backend.reject(backend.calls[1]!, refreshFailure);
     await flush();
     expect(store.status.get()).toBe("failed");
@@ -605,6 +773,7 @@ describe("QueryStore.ready", () => {
     jest.advanceTimersByTime(2);
     expect(backend.calls).toHaveLength(3);
     const recoveryFailure = new Error("recovery offline");
+
     backend.reject(backend.calls[2]!, recoveryFailure);
     await flush();
     expect(faults).toHaveLength(1);

@@ -1,0 +1,47 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "jsPlugins": [
+    {
+      "name": "@stylistic",
+      "specifier": "@stylistic/eslint-plugin"
+    }
+  ],
+  "rules": {
+    "@stylistic/padding-line-between-statements": [
+      "error",
+      {
+        "blankLine": "always",
+        "prev": ["const", "let", "var", "using"],
+        "next": "*"
+      },
+      {
+        "blankLine": "any",
+        "prev": ["const", "let", "var", "using"],
+        "next": ["const", "let", "var", "using"]
+      },
+      {
+        "blankLine": "always",
+        "prev": "*",
+        "next": {
+          "selector": ":matches(IfStatement, ForStatement, ForInStatement, ForOfStatement, WhileStatement, DoWhileStatement, SwitchStatement, TryStatement)",
+          "lineMode": "multiline"
+        }
+      },
+      {
+        "blankLine": "always",
+        "prev": {
+          "selector": ":matches(IfStatement, ForStatement, ForInStatement, ForOfStatement, WhileStatement, DoWhileStatement, SwitchStatement, TryStatement)",
+          "lineMode": "multiline"
+        },
+        "next": "*"
+      }
+    ],
+    "@stylistic/lines-between-class-members": [
+      "error",
+      "always",
+      {
+        "exceptAfterSingleLine": true
+      }
+    ]
+  }
+}

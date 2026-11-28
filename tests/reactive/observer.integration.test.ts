@@ -71,6 +71,7 @@ describe("framework-controlled observers", () => {
     observer.track(() => {
       executions += 1;
       const value = source.get();
+
       if (value === 0) source.set(1);
       return value;
     });
@@ -99,6 +100,7 @@ describe("framework-controlled observers", () => {
         });
       },
     });
+
     observer.track(() => {
       executions += 1;
       return derived.get();
@@ -116,6 +118,7 @@ describe("framework-controlled observers", () => {
   it("freezes notification callbacks and makes disposal terminal", () => {
     const source = signal(0);
     let observer!: ReturnType<typeof createObserver>;
+
     observer = createObserver({
       notify() {
         expect(() => source.get()).toThrow(Fault);
@@ -133,6 +136,7 @@ describe("framework-controlled observers", () => {
 
   it("forbids raw writes, including equal writes, only within nested synchronous scopes", () => {
     const source = signal(1);
+
     expect(() =>
       withoutWrites(() => {
         expect(source.get()).toBe(1);

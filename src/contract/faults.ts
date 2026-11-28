@@ -11,6 +11,7 @@ export class AbortError extends Error {
 
 export function reportUnobserved(state: GraphRuntimeState<any>, error: unknown): void {
   if (state.onUnobservedFault === undefined) return;
+
   try {
     state.onUnobservedFault(error);
   } catch {
@@ -20,10 +21,12 @@ export function reportUnobserved(state: GraphRuntimeState<any>, error: unknown):
 
 export function graphFault(state: GraphRuntimeState<any>, fault: Fault): void {
   const observers = [...state.faultObservers];
+
   if (observers.length === 0) {
     reportUnobserved(state, fault);
     return;
   }
+
   for (const observer of observers) {
     try {
       observer(fault);
@@ -34,7 +37,16 @@ export function graphFault(state: GraphRuntimeState<any>, fault: Fault): void {
 }
 
 export function reportContinuationError(state: GraphRuntimeState<any>, error: unknown): void {
-  if (error instanceof Fault) graphFault(state, error);
+  let fault: Fault | undefined;
+
+  try {
+    if (error instanceof Fault) fault = error;
+  } catch {
+    reportUnobserved(state, error);
+    return;
+  }
+
+  if (fault !== undefined) graphFault(state, fault);
   else reportUnobserved(state, error);
 }
 
@@ -43,6 +55,6 @@ export function assertGraphOpen<C extends Contract>(state: GraphRuntimeState<C>)
 }
 
 export function assertStoreOpen<T>(runtime: StoreRuntime<T>): void {
-  if (runtime.disposed || runtime.graph.__runtime.disposed)
+  if (runtime.disposed || runtime.graph.__runtime.disposed || runtime.binding?.context.disposed)
     throw new Fault("disposed", [runtime.key as string]);
 }

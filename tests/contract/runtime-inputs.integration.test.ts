@@ -49,6 +49,7 @@ function fixture() {
     namespace: "runtime-inputs",
     operations: { query, stream, mutation },
   });
+
   return { calls, stream, contract };
 }
 
@@ -65,9 +66,11 @@ it.each(invalidValueOptions)(
   (options) => {
     const { calls, contract } = fixture();
     const graph = createGraph({ contract });
+
     try {
       const invokeQuery = graph.api.query as (...args: unknown[]) => unknown;
       const invokeStream = graph.api.stream as (...args: unknown[]) => unknown;
+
       expect(() => invokeQuery(options)).toThrow(TypeError);
       expect(() => invokeQuery(queryOptions(options as never))).toThrow(TypeError);
       expect(() => invokeQuery(undefined, options)).toThrow(TypeError);
@@ -85,6 +88,7 @@ it.each([null, false, "options", [], () => undefined].map((value) => [value]))(
   (options) => {
     const { calls, contract } = fixture();
     const graph = createGraph({ contract });
+
     try {
       expect(() =>
         (graph.api.query as (...args: unknown[]) => unknown)(undefined, options),
@@ -109,8 +113,10 @@ it.each([
 ])("rejects malformed mutation options before dispatch: %j", (options) => {
   const { calls, contract } = fixture();
   const graph = createGraph({ contract });
+
   try {
     const invoke = graph.api.mutation as (...args: unknown[]) => unknown;
+
     expect(() => invoke(options)).toThrow(TypeError);
     expect(() => invoke(queryOptions(options as never))).toThrow(TypeError);
     expect(() => invoke(undefined, options)).toThrow(TypeError);
@@ -123,8 +129,10 @@ it.each([
 it("rejects malformed revalidation options without changing the ready store", () => {
   const { calls, contract } = fixture();
   const graph = createGraph({ contract });
+
   try {
     const store = graph.api.query({ initial: 7 });
+
     calls.length = 0;
     expect(() => store.revalidate({ abortSignal: {} as AbortSignal })).toThrow(TypeError);
     expect(store.status.get()).toBe("ready");
@@ -140,6 +148,7 @@ it.each([{ abortSignal: {} }, { abortSignal: null }, { onUnobservedFault: true }
   (options) => {
     const { contract } = fixture();
     let graph: ReturnType<typeof createGraph> | undefined;
+
     try {
       expect(() => {
         graph = createGraph({ contract, ...options } as never);
@@ -157,10 +166,12 @@ it.each([
 ])("rejects malformed projection policies before opening a source: %j", (policy) => {
   const { calls, contract, stream } = fixture();
   const graph = createGraph({ contract });
+
   try {
     expect(() => project(graph, stream, undefined, policy as never)).toThrow(TypeError);
     expect(calls).toStrictEqual([]);
     const shared = graph.api.stream(undefined);
+
     expect(() => project(shared, policy as never)).toThrow(TypeError);
   } finally {
     graph.dispose();
@@ -173,6 +184,7 @@ it.each([42, {}, [], null, undefined].map((value) => [value]))(
     expect(() => storeKey(key as string)).toThrow(TypeError);
     const { calls, contract } = fixture();
     const graph = createGraph({ contract });
+
     try {
       expect(() => graph.at(key as string)).toThrow(TypeError);
       expect(calls).toStrictEqual([]);
@@ -187,14 +199,17 @@ it("rejects malformed declarations and effect callbacks without executing author
   const query = contract.operations.query;
   const stream = contract.operations.stream;
   const mutation = contract.operations.mutation;
+
   expect(() => createStore({ name: "bad", initial: 0, equals: true } as never)).toThrow(TypeError);
   expect(() => createQuery({ ...query, fetch: false } as never)).toThrow(TypeError);
   expect(() => createStream({ ...stream, key: false } as never)).toThrow(TypeError);
   expect(() => createMutation({ ...mutation, run: false } as never)).toThrow(TypeError);
   expect(() => createMutation({ ...mutation, affects: [null] } as never)).toThrow(TypeError);
+
   for (const spec of [{ on: "retry" }, { select: false }, { optimistic: 1 }, { on: null }]) {
     expect(() => affects(query, spec as never)).toThrow(TypeError);
   }
+
   expect(calls).toStrictEqual([]);
 });
 
@@ -204,8 +219,10 @@ it("validates directly supplied contract definitions before creating a graph", (
     namespace: "malformed",
     operations: { query: { ...contract.operations.query, fetch: false } },
   };
+
   expect(() => defineContract(malformed as never)).toThrow(TypeError);
   let graph: ReturnType<typeof createGraph> | undefined;
+
   try {
     expect(() => {
       graph = createGraph({ contract: malformed } as never);
@@ -221,6 +238,7 @@ it.each([-1, Infinity, NaN])(
   (revalidateAfterMs) => {
     const { calls, contract } = fixture();
     const graph = createGraph({ contract });
+
     try {
       expect(() => graph.api.query({ initial: 1, snapshot: false, revalidateAfterMs })).toThrow(
         Fault,
@@ -238,6 +256,7 @@ it.each([{ idleMs: null }, { maxPredictions: null }])(
   (options) => {
     const { contract } = fixture();
     let graph: ReturnType<typeof createGraph> | undefined;
+
     try {
       expect(() => {
         graph = createGraph({ contract, ...options } as never);

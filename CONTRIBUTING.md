@@ -13,14 +13,16 @@ Keep branches short-lived and use these names for branches in this repository:
 | ------------------- | --------------------- | ------------------------- |
 | `feature/<name>`    | New features          | `feature/query-snapshots` |
 | `fix/<name>`        | Fixes and hotfixes    | `fix/reset-cancellation`  |
+| `work/<name>`       | Other work            | `work/browser-security`   |
 | `release/<VERSION>` | Release stabilization | `release/1.0.0-alpha.2`   |
 
 The version in a release branch name must match `package.json`, without a `v`
 prefix. See [the release guide](docs/ci.md#make-a-release) for supported versions
 and publishing steps. `main` remains the integration branch.
 
-Open feature and fix PRs against `main`. During release stabilization, open
-release-fix PRs from `fix/<name>` against the relevant `release/<VERSION>` branch.
+Open feature, fix, and work PRs against `main` or a feature branch. During release
+stabilization, open release-fix PRs from `fix/<name>` against the relevant
+`release/<VERSION>` branch.
 CI rejects PRs from incorrectly named branches in this repository. Fork branch
 names are exempt, although using the same convention is welcome.
 
@@ -56,9 +58,13 @@ For required GitHub checks and npm releases, see [CI and npm releases](docs/ci.m
 
 ### Package build
 
-`build.ts` uses tsdown to clean `dist/` and bundle the four public entry points
-as platform-neutral ES modules with shared chunks. It minifies whitespace and
-syntax, preserves runtime names, and includes TypeScript sources in source maps.
+`tools/build/build.ts` uses tsdown to clean `dist/` and bundle the four public
+entry points as platform-neutral ES modules with shared chunks. It minifies
+whitespace and syntax, preserves runtime names, and includes TypeScript sources
+in source maps.
+
+The private `tools/build` workspace owns tsdown and its stable TypeScript peer.
+The root TypeScript dependency checks first-party code and emits declarations.
 
 TypeScript emits declarations separately to preserve namespace types. A `.d.ts`
 file may have no matching `.js` when its implementation is bundled into a chunk.
